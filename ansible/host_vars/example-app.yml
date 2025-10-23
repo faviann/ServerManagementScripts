@@ -1,0 +1,21 @@
+---
+# Configuration for example-app container (WITHOUT GPU)
+# This is a basic container configuration without any special features
+
+# Container identification
+lxc_id: 201
+container_name: "example-app"
+
+# Resource allocation
+disk_size: 8
+ram_size: 8192
+swap_size: 8192
+core_count: 4
+
+# Features - no GPU or Wireguard
+enable_nvidia: false
+enable_wireguard: false
+
+# Network configuration (uses defaults from group_vars)
+# network_bridge: vmbr1
+# network_type: veth

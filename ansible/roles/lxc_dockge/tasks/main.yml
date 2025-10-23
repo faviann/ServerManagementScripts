@@ -1,0 +1,223 @@
+---
+# Tasks for configuring Docker user, Dockge, and inside-container setup
+
+# Check and copy template from .template folder
+- name: Check if ZFS volume is mounted on Proxmox host
+  ansible.builtin.shell: mount | grep "{{ zfs_volume_path }}" || echo "not_mounted"
+  register: zfs_mount_check
+  changed_when: false
+
+- name: Fail if ZFS volume is not mounted
+  ansible.builtin.fail:
+    msg: "ZFS volume {{ zfs_volume_path }} is not mounted. Please mount it first."
+  when: "'not_mounted' in zfs_mount_check.stdout"
+
+- name: Check if container subfolder exists in ZFS volume
+  ansible.builtin.stat:
+    path: "{{ zfs_volume_path }}/{{ container_name }}"
+  register: container_subfolder
+
+- name: Check if .template folder exists
+  ansible.builtin.stat:
+    path: "{{ template_source }}"
+  register: template_folder
+  when: not container_subfolder.stat.exists
+
+- name: Copy .template folder to container subfolder
+  ansible.builtin.copy:
+    src: "{{ template_source }}/"
+    dest: "{{ zfs_volume_path }}/{{ container_name }}/"
+    owner: "1001"
+    group: "1001"
+    mode: preserve
+    remote_src: true
+  when: 
+    - not container_subfolder.stat.exists
+    - template_folder.stat.exists
+
+# Update system packages inside container
+- name: Update package cache inside container
+  ansible.builtin.shell: |
+    pct exec {{ lxc_id }} -- bash -c "apt update"
+  register: apt_update
+  changed_when: "'Reading package lists' in apt_update.stdout"
+
+- name: Upgrade packages inside container
+  ansible.builtin.shell: |
+    pct exec {{ lxc_id }} -- bash -c "DEBIAN_FRONTEND=noninteractive apt upgrade -y"
+  register: apt_upgrade
+  changed_when: "'0 upgraded' not in apt_upgrade.stdout"
+
+# Check if bind mount already exists
+- name: Check if bind mount already exists in container
+  ansible.builtin.shell: |
+    pct exec {{ lxc_id }} -- bash -c "mount | grep '/conf/docker' && echo 'exists' || echo 'not_found'"
+  register: bind_mount_check
+  changed_when: false
+
+- name: Create bind mount for Docker configuration
+  ansible.builtin.shell: |
+    pct exec {{ lxc_id }} -- bash -c "mount --bind /shared/{{ container_name }} /conf/docker"
+  when: "'not_found' in bind_mount_check.stdout"
+
+# Check if fstab entry exists
+- name: Check if fstab entry exists
+  ansible.builtin.shell: |
+    pct exec {{ lxc_id }} -- bash -c "grep -q '/conf/docker' /etc/fstab && echo 'exists' || echo 'not_found'"
+  register: fstab_check
+  changed_when: false
+
+- name: Add bind mount to fstab
+  ansible.builtin.shell: |
+    pct exec {{ lxc_id }} -- bash -c "echo '/shared/{{ container_name }} /conf/docker none bind 0 0' >> /etc/fstab"
+  when: "'not_found' in fstab_check.stdout"
+
+# Create Docker user
+- name: Check if dockeruser already exists
+  ansible.builtin.shell: |
+    pct exec {{ lxc_id }} -- bash -c "id {{ docker_user }} 2>/dev/null && echo 'exists' || echo 'not_found'"
+  register: dockeruser_check
+  changed_when: false
+
+- name: Create dockeruser without password
+  ansible.builtin.shell: |
+    pct exec {{ lxc_id }} -- bash -c "adduser --gecos '' --disabled-password {{ docker_user }}"
+  when: "'not_found' in dockeruser_check.stdout"
+
+- name: Remove password for dockeruser
+  ansible.builtin.shell: |
+    pct exec {{ lxc_id }} -- bash -c "passwd -d {{ docker_user }}"
+  when: "'not_found' in dockeruser_check.stdout"
+
+- name: Add dockeruser to docker group
+  ansible.builtin.shell: |
+    pct exec {{ lxc_id }} -- bash -c "usermod -aG docker {{ docker_user }}"
+  when: "'not_found' in dockeruser_check.stdout"
+
+- name: Add dockeruser to sudo group
+  ansible.builtin.shell: |
+    pct exec {{ lxc_id }} -- bash -c "usermod -aG sudo {{ docker_user }}"
+  when: "'not_found' in dockeruser_check.stdout"
+
+# Configure NVIDIA Container Toolkit (if NVIDIA is enabled)
+- name: Install gpg for NVIDIA toolkit (if NVIDIA enabled)
+  ansible.builtin.shell: |
+    pct exec {{ lxc_id }} -- bash -c "DEBIAN_FRONTEND=noninteractive apt install -y gpg"
+  when: enable_nvidia | bool
+  register: gpg_install
+  changed_when: "'0 newly installed' not in gpg_install.stdout"
+
+- name: Check if NVIDIA container toolkit is installed
+  ansible.builtin.shell: |
+    pct exec {{ lxc_id }} -- bash -c "dpkg -l | grep nvidia-container-toolkit && echo 'exists' || echo 'not_found'"
+  register: nvidia_toolkit_check
+  changed_when: false
+  when: enable_nvidia | bool
+
+- name: Add NVIDIA container toolkit GPG key
+  ansible.builtin.shell: |
+    pct exec {{ lxc_id }} -- bash -c "curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg"
+  when: 
+    - enable_nvidia | bool
+    - "'not_found' in nvidia_toolkit_check.stdout"
+
+- name: Add NVIDIA container toolkit repository
+  ansible.builtin.shell: |
+    pct exec {{ lxc_id }} -- bash -c "curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list"
+  when: 
+    - enable_nvidia | bool
+    - "'not_found' in nvidia_toolkit_check.stdout"
+
+- name: Update apt cache after adding NVIDIA repository
+  ansible.builtin.shell: |
+    pct exec {{ lxc_id }} -- bash -c "apt-get update"
+  when: 
+    - enable_nvidia | bool
+    - "'not_found' in nvidia_toolkit_check.stdout"
+
+- name: Install NVIDIA container toolkit
+  ansible.builtin.shell: |
+    pct exec {{ lxc_id }} -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-container-toolkit"
+  when: 
+    - enable_nvidia | bool
+    - "'not_found' in nvidia_toolkit_check.stdout"
+  register: nvidia_toolkit_install
+
+- name: Configure NVIDIA container toolkit for Docker
+  ansible.builtin.shell: |
+    pct exec {{ lxc_id }} -- bash -c "nvidia-ctk runtime configure --runtime=docker"
+  when: 
+    - enable_nvidia | bool
+    - nvidia_toolkit_install.changed
+
+- name: Display manual NVIDIA configuration step
+  ansible.builtin.debug:
+    msg: |
+      IMPORTANT: Manual step required for NVIDIA setup!
+      Please run the following command inside the container:
+      pct enter {{ lxc_id }}
+      Then edit /etc/nvidia-container-runtime/config.toml
+      Change: no-cgroups = false
+      To:     no-cgroups = true
+      Then restart docker: systemctl restart docker
+  when: 
+    - enable_nvidia | bool
+    - nvidia_toolkit_install.changed
+
+# Start Dockge
+- name: Check if Dockge is already running
+  ansible.builtin.shell: |
+    pct exec {{ lxc_id }} -- bash -c "cd {{ dockge_path }} && docker compose ps | grep dockge | grep -q Up && echo 'running' || echo 'not_running'"
+  register: dockge_status
+  changed_when: false
+  failed_when: false
+
+- name: Start Dockge with docker compose
+  ansible.builtin.shell: |
+    pct exec {{ lxc_id }} -- bash -c "cd {{ dockge_path }} && sudo -u {{ docker_user }} docker compose up -d"
+  when: "'not_running' in dockge_status.stdout"
+  register: dockge_start
+
+# Configure journald
+- name: Check if journald configuration exists
+  ansible.builtin.shell: |
+    pct exec {{ lxc_id }} -- bash -c "grep -q 'SystemMaxUse' /etc/systemd/journald.conf && echo 'exists' || echo 'not_found'"
+  register: journald_check
+  changed_when: false
+
+- name: Backup journald.conf
+  ansible.builtin.shell: |
+    pct exec {{ lxc_id }} -- bash -c "cp /etc/systemd/journald.conf /etc/systemd/journald.conf.bak"
+  when: "'not_found' in journald_check.stdout"
+
+- name: Configure journald log limits
+  ansible.builtin.shell: |
+    pct exec {{ lxc_id }} -- bash -c "cat >> /etc/systemd/journald.conf << 'EOL'
+
+    [Journal]
+    SystemMaxUse={{ journald_max_use }}
+    SystemMaxFileSize={{ journald_max_file_size }}
+    EOL"
+  when: "'not_found' in journald_check.stdout"
+
+- name: Restart journald service
+  ansible.builtin.shell: |
+    pct exec {{ lxc_id }} -- bash -c "systemctl restart systemd-journald"
+  when: "'not_found' in journald_check.stdout"
+
+# Final message and reboot
+- name: Display success message
+  ansible.builtin.debug:
+    msg: |
+      {{ container_name }} ({{ lxc_id }}) configured successfully!
+      Next steps:
+      1) Use Dockge to configure your Docker stacks via the URL http://{{ container_name }}.faviann.vms
+      2) Test things are working out.
+      Container will be rebooted now for all changes to take effect.
+
+- name: Reboot container for all changes to take effect
+  ansible.builtin.shell: |
+    pct exec {{ lxc_id }} -- bash -c "reboot"
+  async: 1
+  poll: 0
+  ignore_errors: true

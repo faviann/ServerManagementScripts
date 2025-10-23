@@ -1,0 +1,41 @@
+---
+# Tasks for configuring Wireguard/VPN tunneling in LXC containers
+
+- name: Get container configuration file path
+  ansible.builtin.set_fact:
+    container_conf: "/etc/pve/lxc/{{ lxc_id }}.conf"
+
+- name: Check if Wireguard/tun device configuration already exists
+  ansible.builtin.shell: grep -q "/dev/net/tun" {{ container_conf }} && echo "exists" || echo "not_found"
+  register: wireguard_check
+  changed_when: false
+
+- name: Add Wireguard/VPN tun device mount to LXC configuration
+  ansible.builtin.lineinfile:
+    path: "{{ container_conf }}"
+    line: "lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file"
+    create: false
+  when: 
+    - enable_wireguard | bool
+    - "'not_found' in wireguard_check.stdout"
+
+- name: Restart container after Wireguard configuration
+  ansible.builtin.shell: pct stop {{ lxc_id }} && sleep 5 && pct start {{ lxc_id }}
+  when: 
+    - enable_wireguard | bool
+    - "'not_found' in wireguard_check.stdout"
+
+- name: Wait for container to be ready after Wireguard setup
+  ansible.builtin.wait_for:
+    timeout: 30
+  delegate_to: localhost
+  when: 
+    - enable_wireguard | bool
+    - "'not_found' in wireguard_check.stdout"
+
+- name: Additional wait for container initialization
+  ansible.builtin.pause:
+    seconds: 10
+  when: 
+    - enable_wireguard | bool
+    - "'not_found' in wireguard_check.stdout"

@@ -1,0 +1,27 @@
+# Ansible artifacts
+ansible/*.log
+ansible/*.retry
+ansible/.ansible/
+ansible/__pycache__/
+ansible/*.pyc
+
+# Fact cache
+/tmp/ansible_facts/
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+/tmp/

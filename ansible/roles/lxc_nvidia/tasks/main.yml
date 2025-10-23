@@ -1,0 +1,66 @@
+---
+# Tasks for configuring NVIDIA GPU passthrough in LXC containers
+
+- name: Get container configuration file path
+  ansible.builtin.set_fact:
+    container_conf: "/etc/pve/lxc/{{ lxc_id }}.conf"
+
+- name: Check if NVIDIA configuration already exists
+  ansible.builtin.shell: grep -q "NVIDIA_VISIBLE_DEVICES" {{ container_conf }} && echo "exists" || echo "not_found"
+  register: nvidia_check
+  changed_when: false
+
+- name: Add NVIDIA GPU passthrough configuration to LXC
+  ansible.builtin.blockinfile:
+    path: "{{ container_conf }}"
+    marker: "# {mark} ANSIBLE MANAGED NVIDIA GPU PASSTHROUGH"
+    block: |
+      {% for config in nvidia_lxc_configs %}
+      {{ config }}
+      {% endfor %}
+    create: false
+  when: 
+    - enable_nvidia | bool
+    - "'not_found' in nvidia_check.stdout"
+  notify: restart lxc
+
+- name: Check if container is running
+  ansible.builtin.shell: pct status {{ lxc_id }}
+  register: container_running
+  changed_when: false
+
+- name: Ensure container is stopped before NVIDIA configuration
+  ansible.builtin.shell: pct stop {{ lxc_id }}
+  when: 
+    - enable_nvidia | bool
+    - "'running' in container_running.stdout"
+    - "'not_found' in nvidia_check.stdout"
+
+- name: Wait for container to stop
+  ansible.builtin.wait_for:
+    timeout: 10
+  delegate_to: localhost
+  when: 
+    - enable_nvidia | bool
+    - "'not_found' in nvidia_check.stdout"
+
+- name: Start container after NVIDIA configuration
+  ansible.builtin.shell: pct start {{ lxc_id }}
+  when: 
+    - enable_nvidia | bool
+    - "'not_found' in nvidia_check.stdout"
+
+- name: Wait for container to be ready after NVIDIA setup
+  ansible.builtin.wait_for:
+    timeout: 30
+  delegate_to: localhost
+  when: 
+    - enable_nvidia | bool
+    - "'not_found' in nvidia_check.stdout"
+
+- name: Additional wait for container initialization
+  ansible.builtin.pause:
+    seconds: 10
+  when: 
+    - enable_nvidia | bool
+    - "'not_found' in nvidia_check.stdout"

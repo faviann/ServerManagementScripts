@@ -1,0 +1,110 @@
+---
+# Tasks for creating LXC containers
+# This role handles container creation and initial configuration
+
+- name: Check if LXC container already exists
+  ansible.builtin.shell: pct status {{ lxc_id }} 2>/dev/null || echo "not_found"
+  register: container_status
+  changed_when: false
+  failed_when: false
+
+- name: Display container status
+  ansible.builtin.debug:
+    msg: "Container {{ lxc_id }} status: {{ container_status.stdout }}"
+
+- name: Check if LXC template exists
+  ansible.builtin.stat:
+    path: "/var/lib/vz/template/cache/{{ lxc_template }}_amd64.tar.zst"
+  register: template_file
+  when: "'not_found' in container_status.stdout"
+
+- name: Download Debian 12 template if not present
+  ansible.builtin.shell: |
+    pveam update
+    pveam download {{ lxc_storage }} {{ lxc_template }}_amd64.tar.zst
+  when: 
+    - "'not_found' in container_status.stdout"
+    - not template_file.stat.exists
+  register: template_download
+
+- name: Create LXC container using pct create
+  ansible.builtin.shell: |
+    pct create {{ lxc_id }} \
+      {{ lxc_storage }}:vztmpl/{{ lxc_template }}_amd64.tar.zst \
+      --hostname {{ container_name }} \
+      --rootfs {{ lxc_storage }}:{{ disk_size }} \
+      --memory {{ ram_size }} \
+      --swap {{ swap_size }} \
+      --cores {{ core_count }} \
+      --net0 name=eth0,bridge={{ network_bridge }},ip=dhcp,ip6=auto,type={{ network_type }} \
+      --unprivileged 1 \
+      --onboot 0 \
+      --features nesting=1
+  when: "'not_found' in container_status.stdout"
+  register: container_created
+
+- name: Get container configuration file path
+  ansible.builtin.set_fact:
+    container_conf: "/etc/pve/lxc/{{ lxc_id }}.conf"
+
+- name: Extract MAC address from container configuration
+  ansible.builtin.shell: grep -Po '(?<=hwaddr=)[^,]+' {{ container_conf }}
+  register: mac_address
+  changed_when: false
+  when: container_created.changed or 'running' in container_status.stdout or 'stopped' in container_status.stdout
+
+- name: Set MAC address fact
+  ansible.builtin.set_fact:
+    container_mac: "{{ mac_address.stdout }}"
+  when: mac_address.stdout is defined
+
+- name: Ensure container is stopped before adding mount points
+  ansible.builtin.shell: pct stop {{ lxc_id }}
+  when: container_created.changed or 'running' in container_status.stdout
+  ignore_errors: true
+
+- name: Wait for container to stop
+  ansible.builtin.wait_for:
+    timeout: 10
+  delegate_to: localhost
+  when: container_created.changed or 'running' in container_status.stdout
+
+- name: Check if mp0 is already configured
+  ansible.builtin.shell: grep -q "^mp0:" {{ container_conf }} && echo "exists" || echo "not_found"
+  register: mp0_check
+  changed_when: false
+
+- name: Configure mp0 mount point (shared volume)
+  ansible.builtin.shell: |
+    pct set {{ lxc_id }} --mp0 {{ mp0_storage }}:{{ mp0_volume }},mp={{ mp0_mountpoint }},size={{ mp0_size }}
+  when: "'not_found' in mp0_check.stdout"
+
+- name: Check if mp1 is already configured
+  ansible.builtin.shell: grep -q "^mp1:" {{ container_conf }} && echo "exists" || echo "not_found"
+  register: mp1_check
+  changed_when: false
+
+- name: Configure mp1 mount point (conf - read-only)
+  ansible.builtin.shell: |
+    pct set {{ lxc_id }} --mp1 {{ mp1_host_path }},mp={{ mp1_mountpoint }},ro=1
+  when: "'not_found' in mp1_check.stdout"
+
+- name: Check if mp2 is already configured
+  ansible.builtin.shell: grep -q "^mp2:" {{ container_conf }} && echo "exists" || echo "not_found"
+  register: mp2_check
+  changed_when: false
+
+- name: Configure mp2 mount point (ephemeral)
+  ansible.builtin.shell: |
+    pct set {{ lxc_id }} --mp2 {{ mp2_host_path }},mp={{ mp2_mountpoint }}
+  when: "'not_found' in mp2_check.stdout"
+
+- name: Check if mp3 is already configured
+  ansible.builtin.shell: grep -q "^mp3:" {{ container_conf }} && echo "exists" || echo "not_found"
+  register: mp3_check
+  changed_when: false
+
+- name: Configure mp3 mount point (data/tank)
+  ansible.builtin.shell: |
+    pct set {{ lxc_id }} --mp3 {{ mp3_host_path }},mp={{ mp3_mountpoint }}
+  when: "'not_found' in mp3_check.stdout"
