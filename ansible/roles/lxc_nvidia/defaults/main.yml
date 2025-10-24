@@ -1,0 +1,9 @@
+---
+# Role defaults for lxc_nvidia
+# NVIDIA GPU passthrough configuration
+
+nvidia_lxc_configs:
+  - "lxc.hook.pre-start: sh -c '[ ! -f /dev/nvidia0 ] && /usr/bin/nvidia-modprobe -c0 -u'"
+  - "lxc.environment: NVIDIA_VISIBLE_DEVICES=all"
+  - "lxc.environment: NVIDIA_DRIVER_CAPABILITIES=compute,utility,video"
+  - "lxc.hook.mount: /usr/share/lxc/hooks/nvidia"

@@ -1,0 +1,17 @@
+---
+# Role defaults for lxc_create
+# These can be overridden by group_vars or host_vars
+
+# Template settings
+lxc_template: "debian-12-standard"
+lxc_storage: "local"
+
+# Default resource settings (typically overridden)
+disk_size: 8
+ram_size: 8192
+swap_size: 8192
+core_count: 4
+
+# Network defaults
+network_bridge: vmbr1
+network_type: veth

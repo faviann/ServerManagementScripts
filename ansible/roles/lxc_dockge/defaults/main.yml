@@ -1,0 +1,15 @@
+---
+# Role defaults for lxc_dockge
+# Docker user and Dockge configuration
+
+docker_user: "dockeruser"
+docker_uid: 1000
+docker_gid: 1000
+
+zfs_volume_path: "/rpool/data/subvol-200-disk-1"
+template_source: "/rpool/data/subvol-200-disk-1/.template"
+
+journald_max_use: "1000M"
+journald_max_file_size: "20M"
+
+dockge_path: "/conf/docker/dockge"

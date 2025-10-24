@@ -1,0 +1,47 @@
+---
+# Tasks for configuring LXC containers
+# This role handles UID/GID mapping and basic configuration
+
+- name: Get container configuration file path
+  ansible.builtin.set_fact:
+    container_conf: "/etc/pve/lxc/{{ lxc_id }}.conf"
+
+- name: Check if UID/GID mappings already exist
+  ansible.builtin.shell: grep -q "lxc.idmap" {{ container_conf }} && echo "exists" || echo "not_found"
+  register: idmap_check
+  changed_when: false
+
+- name: Add UID/GID mappings to LXC configuration
+  ansible.builtin.blockinfile:
+    path: "{{ container_conf }}"
+    marker: "# {mark} ANSIBLE MANAGED UID/GID MAPPINGS"
+    block: |
+      {% for mapping in uid_gid_mappings %}
+      lxc.idmap: {{ mapping }}
+      {% endfor %}
+    create: false
+  when: "'not_found' in idmap_check.stdout"
+
+- name: Ensure container is stopped after configuration changes
+  ansible.builtin.shell: pct stop {{ lxc_id }}
+  ignore_errors: true
+  register: stop_result
+
+- name: Wait for container to stop
+  ansible.builtin.wait_for:
+    timeout: 10
+  delegate_to: localhost
+  when: stop_result is not failed
+
+- name: Start LXC container
+  ansible.builtin.shell: pct start {{ lxc_id }}
+  register: start_result
+  
+- name: Wait for container to be ready
+  ansible.builtin.wait_for:
+    timeout: 30
+  delegate_to: localhost
+
+- name: Wait additional time for container initialization
+  ansible.builtin.pause:
+    seconds: 10

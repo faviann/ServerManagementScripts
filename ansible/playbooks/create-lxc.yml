@@ -1,0 +1,60 @@
+---
+# Playbook to create a new LXC container with Docker and Dockge
+# Usage: ansible-playbook playbooks/create-lxc.yml -e "target_host=example-app"
+
+- name: Create and configure LXC container
+  hosts: "{{ target_host | default('lxc_containers') }}"
+  gather_facts: false
+  become: true
+
+  pre_tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - lxc_id is defined
+          - container_name is defined
+          - lxc_id | int > 100
+          - lxc_id | int < 1000
+        fail_msg: "lxc_id and container_name must be defined, and lxc_id must be between 100-1000"
+
+    - name: Display container information
+      ansible.builtin.debug:
+        msg: |
+          Creating LXC container:
+          - Name: {{ container_name }}
+          - ID: {{ lxc_id }}
+          - Disk: {{ disk_size }}GB
+          - RAM: {{ ram_size }}MB
+          - Cores: {{ core_count }}
+          - NVIDIA: {{ enable_nvidia | bool }}
+          - Wireguard: {{ enable_wireguard | bool }}
+
+  roles:
+    - role: lxc_create
+      tags: ['create', 'setup']
+
+    - role: lxc_configure
+      tags: ['configure', 'setup']
+
+    - role: lxc_nvidia
+      when: enable_nvidia | bool
+      tags: ['nvidia', 'setup']
+
+    - role: lxc_wireguard
+      when: enable_wireguard | bool
+      tags: ['wireguard', 'setup']
+
+    - role: lxc_dockge
+      tags: ['dockge', 'setup']
+
+  post_tasks:
+    - name: Display completion message
+      ansible.builtin.debug:
+        msg: |
+          ========================================
+          Container {{ container_name }} ({{ lxc_id }}) has been created successfully!
+          
+          Access Dockge at: http://{{ container_name }}.faviann.vms
+          
+          The container is rebooting. Please wait a minute before accessing it.
+          ========================================

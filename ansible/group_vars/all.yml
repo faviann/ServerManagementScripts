@@ -1,0 +1,62 @@
+---
+# Default values for all LXC containers
+# These can be overridden in host_vars/{container_name}.yml
+
+# Container resource defaults
+disk_size: 8
+ram_size: 8192
+swap_size: 8192
+core_count: 4
+
+# Network configuration
+network_bridge: vmbr1
+network_type: veth
+
+# LXC template
+lxc_template: "debian-12-standard"
+lxc_storage: "local"
+
+# Feature flags
+enable_nvidia: false
+enable_wireguard: false
+
+# Mount point configurations
+mp0_storage: "local-zfs"
+mp0_volume: "subvol-200-disk-1"
+mp0_mountpoint: "/shared"
+mp0_size: "256G"
+
+mp1_host_path: "/conf"
+mp1_mountpoint: "/conf"
+mp1_readonly: true
+
+mp2_host_path: "/ephemeral"
+mp2_mountpoint: "/ephemeral"
+
+mp3_host_path: "/tank"
+mp3_mountpoint: "/data"
+
+# UID/GID mapping for bind mounts
+uid_gid_mappings:
+  - "u 0 100000 1000"
+  - "g 0 100000 1000"
+  - "u 1000 1001 1"
+  - "g 1000 1001 1"
+  - "u 1001 101001 64535"
+  - "g 1001 101001 64535"
+
+# Docker user configuration
+docker_user: "dockeruser"
+docker_uid: 1000
+docker_gid: 1000
+
+# Template and data paths
+zfs_volume_path: "/rpool/data/subvol-200-disk-1"
+template_source: "/rpool/data/subvol-200-disk-1/.template"
+
+# Journald configuration
+journald_max_use: "1000M"
+journald_max_file_size: "20M"
+
+# Dockge configuration
+dockge_path: "/conf/docker/dockge"

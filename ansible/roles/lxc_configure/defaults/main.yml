@@ -1,0 +1,11 @@
+---
+# Role defaults for lxc_configure
+# UID/GID mapping configuration
+
+uid_gid_mappings:
+  - "u 0 100000 1000"
+  - "g 0 100000 1000"
+  - "u 1000 1001 1"
+  - "g 1000 1001 1"
+  - "u 1001 101001 64535"
+  - "g 1001 101001 64535"

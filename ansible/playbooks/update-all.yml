@@ -1,0 +1,76 @@
+---
+# Playbook to update all LXC containers
+# Usage: ansible-playbook playbooks/update-all.yml
+# This updates system packages and restarts Dockge on all containers
+
+- name: Update all LXC containers
+  hosts: lxc_containers
+  gather_facts: false
+  become: true
+  serial: 1  # Process containers one at a time to avoid resource issues
+
+  pre_tasks:
+    - name: Check if container is accessible
+      ansible.builtin.shell: pct status {{ lxc_id }} 2>/dev/null || echo "not_found"
+      register: container_status
+      changed_when: false
+
+    - name: Skip if container doesn't exist
+      ansible.builtin.meta: end_host
+      when: "'not_found' in container_status.stdout"
+
+    - name: Display update information
+      ansible.builtin.debug:
+        msg: "Updating container {{ container_name }} ({{ lxc_id }})"
+
+  tasks:
+    - name: Ensure container is running
+      ansible.builtin.shell: pct start {{ lxc_id }}
+      when: "'stopped' in container_status.stdout"
+      ignore_errors: true
+
+    - name: Wait for container to be ready
+      ansible.builtin.wait_for:
+        timeout: 30
+      delegate_to: localhost
+      when: "'stopped' in container_status.stdout"
+
+    - name: Update package cache
+      ansible.builtin.shell: |
+        pct exec {{ lxc_id }} -- bash -c "apt update"
+      register: apt_update
+      changed_when: "'Reading package lists' in apt_update.stdout"
+
+    - name: Upgrade packages
+      ansible.builtin.shell: |
+        pct exec {{ lxc_id }} -- bash -c "DEBIAN_FRONTEND=noninteractive apt upgrade -y"
+      register: apt_upgrade
+      changed_when: "'0 upgraded' not in apt_upgrade.stdout"
+
+    - name: Check if Dockge is running
+      ansible.builtin.shell: |
+        pct exec {{ lxc_id }} -- bash -c "cd {{ dockge_path }} && docker compose ps | grep dockge | grep -q Up && echo 'running' || echo 'not_running'"
+      register: dockge_check
+      changed_when: false
+      failed_when: false
+
+    - name: Restart Dockge if it was running
+      ansible.builtin.shell: |
+        pct exec {{ lxc_id }} -- bash -c "cd {{ dockge_path }} && sudo -u {{ docker_user }} docker compose restart"
+      when: "'running' in dockge_check.stdout"
+
+  post_tasks:
+    - name: Display completion message
+      ansible.builtin.debug:
+        msg: "Container {{ container_name }} ({{ lxc_id }}) updated successfully"
+
+- name: Summary
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Display final message
+      ansible.builtin.debug:
+        msg: |
+          ========================================
+          All containers have been updated!
+          ========================================

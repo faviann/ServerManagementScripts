@@ -1,0 +1,6 @@
+---
+# Handlers for lxc_configure role
+
+- name: Restart container
+  ansible.builtin.shell: pct stop {{ lxc_id }} && sleep 5 && pct start {{ lxc_id }}
+  listen: "restart lxc"

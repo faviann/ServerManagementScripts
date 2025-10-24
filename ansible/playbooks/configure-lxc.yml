@@ -1,0 +1,59 @@
+---
+# Playbook to reconfigure an existing LXC container
+# Usage: ansible-playbook playbooks/configure-lxc.yml -e "target_host=example-app"
+# This playbook is idempotent and can be run multiple times safely
+
+- name: Reconfigure existing LXC container
+  hosts: "{{ target_host | default('lxc_containers') }}"
+  gather_facts: false
+  become: true
+
+  pre_tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - lxc_id is defined
+          - container_name is defined
+        fail_msg: "lxc_id and container_name must be defined"
+
+    - name: Check if container exists
+      ansible.builtin.shell: pct status {{ lxc_id }} 2>/dev/null || echo "not_found"
+      register: container_exists
+      changed_when: false
+
+    - name: Fail if container doesn't exist
+      ansible.builtin.fail:
+        msg: "Container {{ lxc_id }} does not exist. Use create-lxc.yml to create it first."
+      when: "'not_found' in container_exists.stdout"
+
+    - name: Display reconfiguration information
+      ansible.builtin.debug:
+        msg: |
+          Reconfiguring LXC container:
+          - Name: {{ container_name }}
+          - ID: {{ lxc_id }}
+          - NVIDIA: {{ enable_nvidia | bool }}
+          - Wireguard: {{ enable_wireguard | bool }}
+
+  roles:
+    - role: lxc_configure
+      tags: ['configure']
+
+    - role: lxc_nvidia
+      when: enable_nvidia | bool
+      tags: ['nvidia']
+
+    - role: lxc_wireguard
+      when: enable_wireguard | bool
+      tags: ['wireguard']
+
+    - role: lxc_dockge
+      tags: ['dockge']
+
+  post_tasks:
+    - name: Display completion message
+      ansible.builtin.debug:
+        msg: |
+          ========================================
+          Container {{ container_name }} ({{ lxc_id }}) has been reconfigured successfully!
+          ========================================
