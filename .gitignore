@@ -5,6 +5,14 @@ ansible/.ansible/
 ansible/__pycache__/
 ansible/*.pyc
 
+# Ignore local Vault password file
+.ansible-vault-pass
+.vault-pass
+.vault-pass.txt
+vault-pass.txt
+.vault/
+*.retry
+
 # Fact cache
 /tmp/ansible_facts/
 

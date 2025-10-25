@@ -1,0 +1,23 @@
+---
+- name: Proxmox API connectivity and LXC info
+  hosts: proxmox_api
+  connection: local
+  gather_facts: false
+
+  vars:
+    _proxmox_auth:
+      api_host: "{{ proxmox_api_host }}"
+      api_token_id: "{{ proxmox_api_token_id }}"
+      api_token_secret: "{{ proxmox_api_token_secret }}"
+      validate_certs: "{{ proxmox_verify_ssl }}"
+
+  tasks:
+    - name: Get LXC containers on default node
+      community.proxmox.proxmox_lxc_info:
+        <<: "{{ _proxmox_auth }}"
+        node: "{{ proxmox_default_node }}"
+      register: _lxcs
+
+    - name: Show LXC list
+      ansible.builtin.debug:
+        var: _lxcs
