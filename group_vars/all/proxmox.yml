@@ -1,5 +1,5 @@
-proxmox_api_host: "proxmox.vms"
+proxmox_api_host: "proxmox.lan"
 proxmox_api_token_id: "ansible@pve!controller"
 proxmox_api_token_secret: "{{ vault_proxmox_api_token_secret }}"
-proxmox_default_node: "proxmox.vms"
+proxmox_default_node: "proxmox"
 proxmox_verify_ssl: false
