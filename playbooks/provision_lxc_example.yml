@@ -1,0 +1,55 @@
+---
+- name: Provision LXC via Proxmox API
+  hosts: proxmox_api
+  connection: local
+  gather_facts: false
+
+  vars:
+    _proxmox_auth:
+      api_host: "{{ proxmox_api_host }}"
+      api_token_id: "{{ proxmox_api_token_id }}"
+      api_token_secret: "{{ proxmox_api_token_secret }}"
+      validate_certs: "{{ proxmox_verify_ssl }}"
+
+    lxc_ctid: 123
+    lxc_node: "proxmox.vms"
+    lxc_hostname: "app-01"
+    lxc_ostemplate: "local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst"
+    lxc_storage: "local-zfs"
+    lxc_cores: 2
+    lxc_memory: 2048
+    lxc_net0: "name=eth0,bridge=vmbr1,ip=dhcp"
+    lxc_features: "nesting=1"
+    lxc_unprivileged: true
+    lxc_onboot: true
+    lxc_start: true
+
+  tasks:
+    - name: Ensure LXC exists and is configured
+      community.proxmox.proxmox_lxc:
+        <<: "{{ _proxmox_auth }}"
+        vmid: "{{ lxc_ctid }}"
+        node: "{{ lxc_node }}"
+        hostname: "{{ lxc_hostname }}"
+        ostemplate: "{{ lxc_ostemplate }}"
+        storage: "{{ lxc_storage }}"
+        cores: "{{ lxc_cores }}"
+        memory: "{{ lxc_memory }}"
+        net0: "{{ lxc_net0 }}"
+        features: "{{ lxc_features }}"
+        unprivileged: "{{ lxc_unprivileged }}"
+        onboot: "{{ lxc_onboot }}"
+        state: present
+      register: _lxc
+
+    - name: Start LXC if requested
+      when: lxc_start
+      community.proxmox.proxmox_lxc:
+        <<: "{{ _proxmox_auth }}"
+        vmid: "{{ lxc_ctid }}"
+        node: "{{ lxc_node }}"
+        state: started
+
+    - name: Show LXC result
+      ansible.builtin.debug:
+        var: _lxc
