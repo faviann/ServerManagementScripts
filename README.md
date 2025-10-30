@@ -20,47 +20,52 @@ This repository manages **LXC containers only**. Virtual machines (VMs/KVM) are 
 
 ## Prerequisites
 
-- **Controller**: Ubuntu LTS (unprivileged LXC or development machine)
-- **Ansible**: ansible-core 2.19.x (installed via Ansible PPA)
-- **Python packages**: proxmoxer>=2.0.1, requests>=2.31.0
-- **Ansible collections**: community.proxmox>=1.9.0, community.general>=9.0.0
-- **Network**: Controller must reach Proxmox API (HTTPS port 8006)
-- **Proxmox**: API token with appropriate LXC management permissions
+- **Controller**: Debian LTS (recommended as an unprivileged LXC or your workstation)
+- **Python**: 3.10+ with `python3-venv` and `pip` available
+- **Ansible**: ansible-core 2.19 / Ansible 12 (installed inside a virtual environment)
+- **Python packages**: Installed from `requirements/pip.txt`
+- **Ansible collections**: Installed from `collections/requirements.yml`
+- **Network**: Controller must reach the Proxmox API (HTTPS port 8006)
+- **Proxmox**: API token with LXC management permissions
 
 ### Proxmox Environment Defaults
 
 These defaults are configured for the target homelab:
 
-- **Node name**: `proxmox.vms`
-- **Storage pool**: `local-zfs` (for container disks)
+- **API host**: `proxmox.lan`
+- **Node name**: `proxmox`
 - **Network bridge**: `vmbr1`
-- **LXC template**: `local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst`
+- **Default template**: `local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst`
 
-You can override these in `group_vars/all/proxmox.yml` or playbook variables.
+Adjust or override them in `group_vars/all/proxmox.yml`, host variables, or playbook vars as needed for your environment.
 
 ## Quick Start
 
-### 1. Install Ansible on Controller
+### 1. Prepare a Python virtual environment
 
 ```bash
 sudo apt update
-sudo apt install -y software-properties-common
-sudo add-apt-repository --yes --update ppa:ansible/ansible
-sudo apt install -y ansible
-ansible --version  # Verify ansible-core 2.19.x
+sudo apt install -y python3-venv python3-pip
+python3 -m venv ~/.ansible-venv
+source ~/.ansible-venv/bin/activate
+python -m pip install --upgrade pip
 ```
 
-### 2. Install Dependencies
+> Reactivate the environment for future sessions with: `source ~/.ansible-venv/bin/activate`
+
+### 2. Install Python dependencies (inside the venv)
 
 ```bash
-# Install Python packages
-python3 -m pip install --user -r requirements/pip.txt
+python -m pip install -r requirements/pip.txt
+```
 
-# Install Ansible collections
+### 3. Install Ansible collections (inside the venv)
+
+```bash
 ansible-galaxy collection install -r collections/requirements.yml
 ```
 
-### 3. Configure API Credentials
+### 4. Configure API credentials
 
 Create your vault file from the example:
 
@@ -77,18 +82,18 @@ echo "your-strong-passphrase" > ~/.ansible/vault-pass.txt
 chmod 600 ~/.ansible/vault-pass.txt
 ```
 
-### 4. Verify API Connectivity
+### 5. Run connectivity checks
 
-Test connection to Proxmox API and list LXC containers:
+Validate SSH reachability to managed hosts and Proxmox API access:
 
 ```bash
-ansible-playbook -i inventory/hosts.yml playbooks/proxmox_api_check.yml \
+ansible-playbook -i inventory/hosts.yml playbooks/lab-connectivity.yml \
   --vault-password-file ~/.ansible/vault-pass.txt
 ```
 
-You should see an LXC list from node `proxmox.vms`.
+The output confirms which hosts respond to `ansible.builtin.ping` and the Proxmox API version detected.
 
-### 5. Provision Example LXC
+### 6. Provision example LXC
 
 Review and customize variables in `playbooks/provision_lxc_example.yml`, then provision:
 
@@ -112,6 +117,7 @@ ansible-playbook -i inventory/hosts.yml playbooks/provision_lxc_example.yml \
 │       ├── proxmox.yml           # Non-secret Proxmox configuration
 │       └── vault.example.yml     # Template for secrets (copy to vault.yml)
 ├── playbooks/
+│   ├── lab-connectivity.yml      # SSH + Proxmox API connectivity checks
 │   ├── proxmox_api_check.yml     # API connectivity test
 │   └── provision_lxc_example.yml # Example LXC provisioning
 ├── docs/
@@ -132,10 +138,11 @@ ansible-playbook -i inventory/hosts.yml playbooks/provision_lxc_example.yml \
 Edit `group_vars/all/proxmox.yml` to configure your environment:
 
 ```yaml
-proxmox_api_host: "proxmox.vms"           # Proxmox hostname or IP
+proxmox_api_host: "proxmox.lan"           # Proxmox hostname or IP
+proxmox_api_port: 8006                     # API port (default 8006)
 proxmox_api_token_id: "ansible@pve!controller"  # API token ID
-proxmox_default_node: "proxmox.vms"       # Default node for operations
-proxmox_verify_ssl: false                 # TLS verification (see below)
+proxmox_default_node: "proxmox"           # Default node for operations
+proxmox_verify_ssl: false                  # TLS verification (see below)
 ```
 
 ### Secret Variables (Ansible Vault)
@@ -167,6 +174,15 @@ The `inventory/hosts.yml` defines two groups:
 6. Add the secret to your `vault.yml` file
 
 ## Example Playbooks
+
+#### Connectivity validation
+
+```bash
+ansible-playbook -i inventory/hosts.yml playbooks/lab-connectivity.yml \
+  --vault-password-file ~/.ansible/vault-pass.txt
+```
+
+Runs SSH ping checks against managed hosts and calls the Proxmox `/api2/json/version` endpoint using your API token.
 
 ### Check API Connectivity
 
@@ -207,7 +223,7 @@ Customize variables in the playbook as needed.
 
 ### Cannot reach Proxmox API
 
-- Verify controller can reach Proxmox host: `curl -k https://proxmox.vms:8006`
+- Verify controller can reach Proxmox host: `curl -k https://proxmox.lan:8006`
 - Check firewall rules allow HTTPS (port 8006)
 - Verify VPN/network connectivity
 
