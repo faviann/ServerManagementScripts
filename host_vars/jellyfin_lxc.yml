@@ -1,0 +1,24 @@
+# Example LXC definition. Copy this file, rename it, and adjust values per container.
+jellyfin_lxc:
+  vmid: 303
+  hostname: jellyfin2
+  description: Jellyfin media server container managed via Ansible.
+  node: "{{ proxmox_default_node }}"
+  ostemplate: "local:/var/lib/vz/template/cache/debian-13-standard_13.1-2_amd64.tar.zst"  # Update to the template stored on your Proxmox node.
+  pool: homelab
+  cores: 4
+  memory: 16384
+  swap: 512
+  password: "CHANGE_ME"  # Use Ansible Vault or SSH keys in production.
+  rootfs: "local-lvm:8"
+  netif:
+    net0: "name=eth0,bridge=vmbr1,firewall=0,ip=dhcp,ip6=auto,type=veth" # net0: name=eth0,bridge=vmbr1,hwaddr=BC:24:11:A1:82:92
+  onboot: true
+  start: true
+  unprivileged: true
+  features:
+    - nesting=1
+    - keyctl=1
+  tags:
+    - ansible
+    - jellyfin
