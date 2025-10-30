@@ -1,0 +1,44 @@
+---
+- name: Validate SSH connectivity to managed hosts
+  hosts: all:!proxmox_api
+  gather_facts: false
+  tags:
+    - connectivity
+    - ssh
+  tasks:
+    - name: Ping hosts over SSH
+      ansible.builtin.ping:
+      register: ping_result
+
+    - name: Report reachable host
+      ansible.builtin.debug:
+        msg: >-
+          SSH reachable: {{ inventory_hostname }} (target {{ hostvars[inventory_hostname].ansible_host | default(inventory_hostname) }})
+      when: ping_result is succeeded
+
+- name: Validate Proxmox API credentials
+  hosts: proxmox_api
+  gather_facts: false
+  tags:
+    - connectivity
+    - proxmox
+  vars:
+    proxmox_api_authorization: "PVEAPIToken={{ proxmox_api_token_id }}={{ proxmox_api_token_secret }}"
+  tasks:
+    - name: Query Proxmox API version endpoint
+      ansible.builtin.uri:
+        url: "https://{{ proxmox_api_host }}:{{ proxmox_api_port }}/api2/json/version"
+        method: GET
+        headers:
+          Authorization: "{{ proxmox_api_authorization }}"
+        validate_certs: "{{ proxmox_verify_ssl }}"
+        timeout: 15
+      register: proxmox_version
+      no_log: true
+
+    - name: Show Proxmox API version details
+      ansible.builtin.debug:
+        msg: >-
+          Connected to Proxmox host {{ proxmox_api_host }} (version {{ proxmox_version.json.version | default('unknown') }}).
+      when: proxmox_version.json is defined
+      no_log: false
