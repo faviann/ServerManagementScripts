@@ -1,0 +1,8 @@
+---
+- name: Provision LXCs defined in inventory
+  hosts: lxcs
+  gather_facts: false
+  collections:
+    - community.proxmox
+  roles:
+    - role: proxmox_lxc_provision

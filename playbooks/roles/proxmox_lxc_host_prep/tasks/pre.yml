@@ -1,0 +1,93 @@
+---
+- name: Confirm container specification is available
+  ansible.builtin.assert:
+    that:
+      - proxmox_lxc_spec is defined
+      - proxmox_lxc_spec.hostname is defined
+  fail_msg: "proxmox_lxc_spec is required before running host preparation tasks"
+
+- name: Build list of bind source paths on Proxmox host
+  ansible.builtin.set_fact:
+    proxmox_lxc_host_bind_paths: "{{ (proxmox_lxc_host_bind_paths | default([])) + [host_path] }}"
+  vars:
+    host_path: "{{ (item.value | regex_search('^[^,]+')) | default('') }}"
+  loop: "{{ proxmox_lxc_spec.mounts | default({}) | dict2items }}"
+  when:
+    - item.value is string
+    - host_path | length > 0
+    - host_path.startswith('/')
+
+- name: Deduplicate bind path list
+  ansible.builtin.set_fact:
+    proxmox_lxc_host_bind_paths: "{{ proxmox_lxc_host_bind_paths | default([]) | unique }}"
+  when: proxmox_lxc_host_bind_paths is defined
+
+- name: Ensure bind source directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop: "{{ proxmox_lxc_host_bind_paths | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  delegate_to: "{{ proxmox_host_prep_delegate }}"
+  become: true
+  when: proxmox_lxc_host_bind_paths | default([]) | length > 0
+
+- name: Ensure compose base directory exists
+  ansible.builtin.file:
+    path: "{{ proxmox_lxc_compose_host_base }}"
+    state: directory
+    mode: "0755"
+  delegate_to: "{{ proxmox_host_prep_delegate }}"
+  become: true
+  when: proxmox_lxc_compose_host_base | default('') | length > 0
+
+- name: Define per-container compose destination
+  ansible.builtin.set_fact:
+    proxmox_lxc_compose_dest: "{{ proxmox_lxc_compose_host_base }}/{{ proxmox_lxc_spec.hostname }}"
+  when: proxmox_lxc_compose_host_base | default('') | length > 0
+
+- name: Ensure per-container compose directory exists
+  ansible.builtin.file:
+    path: "{{ proxmox_lxc_compose_dest }}"
+    state: directory
+    owner: "{{ proxmox_lxc_compose_owner }}"
+    group: "{{ proxmox_lxc_compose_group }}"
+    mode: "{{ proxmox_lxc_compose_dir_mode }}"
+  delegate_to: "{{ proxmox_host_prep_delegate }}"
+  become: true
+  when: proxmox_lxc_compose_dest is defined
+
+- name: Check compose template source on controller
+  ansible.builtin.stat:
+    path: "{{ proxmox_lxc_compose_template_source }}"
+  delegate_to: localhost
+  register: proxmox_lxc_compose_template_stat
+  when: proxmox_lxc_compose_template_source | default('') | length > 0
+
+- name: Copy compose scaffold to Proxmox host
+  ansible.builtin.copy:
+    src: "{{ proxmox_lxc_compose_template_source }}/"
+    dest: "{{ proxmox_lxc_compose_dest }}/"
+    owner: "{{ proxmox_lxc_compose_owner }}"
+    group: "{{ proxmox_lxc_compose_group }}"
+  delegate_to: "{{ proxmox_host_prep_delegate }}"
+  become: true
+  when:
+    - proxmox_lxc_compose_dest is defined
+    - proxmox_lxc_compose_template_source | default('') | length > 0
+    - proxmox_lxc_compose_template_stat.stat.exists
+    - proxmox_lxc_compose_template_stat.stat.isdir
+
+- name: Harmonize compose directory ownership
+  ansible.builtin.file:
+    path: "{{ proxmox_lxc_compose_dest }}"
+    state: directory
+    owner: "{{ proxmox_lxc_compose_owner }}"
+    group: "{{ proxmox_lxc_compose_group }}"
+    mode: "{{ proxmox_lxc_compose_dir_mode }}"
+    recurse: true
+  delegate_to: "{{ proxmox_host_prep_delegate }}"
+  become: true
+  when: proxmox_lxc_compose_dest is defined

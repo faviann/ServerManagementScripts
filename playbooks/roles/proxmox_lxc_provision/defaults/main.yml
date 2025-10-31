@@ -1,0 +1,11 @@
+---
+# Default delegate host for API calls towards proxmox; override if API access must happen from elsewhere.
+proxmox_api_delegate_host: localhost
+
+# Baseline container settings merged with host_vars before provisioning.
+proxmox_lxc_defaults:
+  state: present
+  update: false
+  unprivileged: true
+  onboot: true
+  start_on_create: false

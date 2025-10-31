@@ -1,0 +1,8 @@
+---
+- name: Run pre-provision host preparation
+  ansible.builtin.include_tasks: pre.yml
+  when: proxmox_lxc_host_prep_phase | lower == 'pre'
+
+- name: Run post-provision host preparation
+  ansible.builtin.include_tasks: post.yml
+  when: proxmox_lxc_host_prep_phase | lower == 'post'

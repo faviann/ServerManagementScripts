@@ -1,0 +1,13 @@
+---
+# Phase defaults allow the provisioning role to run host prep before and after LXC creation.
+proxmox_lxc_host_prep_phase: pre
+
+# Delegate for host-side operations (creating directories, editing config files, etc.).
+proxmox_host_prep_delegate: "{{ proxmox_host_delegate | default(proxmox_api_host) }}"
+
+# Compose bundle staging defaults; override as needed per environment.
+proxmox_lxc_compose_template_source: "{{ proxmox_compose_template_source | default(None) }}"
+proxmox_lxc_compose_host_base: "{{ proxmox_compose_host_base | default(None) }}"
+proxmox_lxc_compose_owner: "{{ proxmox_compose_owner | default(0) }}"
+proxmox_lxc_compose_group: "{{ proxmox_compose_group | default(0) }}"
+proxmox_lxc_compose_dir_mode: "{{ proxmox_compose_dir_mode | default('0750') }}"

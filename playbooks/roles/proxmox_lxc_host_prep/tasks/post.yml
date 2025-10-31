@@ -1,0 +1,34 @@
+---
+- name: Validate context before applying idmap
+  ansible.builtin.assert:
+    that:
+      - proxmox_lxc_spec is defined
+      - proxmox_lxc_spec.vmid is defined
+  fail_msg: "proxmox_lxc_spec with vmid is required for post host preparation"
+  when: proxmox_lxc_idmap_effective | default([]) | length > 0
+
+- name: Apply UID/GID mappings to LXC configuration when requested
+  when: proxmox_lxc_idmap_effective | default([]) | length > 0
+  block:
+    - name: Determine LXC configuration file path
+      ansible.builtin.set_fact:
+        proxmox_lxc_config_path: "/etc/pve/lxc/{{ proxmox_lxc_spec.vmid }}.conf"
+
+    - name: Check if LXC configuration exists on Proxmox host
+      ansible.builtin.stat:
+        path: "{{ proxmox_lxc_config_path }}"
+      delegate_to: "{{ proxmox_host_prep_delegate }}"
+      become: true
+      register: proxmox_lxc_config_stat
+
+    - name: Ensure UID/GID mappings are present
+      ansible.builtin.blockinfile:
+        path: "{{ proxmox_lxc_config_path }}"
+        marker: "# {mark} Ansible managed idmap"
+        block: |-
+          {% for mapping in proxmox_lxc_idmap_effective %}
+          lxc.idmap = {{ mapping }}
+          {% endfor %}
+      delegate_to: "{{ proxmox_host_prep_delegate }}"
+      become: true
+      when: proxmox_lxc_config_stat.stat.exists

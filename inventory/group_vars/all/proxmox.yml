@@ -1,6 +1,36 @@
 proxmox_api_host: "proxmox.lan"
 proxmox_api_port: 8006
+proxmox_api_user: "{{ vault_proxmox_api_user }}"
 proxmox_api_token_id: "{{ vault_proxmox_api_token_id }}"
 proxmox_api_token_secret: "{{ vault_proxmox_api_token_secret }}"
 proxmox_default_node: "proxmox"
 proxmox_verify_ssl: false
+
+# Shared storage and host prep defaults used when provisioning new LXCs.
+proxmox_master_lxc_vmid: 200
+proxmox_master_lxc_storage: local-zfs
+proxmox_master_shared_size: "256G"
+proxmox_master_shared_mountpoint: "/shared"
+
+proxmox_default_mounts:
+	mp0: "{{ proxmox_master_lxc_storage }}:subvol-{{ proxmox_master_lxc_vmid }}-disk-1,mp={{ proxmox_master_shared_mountpoint }},size={{ proxmox_master_shared_size }}"
+	mp1: "/conf,mp=/conf,ro=1"
+	mp2: "/ephemeral,mp=/ephemeral"
+	mp3: "/tank,mp=/data"
+
+proxmox_default_idmap:
+	- "u 0 100000 1000"
+	- "g 0 100000 1000"
+	- "u 1000 1001 1"
+	- "g 1000 1001 1"
+	- "u 1001 101001 64535"
+	- "g 1001 101001 64535"
+
+proxmox_lxc_host_prep_enabled: true
+proxmox_host_delegate: "{{ proxmox_api_host }}"
+proxmox_host_delegate_user: root
+proxmox_compose_template_source: "{{ playbook_dir | default('.') }}/files/lxc-compose"
+proxmox_compose_host_base: "/rpool/data/subvol-{{ proxmox_master_lxc_vmid }}-disk-1"
+proxmox_compose_owner: 1001
+proxmox_compose_group: 1001
+proxmox_compose_dir_mode: "0750"
