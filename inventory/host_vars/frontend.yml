@@ -1,0 +1,30 @@
+---
+# Host-specific configuration for frontend
+# Inherits from: small_servers, docker_hosts, service_agents
+
+# Container definition for proxmox_lxc_provision role
+proxmox_lxc:
+  vmid: 302
+  hostname: frontend
+  description: "Frontend application service managed via Ansible"
+  node: "{{ proxmox_default_node }}"
+  ostemplate: "local:/var/lib/vz/template/cache/debian-13-standard_13.1-2_amd64.tar.zst"
+  pool: homelab
+  # Resource specs inherited from small_servers group (2 cores, 2GB RAM, 8GB disk)
+  cores: "{{ lxc_cores }}"
+  memory: "{{ lxc_memory }}"
+  swap: "{{ lxc_swap | default(512) }}"
+  disk: "local-lvm:{{ lxc_disk }}"
+  netif:
+    net0: "name=eth0,bridge={{ lxc_network_bridge }},firewall=0,ip=dhcp,ip6=auto,type=veth"
+  onboot: true
+  unprivileged: true
+  features: "{{ lxc_features | default([]) }}"
+  tags:
+    - ansible
+    - frontend
+    - web
+
+proxmox_lxc_start_on_create: true
+proxmox_lxc_mounts: "{{ proxmox_default_mounts | combine({}) }}"
+proxmox_lxc_idmap: "{{ proxmox_default_idmap | list }}"

@@ -1,0 +1,21 @@
+---
+# Functional group: service_agents
+# Subset of docker_hosts that need additional Docker service management tooling
+# This group inherits all variables from docker_hosts and adds service agent tools
+
+# Service agent tools configuration flags
+configure_traefik_kop: true        # Traefik Kubernetes Operator
+configure_traefik_socket_proxy: true  # Docker socket proxy for Traefik security
+configure_dockwatch: true          # Docker container monitoring and updates
+
+# Traefik-kop configuration
+traefik_kop_enabled: true
+traefik_kop_path: "{{ docker_compose_base_path }}/traefik-kop"
+
+# Traefik socket proxy configuration
+traefik_socket_proxy_enabled: true
+traefik_socket_proxy_path: "{{ docker_compose_base_path }}/socket-proxy"
+
+# Dockwatch configuration
+dockwatch_enabled: true
+dockwatch_path: "{{ docker_compose_base_path }}/dockwatch"

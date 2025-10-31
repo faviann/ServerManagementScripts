@@ -1,0 +1,12 @@
+---
+# Resource tier: small
+# Suitable for small services and applications
+
+# LXC resource specifications
+lxc_cores: 2
+lxc_memory: 2048  # MB (2GB)
+lxc_disk: "8"     # GB
+lxc_swap: 512     # MB
+
+# Network configuration
+lxc_network_bridge: vmbr1

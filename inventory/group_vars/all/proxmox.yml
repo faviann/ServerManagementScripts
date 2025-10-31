@@ -1,3 +1,4 @@
+---
 proxmox_api_host: "proxmox.lan"
 proxmox_api_port: 8006
 proxmox_api_user: "{{ vault_proxmox_api_user }}"
@@ -13,18 +14,20 @@ proxmox_master_shared_size: "256G"
 proxmox_master_shared_mountpoint: "/shared"
 
 proxmox_default_mounts:
-	mp0: "{{ proxmox_master_lxc_storage }}:subvol-{{ proxmox_master_lxc_vmid }}-disk-1,mp={{ proxmox_master_shared_mountpoint }},size={{ proxmox_master_shared_size }}"
-	mp1: "/conf,mp=/conf,ro=1"
-	mp2: "/ephemeral,mp=/ephemeral"
-	mp3: "/tank,mp=/data"
+  mp0: >-
+    {{ proxmox_master_lxc_storage }}:subvol-{{ proxmox_master_lxc_vmid }}-disk-1,mp={{
+    proxmox_master_shared_mountpoint }},size={{ proxmox_master_shared_size }}
+  mp1: "/conf,mp=/conf,ro=1"
+  mp2: "/ephemeral,mp=/ephemeral"
+  mp3: "/tank,mp=/data"
 
 proxmox_default_idmap:
-	- "u 0 100000 1000"
-	- "g 0 100000 1000"
-	- "u 1000 1001 1"
-	- "g 1000 1001 1"
-	- "u 1001 101001 64535"
-	- "g 1001 101001 64535"
+  - "u 0 100000 1000"
+  - "g 0 100000 1000"
+  - "u 1000 1001 1"
+  - "g 1000 1001 1"
+  - "u 1001 101001 64535"
+  - "g 1001 101001 64535"
 
 proxmox_lxc_host_prep_enabled: true
 proxmox_host_delegate: "{{ proxmox_api_host }}"
