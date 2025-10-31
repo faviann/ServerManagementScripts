@@ -1,0 +1,12 @@
+---
+# Resource tier: medium
+# Suitable for medium-sized applications with moderate resource needs
+
+# LXC resource specifications
+lxc_cores: 4
+lxc_memory: 8192  # MB (8GB)
+lxc_disk: "8"     # GB
+lxc_swap: 1024    # MB
+
+# Network configuration
+lxc_network_bridge: vmbr1

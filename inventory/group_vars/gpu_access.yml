@@ -1,0 +1,13 @@
+---
+# Functional group: gpu_access
+# LXCs with GPU passthrough capabilities for hardware acceleration
+
+# GPU passthrough flag
+enable_gpu_passthrough: true
+
+# NVIDIA runtime configuration (if applicable)
+configure_nvidia_runtime: true
+
+# Additional LXC configuration for GPU access
+# This typically requires host-side configuration via proxmox_lxc_host_prep role
+gpu_device_passthrough: true

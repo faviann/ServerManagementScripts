@@ -1,3 +1,4 @@
+---
 # Container definition consumed by the proxmox_lxc_provision role.
 proxmox_lxc:
   vmid: 303

@@ -1,0 +1,12 @@
+---
+# Resource tier: large
+# Suitable for resource-intensive applications and services
+
+# LXC resource specifications
+lxc_cores: 8
+lxc_memory: 16384  # MB (16GB)
+lxc_disk: "8"      # GB
+lxc_swap: 2048     # MB
+
+# Network configuration
+lxc_network_bridge: vmbr1
