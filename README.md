@@ -37,7 +37,7 @@ These defaults are configured for the target homelab:
 - **Network bridge**: `vmbr1`
 - **Default template**: `local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst`
 
-Adjust or override them in `group_vars/all/proxmox.yml`, host variables, or playbook vars as needed for your environment.
+Adjust or override them in `inventory/group_vars/all/proxmox.yml`, host variables, or playbook vars as needed for your environment.
 
 ## Quick Start
 
@@ -70,9 +70,9 @@ ansible-galaxy collection install -r collections/requirements.yml
 Create your vault file from the example:
 
 ```bash
-cp group_vars/all/vault.example.yml group_vars/all/vault.yml
-$EDITOR group_vars/all/vault.yml  # Add your Proxmox API token secret
-ansible-vault encrypt group_vars/all/vault.yml
+cp inventory/group_vars/all/vault.yml.example inventory/group_vars/all/vault.yml
+$EDITOR inventory/group_vars/all/vault.yml  # Add your Proxmox API token secret
+ansible-vault encrypt inventory/group_vars/all/vault.yml
 ```
 
 Optional: Create a vault password file (do NOT commit):
@@ -111,11 +111,13 @@ ansible-playbook -i inventory/hosts.yml playbooks/provision_lxc_example.yml \
 ├── requirements/
 │   └── pip.txt                   # Python package dependencies
 ├── inventory/
-│   └── hosts.yml                 # Static inventory (proxmox_api group)
-├── group_vars/
-│   └── all/
-│       ├── proxmox.yml           # Non-secret Proxmox configuration
-│       └── vault.example.yml     # Template for secrets (copy to vault.yml)
+│   ├── hosts.yml                 # Static inventory file
+│   ├── group_vars/               # Group-specific variables
+│   │   └── all/
+│   │       ├── proxmox.yml       # Non-secret Proxmox configuration
+│   │       └── vault.yml         # Encrypted secrets
+│   └── host_vars/                # Host-specific variables
+│       └── jellyfin_lxc.yml      # Example host variables
 ├── playbooks/
 │   ├── lab-connectivity.yml      # SSH + Proxmox API connectivity checks
 │   ├── proxmox_api_check.yml     # API connectivity test
@@ -135,7 +137,7 @@ ansible-playbook -i inventory/hosts.yml playbooks/provision_lxc_example.yml \
 
 ### Non-Secret Variables
 
-Edit `group_vars/all/proxmox.yml` to configure your environment:
+Edit `inventory/group_vars/all/proxmox.yml` to configure your environment:
 
 ```yaml
 proxmox_api_host: "proxmox.lan"           # Proxmox hostname or IP
@@ -147,14 +149,14 @@ proxmox_verify_ssl: false                  # TLS verification (see below)
 
 ### Secret Variables (Ansible Vault)
 
-Create `group_vars/all/vault.yml` from the example and encrypt:
+Create `inventory/group_vars/all/vault.yml` from the example and encrypt:
 
 ```yaml
 vault_proxmox_api_token_secret: "your-actual-token-secret"
 ```
 
 ```bash
-ansible-vault encrypt group_vars/all/vault.yml
+ansible-vault encrypt inventory/group_vars/all/vault.yml
 ```
 
 ### Inventory
@@ -216,7 +218,7 @@ Customize variables in the playbook as needed.
 
 **TODO/Future hardening**:
 1. Install a trusted certificate on Proxmox or distribute your CA bundle to the controller
-2. Set `proxmox_verify_ssl: true` in `group_vars/all/proxmox.yml`
+2. Set `proxmox_verify_ssl: true` in `inventory/group_vars/all/proxmox.yml`
 3. Configure CA path if needed via `api_ca_path` parameter
 
 ## Troubleshooting
@@ -229,7 +231,7 @@ Customize variables in the playbook as needed.
 
 ### Authentication fails
 
-- Verify API token secret in vault: `ansible-vault view group_vars/all/vault.yml`
+- Verify API token secret in vault: `ansible-vault view inventory/group_vars/all/vault.yml`
 - Check token permissions in Proxmox web UI
 - Ensure token ID format: `user@realm!tokenid` (e.g., `ansible@pve!controller`)
 
