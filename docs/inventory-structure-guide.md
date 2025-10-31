@@ -14,17 +14,17 @@ inventory/
 │   ├── all/                           # Variables for all hosts
 │   │   ├── proxmox.yml               # Proxmox API and infrastructure config
 │   │   └── vault.yml                 # Encrypted secrets (API tokens, etc.)
-│   ├── proxmox_api.yml               # API controller configuration
+│   ├── proxmox_api/vars.yml          # API controller configuration
 │   │
-│   ├── tiny_servers.yml              # Resource tier: 1 core, 512MB RAM
-│   ├── small_servers.yml             # Resource tier: 2 cores, 2GB RAM
-│   ├── medium_servers.yml            # Resource tier: 4 cores, 8GB RAM
-│   ├── large_servers.yml             # Resource tier: 8 cores, 16GB RAM
+│   ├── tier_tiny/vars.yml         # Resource tier: 1 core, 512MB RAM
+│   ├── tier_small/vars.yml        # Resource tier: 2 cores, 2GB RAM
+│   ├── tier_medium/vars.yml       # Resource tier: 4 cores, 8GB RAM
+│   ├── tier_large/vars.yml        # Resource tier: 8 cores, 16GB RAM
 │   │
-│   ├── docker_hosts.yml              # Functional: Docker installation
-│   ├── gpu_access.yml                # Functional: GPU passthrough
-│   ├── wireguard_hosts.yml           # Functional: WireGuard VPN
-│   └── service_agents.yml            # Functional: Service management tools
+│   ├── cap_docker/vars.yml        # Functional: Docker installation
+│   ├── cap_gpu/vars.yml           # Functional: GPU passthrough
+│   ├── cap_wireguard/vars.yml     # Functional: WireGuard VPN
+│   └── cap_service_agents/vars.yml      # Functional: Service management tools
 │
 └── host_vars/                         # Host-specific variables
     ├── codeserver.yml                # VSCode server configuration
@@ -39,10 +39,10 @@ inventory/
 
 Each host belongs to **exactly ONE** resource tier group that defines its compute resources:
 
-- **tiny_servers**: Lightweight services (1 core, 512MB RAM, 8GB disk)
-- **small_servers**: Small applications (2 cores, 2GB RAM, 8GB disk)
-- **medium_servers**: Medium workloads (4 cores, 8GB RAM, 8GB disk)
-- **large_servers**: Resource-intensive apps (8 cores, 16GB RAM, 8GB disk)
+- **tier_tiny**: Lightweight services (1 core, 512MB RAM, 8GB disk)
+- **tier_small**: Small applications (2 cores, 2GB RAM, 8GB disk)
+- **tier_medium**: Medium workloads (4 cores, 8GB RAM, 8GB disk)
+- **tier_large**: Resource-intensive apps (8 cores, 16GB RAM, 8GB disk)
 
 All tiers use the same network bridge (`vmbr1`) by default.
 
@@ -50,10 +50,10 @@ All tiers use the same network bridge (`vmbr1`) by default.
 
 Hosts can belong to **MULTIPLE** functional groups based on capabilities needed:
 
-- **docker_hosts**: LXCs with Docker runtime and compose
-- **gpu_access**: LXCs with GPU passthrough for hardware acceleration
-- **wireguard_hosts**: LXCs with WireGuard kernel module access
-- **service_agents**: Subset of docker_hosts with additional tooling:
+- **cap_docker**: LXCs with Docker runtime and compose
+- **cap_gpu**: LXCs with GPU passthrough for hardware acceleration
+- **cap_wireguard**: LXCs with WireGuard kernel module access
+- **cap_service_agents**: Subset of cap_docker with additional tooling:
   - traefik-kop (Traefik Kubernetes Operator)
   - traefik-socket-proxy (Docker socket security proxy)
   - dockwatch (Container monitoring and updates)
@@ -82,7 +82,7 @@ Ansible applies variables in this order (later sources override earlier ones):
 
 ### Example: Variable Inheritance
 
-For a host named `media` in `medium_servers`, `docker_hosts`, `gpu_access`, and `service_agents`:
+For a host named `media` in `tier_medium`, `cap_docker`, `cap_gpu`, and `cap_service_agents`:
 
 ```yaml
 # Inherited variables (in merge order):
@@ -91,22 +91,22 @@ proxmox_api_host: "proxmox.lan"
 proxmox_default_node: "proxmox"
 proxmox_default_mounts: { ... }
 
-# 2. group_vars/medium_servers.yml
+# 2. group_vars/tier_medium/vars.yml
 lxc_cores: 4
 lxc_memory: 8192
 lxc_disk: "8"
 lxc_network_bridge: vmbr1
 
-# 3. group_vars/docker_hosts.yml
+# 3. group_vars/cap_docker/vars.yml
 install_docker: true
 docker_user: dockeruser
 lxc_features: [nesting=1, keyctl=1]
 
-# 4. group_vars/gpu_access.yml
+# 4. group_vars/cap_gpu/vars.yml
 enable_gpu_passthrough: true
 configure_nvidia_runtime: true
 
-# 5. group_vars/service_agents.yml
+# 5. group_vars/cap_service_agents/vars.yml
 configure_traefik_kop: true
 configure_traefik_socket_proxy: true
 configure_dockwatch: true
@@ -132,17 +132,17 @@ Choose the appropriate tier based on workload requirements:
 ### Step 2: Determine Functional Groups
 
 Select all applicable functional groups:
-- Does it run Docker? → Add to `docker_hosts`
-- Does it need GPU? → Add to `gpu_access`
-- Does it need VPN? → Add to `wireguard_hosts`
-- Is it a Docker service agent? → Add to `service_agents`
+- Does it run Docker? → Add to `cap_docker`
+- Does it need GPU? → Add to `cap_gpu`
+- Does it need VPN? → Add to `cap_wireguard`
+- Is it a Docker service agent? → Add to `cap_service_agents`
 
 ### Step 3: Add to Inventory
 
 Edit `inventory/hosts.yml`:
 
 ```yaml
-small_servers:
+tier_small:
   hosts:
     mynewhost:
       proxmox_lxc:
@@ -150,11 +150,11 @@ small_servers:
         hostname: mynewhost
         description: "My new service"
 
-docker_hosts:
+cap_docker:
   hosts:
     mynewhost:
 
-service_agents:
+cap_service_agents:
   hosts:
     mynewhost:
 ```
@@ -166,7 +166,7 @@ Create `inventory/host_vars/mynewhost.yml`:
 ```yaml
 ---
 # Host-specific configuration for mynewhost
-# Inherits from: small_servers, docker_hosts, service_agents
+# Inherits from: tier_small, cap_docker, cap_service_agents
 
 proxmox_lxc:
   vmid: 305
@@ -207,7 +207,7 @@ When overriding resource allocations, add a comment explaining why:
 
 ```yaml
 # OVERRIDE: Extra memory for heavy transcoding workload
-memory: 32768  # 32GB instead of large_servers default 16GB
+memory: 32768  # 32GB instead of tier_large default 16GB
 ```
 
 ### 3. Keep Defaults Generic
@@ -228,8 +228,8 @@ cores: 4
 
 ### 5. Organize Functional Groups Logically
 
-- Most Docker hosts will also be service_agents (exceptions like reverse-proxy nodes)
-- All service_agents should be in docker_hosts
+- Most Docker hosts will also be cap_service_agents (exceptions like reverse-proxy nodes)
+- All cap_service_agents should be in cap_docker
 - GPU access is typically independent of other functional groups
 
 ### 6. Network Resolution
@@ -247,25 +247,25 @@ Hosts will be resolved via DNS as `{hostname}.faviann.vms` or through Proxmox AP
    - Host vars (vmid, hostname, specific config)
 3. **After provisioning**, control node can connect to LXC via SSH for configuration
 4. Configuration playbooks use functional group variables to install software:
-   - `docker_hosts` → Install Docker
-   - `gpu_access` → Configure GPU passthrough
-   - `service_agents` → Deploy traefik-kop, socket-proxy, dockwatch
+   - `cap_docker` → Install Docker
+   - `cap_gpu` → Configure GPU passthrough
+   - `cap_service_agents` → Deploy traefik-kop, socket-proxy, dockwatch
 
 ### Example Playbook Targets
 
 ```yaml
 # Provision all small servers
-- hosts: small_servers
+- hosts: tier_small
   roles:
     - proxmox_lxc_provision
 
 # Configure all Docker hosts
-- hosts: docker_hosts
+- hosts: cap_docker
   roles:
     - docker_install
 
 # Configure service agents
-- hosts: service_agents
+- hosts: cap_service_agents
   roles:
     - traefik_kop
     - traefik_socket_proxy
@@ -283,8 +283,8 @@ When a variable is defined in multiple groups, Ansible's merge order determines 
 1. **Use unique variable names per group**
    ```yaml
    # Good: Prefixed variable names
-   docker_user: dockeruser           # in docker_hosts.yml
-   wireguard_interface: wg0          # in wireguard_hosts.yml
+   docker_user: dockeruser           # in cap_docker.yml
+   wireguard_interface: wg0          # in cap_wireguard.yml
    
    # Avoid: Generic names that might conflict
    user: dockeruser
@@ -309,7 +309,7 @@ When a variable is defined in multiple groups, Ansible's merge order determines 
 
 3. **Document merge behavior in group_vars**
    ```yaml
-   # This variable merges with docker_hosts.lxc_features
+   # This variable merges with cap_docker.lxc_features
    lxc_features:
      - nesting=1
      - keyctl=1
@@ -395,7 +395,7 @@ ansible-playbook playbooks/lxc-provision.yml --check --diff
 ansible-playbook playbooks/lxc-provision.yml --limit codeserver
 
 # Provision by resource tier
-ansible-playbook playbooks/lxc-provision.yml --limit small_servers
+ansible-playbook playbooks/lxc-provision.yml --limit tier_small
 ```
 
 ## Troubleshooting

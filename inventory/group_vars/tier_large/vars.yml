@@ -1,6 +1,6 @@
 ---
 # Resource tier: large
-# Suitable for resource-intensive applications and services
+# Provisioned for heavier services and media workloads requiring headroom.
 
 # LXC resource specifications
 lxc_cores: 8

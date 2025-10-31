@@ -1,6 +1,6 @@
 ---
 # Resource tier: small
-# Suitable for small services and applications
+# Balanced for lightweight services and development tooling.
 
 # LXC resource specifications
 lxc_cores: 2

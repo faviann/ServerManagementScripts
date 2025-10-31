@@ -37,10 +37,10 @@ Old variables in `archive/ansible/group_vars/all.yml` → New resource tier file
 | Old Variable | New Variable | Location |
 |-------------|-------------|----------|
 | `disk_size: 8` | `lxc_disk: "8"` | `group_vars/{tier}_servers.yml` |
-| `ram_size: 8192` | `lxc_memory: 8192` | `group_vars/{tier}_servers.yml` |
-| `core_count: 4` | `lxc_cores: 4` | `group_vars/{tier}_servers.yml` |
-| `swap_size: 8192` | `lxc_swap: 8192` | `group_vars/{tier}_servers.yml` |
-| `network_bridge: vmbr1` | `lxc_network_bridge: vmbr1` | `group_vars/{tier}_servers.yml` |
+| `ram_size: 8192` | `lxc_memory: 8192` | `group_vars/tier_<tier>/vars.yml` |
+| `core_count: 4` | `lxc_cores: 4` | `group_vars/tier_<tier>/vars.yml` |
+| `swap_size: 8192` | `lxc_swap: 8192` | `group_vars/tier_<tier>/vars.yml` |
+| `network_bridge: vmbr1` | `lxc_network_bridge: vmbr1` | `group_vars/tier_<tier>/vars.yml` |
 
 ### Functional Variables
 
@@ -48,9 +48,9 @@ Old feature flags → New functional group membership:
 
 | Old Variable | New Approach | Location |
 |-------------|-------------|----------|
-| `enable_nvidia: true` | Add to `gpu_access` group | `hosts.yml` + `group_vars/gpu_access.yml` |
-| `enable_wireguard: true` | Add to `wireguard_hosts` group | `hosts.yml` + `group_vars/wireguard_hosts.yml` |
-| `enable_docker: true` | Add to `docker_hosts` group | `hosts.yml` + `group_vars/docker_hosts.yml` |
+| `enable_nvidia: true` | Add to `cap_gpu` group | `hosts.yml` + `group_vars/cap_gpu/vars.yml` |
+| `enable_wireguard: true` | Add to `cap_wireguard` group | `hosts.yml` + `group_vars/cap_wireguard/vars.yml` |
+| `enable_docker: true` | Add to `cap_docker` group | `hosts.yml` + `group_vars/cap_docker/vars.yml` |
 
 ### Infrastructure Variables
 
@@ -69,16 +69,16 @@ Old `archive/ansible/group_vars/all.yml` → New `inventory/group_vars/all/proxm
 For each host in the old inventory, determine:
 
 1. **Which resource tier?** (Look at `ram_size`, `core_count`)
-   - 512MB RAM → `tiny_servers`
-   - 2GB RAM → `small_servers`
-   - 8GB RAM → `medium_servers`
-   - 16GB+ RAM → `large_servers`
+   - 512MB RAM → `tier_tiny`
+   - 2GB RAM → `tier_small`
+   - 8GB RAM → `tier_medium`
+   - 16GB+ RAM → `tier_large`
 
 2. **Which functional groups?** (Look at feature flags)
-   - `enable_docker: true` → Add to `docker_hosts`
-   - `enable_nvidia: true` → Add to `gpu_access`
-   - `enable_wireguard: true` → Add to `wireguard_hosts`
-   - Docker + needs service tooling → Add to `service_agents`
+   - `enable_docker: true` → Add to `cap_docker`
+   - `enable_nvidia: true` → Add to `cap_gpu`
+   - `enable_wireguard: true` → Add to `cap_wireguard`
+   - Docker + needs service tooling → Add to `cap_service_agents`
 
 ### Step 2: Create Host Entries
 
@@ -96,26 +96,26 @@ lxc_containers:
 
 **New:**
 ```yaml
-small_servers:
+tier_small:
   hosts:
     example-app:
       proxmox_lxc:
         vmid: 201
         hostname: example-app
 
-large_servers:
+tier_large:
   hosts:
     gpu-app:
       proxmox_lxc:
         vmid: 202
         hostname: gpu-app
 
-docker_hosts:
+cap_docker:
   hosts:
     example-app:
     gpu-app:
 
-gpu_access:
+cap_gpu:
   hosts:
     gpu-app:
 ```
@@ -139,7 +139,7 @@ enable_docker: true
 ```yaml
 ---
 # host_vars/example-app.yml
-# Inherits from: small_servers, docker_hosts
+# Inherits from: tier_small, cap_docker
 
 proxmox_lxc:
   vmid: 201
@@ -148,15 +148,15 @@ proxmox_lxc:
   node: "{{ proxmox_default_node }}"
   ostemplate: "local:/var/lib/vz/template/cache/debian-13-standard_13.1-2_amd64.tar.zst"
   pool: homelab
-  cores: "{{ lxc_cores }}"              # Inherited: 2 from small_servers
-  memory: "{{ lxc_memory }}"            # Inherited: 2048 from small_servers
-  swap: "{{ lxc_swap | default(512) }}" # Inherited: 512 from small_servers
-  disk: "local-lvm:{{ lxc_disk }}"      # Inherited: "8" from small_servers
+  cores: "{{ lxc_cores }}"              # Inherited: 2 from tier_small
+  memory: "{{ lxc_memory }}"            # Inherited: 2048 from tier_small
+  swap: "{{ lxc_swap | default(512) }}" # Inherited: 512 from tier_small
+  disk: "local-lvm:{{ lxc_disk }}"      # Inherited: "8" from tier_small
   netif:
     net0: "name=eth0,bridge={{ lxc_network_bridge }},firewall=0,ip=dhcp,ip6=auto,type=veth"
   onboot: true
   unprivileged: true
-  features: "{{ lxc_features | default([]) }}"  # Inherited from docker_hosts
+  features: "{{ lxc_features | default([]) }}"  # Inherited from cap_docker
   tags:
     - ansible
     - example
@@ -173,13 +173,13 @@ If a host had custom resource values different from its tier:
 **Old:**
 ```yaml
 # host_vars/special-app.yml
-ram_size: 32768  # More than large_servers default
+ram_size: 32768  # More than tier_large default
 ```
 
 **New:**
 ```yaml
 # host_vars/special-app.yml
-# Still in large_servers group, but override memory
+# Still in tier_large group, but override memory
 proxmox_lxc:
   cores: "{{ lxc_cores }}"    # Inherit from group
   memory: 32768               # OVERRIDE: 32GB instead of 16GB
@@ -212,11 +212,11 @@ enable_docker: true
 **New structure:**
 ```yaml
 # inventory/hosts.yml
-small_servers:
+tier_small:
   hosts:
     myapp:
 
-docker_hosts:
+cap_docker:
   hosts:
     myapp:
 
@@ -226,7 +226,7 @@ lxcs:
 
 # inventory/host_vars/myapp.yml
 ---
-# Inherits from: small_servers, docker_hosts
+# Inherits from: tier_small, cap_docker
 proxmox_lxc:
   vmid: 210
   hostname: myapp
@@ -259,15 +259,15 @@ enable_nvidia: true
 **New structure:**
 ```yaml
 # inventory/hosts.yml
-large_servers:
+tier_large:
   hosts:
     plex:
 
-docker_hosts:
+cap_docker:
   hosts:
     plex:
 
-gpu_access:
+cap_gpu:
   hosts:
     plex:
 
@@ -277,14 +277,14 @@ lxcs:
 
 # inventory/host_vars/plex.yml
 ---
-# Inherits from: large_servers, docker_hosts, gpu_access
+# Inherits from: tier_large, cap_docker, cap_gpu
 proxmox_lxc:
   vmid: 220
   hostname: plex
   description: "Plex media server with GPU transcoding"
   node: "{{ proxmox_default_node }}"
-  cores: "{{ lxc_cores }}"      # 8 from large_servers
-  memory: "{{ lxc_memory }}"    # 16384 from large_servers
+  cores: "{{ lxc_cores }}"      # 8 from tier_large
+  memory: "{{ lxc_memory }}"    # 16384 from tier_large
   # ... standard config
   tags:
     - ansible

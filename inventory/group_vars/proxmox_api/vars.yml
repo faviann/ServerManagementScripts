@@ -1,0 +1,3 @@
+---
+# Variables for the Proxmox API controller host(s).
+# Populate with connection details or leave empty if using host_vars.

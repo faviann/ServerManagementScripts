@@ -12,10 +12,10 @@ Created group_vars files for four resource tiers:
 
 | Tier | CPU | RAM | Disk | File |
 |------|-----|-----|------|------|
-| tiny | 1 core | 512 MB | 8 GB | `inventory/group_vars/tiny_servers.yml` |
-| small | 2 cores | 2 GB | 8 GB | `inventory/group_vars/small_servers.yml` |
-| medium | 4 cores | 8 GB | 8 GB | `inventory/group_vars/medium_servers.yml` |
-| large | 8 cores | 16 GB | 8 GB | `inventory/group_vars/large_servers.yml` |
+| tiny | 1 core | 512 MB | 8 GB | `inventory/group_vars/tier_tiny/vars.yml` |
+| small | 2 cores | 2 GB | 8 GB | `inventory/group_vars/tier_small/vars.yml` |
+| medium | 4 cores | 8 GB | 8 GB | `inventory/group_vars/tier_medium/vars.yml` |
+| large | 8 cores | 16 GB | 8 GB | `inventory/group_vars/tier_large/vars.yml` |
 
 All tiers use network bridge `vmbr1` by default.
 
@@ -25,12 +25,12 @@ Created group_vars files for functional capabilities:
 
 | Group | Purpose | Key Variables |
 |-------|---------|---------------|
-| `docker_hosts` | Docker runtime and compose | `install_docker`, `lxc_features`, `docker_user` |
-| `gpu_access` | GPU passthrough capabilities | `enable_gpu_passthrough`, `configure_nvidia_runtime` |
-| `wireguard_hosts` | WireGuard VPN kernel module | `enable_wireguard`, `wireguard_kernel_module_access` |
-| `service_agents` | Service management tools | `configure_traefik_kop`, `configure_traefik_socket_proxy`, `configure_dockwatch` |
+| `cap_docker` | Docker runtime and compose | `install_docker`, `lxc_features`, `docker_user` |
+| `cap_gpu` | GPU passthrough capabilities | `enable_gpu_passthrough`, `configure_nvidia_runtime` |
+| `cap_wireguard` | WireGuard VPN kernel module | `enable_wireguard`, `wireguard_kernel_module_access` |
+| `cap_service_agents` | Service management tools | `configure_traefik_kop`, `configure_traefik_socket_proxy`, `configure_dockwatch` |
 
-**Note:** `service_agents` is designed as a subset of `docker_hosts` for hosts that need additional service tooling.
+**Note:** `cap_service_agents` is designed as a subset of `cap_docker` for hosts that need additional service tooling.
 
 ### 3. Updated Inventory Structure
 
@@ -38,16 +38,16 @@ File: `inventory/hosts.yml`
 
 ```
 Resource Tiers:
-  - tiny_servers: (empty - placeholder for future hosts)
-  - small_servers: codeserver, frontend
-  - medium_servers: media
-  - large_servers: jellyfin
+  - tier_tiny: (empty - placeholder for future hosts)
+  - tier_small: codeserver, frontend
+  - tier_medium: media
+  - tier_large: jellyfin
 
-Functional Groups:
-  - docker_hosts: codeserver, frontend, media, jellyfin
-  - gpu_access: media, jellyfin
-  - wireguard_hosts: (empty - placeholder)
-  - service_agents: codeserver, frontend, media
+Capability Groups:
+  - cap_docker: codeserver, frontend, media, jellyfin
+  - cap_gpu: media, jellyfin
+  - cap_wireguard: (empty - placeholder)
+  - cap_service_agents: codeserver, frontend, media
     (Note: jellyfin is intentionally excluded - doesn't need traefik tools)
 ```
 
@@ -57,27 +57,23 @@ Created host_vars files for four example hosts:
 
 | Host | VMID | Resource Tier | Functional Groups | Special Notes |
 |------|------|---------------|-------------------|---------------|
-| codeserver | 301 | small | docker_hosts, service_agents | VSCode development server |
-| frontend | 302 | small | docker_hosts, service_agents | Frontend web service |
-| media | 303 | medium | docker_hosts, gpu_access, service_agents | Media processing with GPU |
-| jellyfin | 304 | large | docker_hosts, gpu_access | **Override:** 32GB RAM instead of 16GB |
-
-### 5. Exception Handling Pattern
-
-Demonstrated in `inventory/host_vars/jellyfin.yml`:
+| codeserver | 301 | small | cap_docker, cap_service_agents | VSCode development server |
+| frontend | 302 | small | cap_docker, cap_service_agents | Frontend web service |
+| media | 303 | medium | cap_docker, cap_gpu, cap_service_agents | Media processing with GPU |
+| jellyfin | 304 | large | cap_docker, cap_gpu | **Override:** 32GB RAM instead of 16GB |
 
 ```yaml
 proxmox_lxc:
-  cores: "{{ lxc_cores }}"      # Inherit from large_servers (8)
+  cores: "{{ lxc_cores }}"      # Inherit from tier_large (8)
   memory: 32768                  # OVERRIDE: 32GB instead of 16GB default
-  disk: "{{ lxc_disk }}"        # Inherit from large_servers ("8")
+  disk: "{{ lxc_disk }}"        # Inherit from tier_large ("8")
 ```
 
 This shows how to override specific resource values while still using variable references for clarity.
 
-### 6. Comprehensive Documentation
-
-Created three documentation files:
+3. group_vars/cap_docker/vars.yml     → install_docker: true, lxc_features: [nesting=1, keyctl=1]
+4. group_vars/cap_gpu/vars.yml        → enable_gpu_passthrough: true
+5. group_vars/cap_service_agents/vars.yml   → configure_traefik_kop: true, etc.
 
 1. **`docs/inventory-structure-guide.md`** (12.7 KB)
    - Complete guide to the inventory structure
@@ -88,8 +84,6 @@ Created three documentation files:
 
 2. **`docs/inventory-visualization.md`** (9.9 KB)
    - ASCII diagrams showing host-group relationships
-   - Host configuration matrix
-   - Variable flow diagrams
    - Group relationships and provisioning workflow
    - Exception handling patterns
 
@@ -105,12 +99,6 @@ Created three documentation files:
    - Resource tier and functional group tables
    - Current hosts overview
    - Testing commands
-
-### 7. Bug Fixes
-
-Fixed existing YAML linting issues:
-- Replaced tabs with spaces in `inventory/group_vars/all/proxmox.yml`
-- Added YAML document start markers (`---`) to all inventory files
 - Fixed line length issues by using YAML folded scalars
 - Removed trailing spaces and extra blank lines
 
@@ -121,10 +109,10 @@ Fixed existing YAML linting issues:
 ```yaml
 # Inheritance chain:
 1. group_vars/all/proxmox.yml      → proxmox_api_host, proxmox_default_node, etc.
-2. group_vars/medium_servers.yml   → lxc_cores: 4, lxc_memory: 8192
-3. group_vars/docker_hosts.yml     → install_docker: true, lxc_features: [nesting=1, keyctl=1]
-4. group_vars/gpu_access.yml       → enable_gpu_passthrough: true
-5. group_vars/service_agents.yml   → configure_traefik_kop: true, etc.
+2. group_vars/tier_medium/vars.yml   → lxc_cores: 4, lxc_memory: 8192
+3. group_vars/cap_docker/vars.yml     → install_docker: true, lxc_features: [nesting=1, keyctl=1]
+4. group_vars/cap_gpu/vars.yml        → enable_gpu_passthrough: true
+5. group_vars/cap_service_agents/vars.yml   → configure_traefik_kop: true, etc.
 6. host_vars/media.yml             → vmid: 303, hostname: media, etc.
 ```
 
@@ -135,9 +123,9 @@ Fixed existing YAML linting issues:
 ```yaml
 # Inheritance chain:
 1. group_vars/all/proxmox.yml      → proxmox_api_host, proxmox_default_node, etc.
-2. group_vars/large_servers.yml    → lxc_cores: 8, lxc_memory: 16384
-3. group_vars/docker_hosts.yml     → install_docker: true, lxc_features: [nesting=1, keyctl=1]
-4. group_vars/gpu_access.yml       → enable_gpu_passthrough: true
+2. group_vars/tier_large/vars.yml    → lxc_cores: 8, lxc_memory: 16384
+3. group_vars/cap_docker/vars.yml     → install_docker: true, lxc_features: [nesting=1, keyctl=1]
+4. group_vars/cap_gpu/vars.yml       → enable_gpu_passthrough: true
 5. host_vars/jellyfin.yml          → vmid: 304, memory: 32768 (OVERRIDE)
 ```
 
@@ -157,8 +145,8 @@ All validations passed:
 - ✓ Hosts can belong to multiple functional groups
 - ✓ Variables are inherited correctly from groups
 - ✓ Resource overrides work as expected (jellyfin memory)
-- ✓ Service agents subset of docker_hosts works correctly
-- ✓ jellyfin correctly excluded from service_agents
+- ✓ Service agents subset of cap_docker works correctly
+- ✓ jellyfin correctly excluded from cap_service_agents
 
 ## Files Created/Modified
 
@@ -173,14 +161,14 @@ docs/
 inventory/
   README.md
   group_vars/
-    tiny_servers.yml
-    small_servers.yml
-    medium_servers.yml
-    large_servers.yml
-    docker_hosts.yml
-    gpu_access.yml
-    wireguard_hosts.yml
-    service_agents.yml
+    tier_tiny/vars.yml
+    tier_small/vars.yml
+    tier_medium/vars.yml
+    tier_large/vars.yml
+    cap_docker/vars.yml
+    cap_gpu/vars.yml
+    cap_wireguard/vars.yml
+    cap_service_agents/vars.yml
   host_vars/
     codeserver.yml
     frontend.yml
@@ -195,7 +183,7 @@ inventory/
   hosts.yml
   group_vars/
     all/proxmox.yml
-    proxmox_api.yml
+    proxmox_api/vars.yml
   host_vars/
     jellyfin_lxc.yml
 ```
@@ -209,7 +197,7 @@ Each host belongs to exactly ONE resource tier. This prevents conflicts in CPU/R
 Hosts can belong to MULTIPLE functional groups. This enables mixing capabilities (e.g., Docker + GPU).
 
 ### 3. Service Agents ⊂ Docker Hosts
-The service_agents group is designed as a subset of docker_hosts. All service agents must be Docker hosts, but not all Docker hosts need to be service agents (e.g., jellyfin, future reverse-proxy node).
+The `cap_service_agents` group is designed as a subset of `cap_docker`. All service agents must be Docker hosts, but not all Docker hosts need to be service agents (e.g., jellyfin, future reverse-proxy node).
 
 ### 4. Variables Reference Groups
 Host vars use `"{{ lxc_cores }}"` instead of hardcoded values. This makes overrides explicit and visible.
@@ -221,27 +209,19 @@ Resource overrides are handled in host_vars with clear documentation of why the 
 
 ### View inventory structure
 ```bash
-ansible-inventory --graph
-```
-
-### Check variables for a host
-```bash
 ansible-inventory --host media --yaml
 ```
-
-### Provision hosts by resource tier
-```bash
-ansible-playbook playbooks/lxc-provision.yml --limit small_servers
+ansible-playbook playbooks/lxc-provision.yml --limit tier_small
 ```
 
 ### Configure all Docker hosts
 ```bash
-ansible-playbook playbooks/docker-setup.yml --limit docker_hosts
+ansible-playbook playbooks/docker-setup.yml --limit cap_docker
 ```
 
 ### Configure service agents only
 ```bash
-ansible-playbook playbooks/service-agents-setup.yml --limit service_agents
+ansible-playbook playbooks/service-agents-setup.yml --limit cap_service_agents
 ```
 
 ## Benefits of New Structure

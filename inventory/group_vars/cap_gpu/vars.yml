@@ -1,0 +1,6 @@
+---
+# Capability group: GPU acceleration
+# Grants containers access to GPU resources via passthrough.
+
+enable_gpu_passthrough: true
+configure_nvidia_runtime: true

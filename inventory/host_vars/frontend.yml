@@ -1,6 +1,6 @@
 ---
 # Host-specific configuration for frontend
-# Inherits from: small_servers, docker_hosts, service_agents
+# Inherits from: tier_small, cap_docker, cap_service_agents
 
 # Container definition for proxmox_lxc_provision role
 proxmox_lxc:
@@ -10,7 +10,7 @@ proxmox_lxc:
   node: "{{ proxmox_default_node }}"
   ostemplate: "local:/var/lib/vz/template/cache/debian-13-standard_13.1-2_amd64.tar.zst"
   pool: homelab
-  # Resource specs inherited from small_servers group (2 cores, 2GB RAM, 8GB disk)
+  # Resource specs inherited from tier_small group (2 cores, 2GB RAM, 8GB disk)
   cores: "{{ lxc_cores }}"
   memory: "{{ lxc_memory }}"
   swap: "{{ lxc_swap | default(512) }}"

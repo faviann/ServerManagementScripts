@@ -10,7 +10,7 @@ This diagram shows how hosts are organized into resource tiers and functional gr
 │                    (Mutually Exclusive - Pick ONE)                       │
 └─────────────────────────────────────────────────────────────────────────┘
 
-    tiny_servers          small_servers         medium_servers        large_servers
+    tier_tiny          tier_small         tier_medium        tier_large
    (1c/512MB/8GB)        (2c/2GB/8GB)         (4c/8GB/8GB)          (8c/16GB/8GB)
         │                      │                    │                     │
         │               ┌──────┴──────┐             │                     │
@@ -25,7 +25,7 @@ This diagram shows how hosts are organized into resource tiers and functional gr
 │              (Compositional - Host can be in MULTIPLE)                   │
 └─────────────────────────────────────────────────────────────────────────┘
 
-    docker_hosts              gpu_access           wireguard_hosts    service_agents
+    cap_docker              cap_gpu           cap_wireguard    cap_service_agents
   (Docker runtime)        (GPU passthrough)         (WireGuard)    (Service tooling)
          │                       │                      │                  │
     ┌────┼────┬────┬────┐       ├───────┐              │          ┌───────┼──────┐
@@ -34,7 +34,7 @@ codeserver │  media │  media jellyfin              codeserver frontend media
            │       │                                    │
        frontend  jellyfin                               │
                                                     (subset of
-                                                   docker_hosts)
+                                                   cap_docker)
 
 ```
 
@@ -47,7 +47,7 @@ codeserver │  media │  media jellyfin              codeserver frontend media
 | media      | medium       | 4   | 8GB   | ✓      | ✓   | ✗         | ✓             | 303  |
 | jellyfin   | large        | 8   | 32GB* | ✓      | ✓   | ✗         | ✗             | 304  |
 
-*jellyfin has a resource override: 32GB RAM instead of the large_servers default 16GB
+*jellyfin has a resource override: 32GB RAM instead of the tier_large default 16GB
 
 ## Variable Flow Diagram
 
@@ -66,7 +66,7 @@ This shows how variables flow from groups to a specific host (`media` example):
                                  ▼
                     ┌──────────────────────────┐
                     │ group_vars/              │
-                    │ medium_servers.yml       │
+                    │ tier_medium.yml       │
                     │                          │
                     │ • lxc_cores: 4           │
                     │ • lxc_memory: 8192       │
@@ -78,7 +78,7 @@ This shows how variables flow from groups to a specific host (`media` example):
                 ▼                ▼                ▼
     ┌───────────────────┐ ┌───────────────┐ ┌──────────────────┐
     │ group_vars/       │ │ group_vars/   │ │ group_vars/      │
-    │ docker_hosts.yml  │ │ gpu_access.yml│ │ service_agents.yml│
+    │ cap_docker.yml  │ │ cap_gpu.yml│ │ cap_service_agents.yml│
     │                   │ │               │ │                  │
     │ • install_docker  │ │ • enable_gpu  │ │ • traefik_kop    │
     │ • lxc_features    │ │ • nvidia_cfg  │ │ • socket_proxy   │
@@ -93,8 +93,8 @@ This shows how variables flow from groups to a specific host (`media` example):
                     │                          │
                     │ • vmid: 303              │
                     │ • hostname: media        │
-                    │ • cores: "{{ lxc_cores }}"│  ← Uses 4 from medium_servers
-                    │ • memory: "{{ lxc_memory }}"│ ← Uses 8192 from medium_servers
+                    │ • cores: "{{ lxc_cores }}"│  ← Uses 4 from tier_medium
+                    │ • memory: "{{ lxc_memory }}"│ ← Uses 8192 from tier_medium
                     └──────────────────────────┘
                                   │
                                   ▼
@@ -104,10 +104,10 @@ This shows how variables flow from groups to a specific host (`media` example):
                     │                          │
                     │ Merged variables from:   │
                     │ • all/proxmox.yml        │
-                    │ • medium_servers.yml     │
-                    │ • docker_hosts.yml       │
-                    │ • gpu_access.yml         │
-                    │ • service_agents.yml     │
+                    │ • tier_medium.yml     │
+                    │ • cap_docker.yml       │
+                    │ • cap_gpu.yml         │
+                    │ • cap_service_agents.yml     │
                     │ • host_vars/media.yml    │
                     └──────────────────────────┘
 ```
@@ -116,7 +116,7 @@ This shows how variables flow from groups to a specific host (`media` example):
 
 ```
                         ┌─────────────────┐
-                        │   docker_hosts  │
+                        │   cap_docker  │
                         │                 │
                         │ All LXCs with   │
                         │ Docker runtime  │
@@ -125,14 +125,14 @@ This shows how variables flow from groups to a specific host (`media` example):
                                  │ inherits from
                                  │
                         ┌────────▼────────┐
-                        │ service_agents  │
+                        │ cap_service_agents  │
                         │                 │
                         │ Subset with     │
                         │ service tooling │
                         └─────────────────┘
 
     codeserver, frontend, media           codeserver, frontend, media
-       (all docker_hosts)                    (all service_agents)
+       (all cap_docker)                    (all cap_service_agents)
 
          jellyfin                                  ---
     (docker_host but NOT                     (jellyfin excluded -
@@ -186,10 +186,10 @@ Example: jellyfin needs extra RAM beyond its resource tier default
 
 ```
 ┌────────────────────────────┐
-│ group_vars/large_servers   │
+│ group_vars/tier_large   │
 │                            │
 │ lxc_cores: 8               │
-│ lxc_memory: 16384  ◄───────┼─── Default for all large_servers
+│ lxc_memory: 16384  ◄───────┼─── Default for all tier_large
 │ lxc_disk: "8"              │
 └────────────┬───────────────┘
              │
@@ -262,6 +262,6 @@ Use dynamic inventory via Proxmox API
    - Makes overrides explicit and visible
 
 5. **Service Agents ⊂ Docker Hosts**
-   - All service_agents must be docker_hosts
-   - Not all docker_hosts are service_agents
+   - All cap_service_agents must be cap_docker
+   - Not all cap_docker are cap_service_agents
    - Example: jellyfin is docker_host but NOT service_agent

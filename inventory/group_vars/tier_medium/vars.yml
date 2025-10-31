@@ -1,6 +1,6 @@
 ---
 # Resource tier: medium
-# Suitable for medium-sized applications with moderate resource needs
+# Suited for application servers and moderate media workloads.
 
 # LXC resource specifications
 lxc_cores: 4

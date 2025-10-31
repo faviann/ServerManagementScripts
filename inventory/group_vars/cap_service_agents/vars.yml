@@ -1,0 +1,7 @@
+---
+# Capability group: Service agent tooling
+# Adds management helpers on top of the Docker capability.
+
+configure_traefik_kop: true
+configure_traefik_socket_proxy: true
+configure_dockwatch: true

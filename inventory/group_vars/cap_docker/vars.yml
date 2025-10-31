@@ -1,0 +1,18 @@
+---
+# Capability group: Docker runtime support
+# Enables Docker and related tooling inside the container.
+
+install_docker: true
+
+# LXC features required by Docker
+lxc_features:
+	- nesting=1
+	- keyctl=1
+
+# Docker user configuration
+docker_user: dockeruser
+docker_uid: 1000
+docker_gid: 1000
+
+# Default location for compose projects (override per host as needed)
+docker_compose_base_path: /conf/docker

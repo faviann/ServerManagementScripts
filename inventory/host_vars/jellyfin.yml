@@ -1,9 +1,9 @@
 ---
 # Host-specific configuration for jellyfin
-# Inherits from: large_servers, docker_hosts, gpu_access
-# Note: jellyfin is NOT in service_agents as it doesn't need traefik tooling
+# Inherits from: tier_large, cap_docker, cap_gpu
+# Note: jellyfin is NOT in cap_service_agents as it doesn't need traefik tooling
 
-# EXAMPLE: Resource override - jellyfin needs extra RAM beyond large_servers default
+# EXAMPLE: Resource override - jellyfin needs extra RAM beyond tier_large default
 # This demonstrates how to handle exceptions via host_vars
 
 # Container definition for proxmox_lxc_provision role
@@ -14,9 +14,9 @@ proxmox_lxc:
   node: "{{ proxmox_default_node }}"
   ostemplate: "local:/var/lib/vz/template/cache/debian-13-standard_13.1-2_amd64.tar.zst"
   pool: homelab
-  # Resource specs: inherit cores from large_servers (8 cores)
+  # Resource specs: inherit cores from tier_large (8 cores)
   cores: "{{ lxc_cores }}"
-  # OVERRIDE: Extra memory for transcoding (32GB instead of large_servers default 16GB)
+  # OVERRIDE: Extra memory for transcoding (32GB instead of tier_large default 16GB)
   memory: 32768
   swap: 2048
   disk: "local-lvm:{{ lxc_disk }}"

@@ -1,0 +1,10 @@
+---
+# Capability group: WireGuard VPN support
+# Ensures containers can reach /dev/net/tun for WireGuard clients.
+
+enable_wireguard: true
+wireguard_kernel_module_access: true
+
+# Additional LXC configuration entries required for WireGuard
+lxc_wireguard_features:
+	- "lxc.mount.entry=/dev/net/tun dev/net/tun none bind,create=file"

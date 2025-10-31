@@ -1,6 +1,6 @@
 ---
 # Resource tier: tiny
-# Suitable for lightweight services with minimal resource requirements
+# Targets minimal footprint workloads (light monitoring, lightweight proxies).
 
 # LXC resource specifications
 lxc_cores: 1
