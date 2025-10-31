@@ -1,1 +1,2 @@
+vault_proxmox_api_token_id: "REPLACE_WITH_YOUR_TOKEN_ID"
 vault_proxmox_api_token_secret: "REPLACE_WITH_YOUR_TOKEN_SECRET"

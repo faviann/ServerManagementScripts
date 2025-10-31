@@ -33,3 +33,4 @@ Thumbs.db
 
 # Temporary files
 /tmp/
+inventory/group_vars/all/vault.yml
