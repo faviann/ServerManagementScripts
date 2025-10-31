@@ -67,17 +67,15 @@ ansible-galaxy collection install -r collections/requirements.yml
 
 ### 4. Configure API credentials
 
-Create your vault file from the example:
+Create your vault file and vault password file. The password file should **not** be committed to version control.
 
 ```bash
-cp inventory/group_vars/all/vault.yml.example inventory/group_vars/all/vault.yml
+# Create and edit the vault file from the example
+cp inventory/group_vars/all/vault.example.yml inventory/group_vars/all/vault.yml
 $EDITOR inventory/group_vars/all/vault.yml  # Add your Proxmox API token secret
 ansible-vault encrypt inventory/group_vars/all/vault.yml
-```
 
-Optional: Create a vault password file (do NOT commit):
-
-```bash
+# Create the vault password file
 echo "your-strong-passphrase" > ~/.ansible/vault-pass.txt
 chmod 600 ~/.ansible/vault-pass.txt
 ```
@@ -87,8 +85,7 @@ chmod 600 ~/.ansible/vault-pass.txt
 Validate SSH reachability to managed hosts and Proxmox API access:
 
 ```bash
-ansible-playbook -i inventory/hosts.yml playbooks/lab-connectivity.yml \
-  --vault-password-file ~/.ansible/vault-pass.txt
+ansible-playbook -i inventory/hosts.yml playbooks/lab-connectivity.yml
 ```
 
 The output confirms which hosts respond to `ansible.builtin.ping` and the Proxmox API version detected.
@@ -98,8 +95,7 @@ The output confirms which hosts respond to `ansible.builtin.ping` and the Proxmo
 Review and customize variables in `playbooks/provision_lxc_example.yml`, then provision:
 
 ```bash
-ansible-playbook -i inventory/hosts.yml playbooks/provision_lxc_example.yml \
-  --vault-password-file ~/.ansible/vault-pass.txt
+ansible-playbook -i inventory/hosts.yml playbooks/provision_lxc_example.yml
 ```
 
 ## Repository Structure
@@ -180,8 +176,7 @@ The `inventory/hosts.yml` defines two groups:
 #### Connectivity validation
 
 ```bash
-ansible-playbook -i inventory/hosts.yml playbooks/lab-connectivity.yml \
-  --vault-password-file ~/.ansible/vault-pass.txt
+ansible-playbook -i inventory/hosts.yml playbooks/lab-connectivity.yml
 ```
 
 Runs SSH ping checks against managed hosts and calls the Proxmox `/api2/json/version` endpoint using your API token.
@@ -189,8 +184,7 @@ Runs SSH ping checks against managed hosts and calls the Proxmox `/api2/json/ver
 ### Check API Connectivity
 
 ```bash
-ansible-playbook -i inventory/hosts.yml playbooks/proxmox_api_check.yml \
-  --vault-password-file ~/.ansible/vault-pass.txt
+ansible-playbook -i inventory/hosts.yml playbooks/proxmox_api_check.yml
 ```
 
 Lists all LXC containers on the default node.
@@ -198,8 +192,7 @@ Lists all LXC containers on the default node.
 ### Provision LXC Container
 
 ```bash
-ansible-playbook -i inventory/hosts.yml playbooks/provision_lxc_example.yml \
-  --vault-password-file ~/.ansible/vault-pass.txt
+ansible-playbook -i inventory/hosts.yml playbooks/provision_lxc_example.yml
 ```
 
 Creates an LXC container with:
