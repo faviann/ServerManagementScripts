@@ -85,7 +85,7 @@ chmod 600 ~/.ansible/vault-pass.txt
 Validate SSH reachability to managed hosts and Proxmox API access:
 
 ```bash
-ansible-playbook -i inventory/hosts.yml playbooks/lab-connectivity.yml
+ansible-playbook playbooks/lab-connectivity.yml
 ```
 
 The output confirms which hosts respond to `ansible.builtin.ping` and the Proxmox API version detected.
@@ -95,7 +95,7 @@ The output confirms which hosts respond to `ansible.builtin.ping` and the Proxmo
 Review and customize variables in `playbooks/provision_lxc_example.yml`, then provision:
 
 ```bash
-ansible-playbook -i inventory/hosts.yml playbooks/provision_lxc_example.yml
+ansible-playbook playbooks/provision_lxc_example.yml
 ```
 
 ## Repository Structure
@@ -176,7 +176,7 @@ The `inventory/hosts.yml` defines two groups:
 #### Connectivity validation
 
 ```bash
-ansible-playbook -i inventory/hosts.yml playbooks/lab-connectivity.yml
+ansible-playbook playbooks/lab-connectivity.yml
 ```
 
 Runs SSH ping checks against managed hosts and calls the Proxmox `/api2/json/version` endpoint using your API token.
@@ -184,7 +184,7 @@ Runs SSH ping checks against managed hosts and calls the Proxmox `/api2/json/ver
 ### Check API Connectivity
 
 ```bash
-ansible-playbook -i inventory/hosts.yml playbooks/proxmox_api_check.yml
+ansible-playbook playbooks/proxmox_api_check.yml
 ```
 
 Lists all LXC containers on the default node.
@@ -192,7 +192,7 @@ Lists all LXC containers on the default node.
 ### Provision LXC Container
 
 ```bash
-ansible-playbook -i inventory/hosts.yml playbooks/provision_lxc_example.yml
+ansible-playbook playbooks/provision_lxc_example.yml
 ```
 
 Creates an LXC container with:
