@@ -1,0 +1,4 @@
+---
+# Shared defaults for all LXC containers managed by Ansible.
+# Individual hosts override values via proxmox_lxc_overrides in host_vars.
+proxmox_lxc_group_defaults: {}

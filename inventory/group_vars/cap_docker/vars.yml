@@ -6,8 +6,8 @@ install_docker: true
 
 # LXC features required by Docker
 lxc_features:
-	- nesting=1
-	- keyctl=1
+  - nesting=1
+  - keyctl=1
 
 # Docker user configuration
 docker_user: dockeruser

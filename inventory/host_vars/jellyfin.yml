@@ -7,33 +7,17 @@
 # This demonstrates how to handle exceptions via host_vars
 
 # Container definition for proxmox_lxc_provision role
-proxmox_lxc:
+proxmox_lxc_overrides:
   vmid: 304
   hostname: jellyfin
   description: "Jellyfin media server with transcoding managed via Ansible"
-  node: "{{ proxmox_default_node }}"
-  ostemplate: "local:/var/lib/vz/template/cache/debian-13-standard_13.1-2_amd64.tar.zst"
-  pool: homelab
-  # Resource specs: inherit cores from tier_large (8 cores)
-  cores: "{{ lxc_cores }}"
-  # OVERRIDE: Extra memory for transcoding (32GB instead of tier_large default 16GB)
   memory: 32768
   swap: 2048
-  disk: "local-lvm:{{ lxc_disk }}"
-  netif:
-    net0: "name=eth0,bridge={{ lxc_network_bridge }},firewall=0,ip=dhcp,ip6=auto,type=veth"
-  onboot: true
-  unprivileged: true
-  features: "{{ lxc_features | default([]) }}"
   tags:
     - ansible
     - jellyfin
     - media-server
     - gpu
-
-proxmox_lxc_start_on_create: true
-proxmox_lxc_mounts: "{{ proxmox_default_mounts | combine({}) }}"
-proxmox_lxc_idmap: "{{ proxmox_default_idmap | list }}"
 
 # Jellyfin-specific configuration
 jellyfin_version: latest

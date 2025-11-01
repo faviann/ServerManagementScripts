@@ -1,8 +1,26 @@
----
 - name: Provision LXCs defined in inventory
   hosts: lxcs
   gather_facts: false
   collections:
     - community.proxmox
+  pre_tasks:
+    - name: Build consolidated LXC specification
+      ansible.builtin.include_role:
+        name: proxmox_lxc_provision
+        tasks_from: spec
+
+    - name: Run Proxmox host preparation (pre)
+      ansible.builtin.include_role:
+        name: proxmox_lxc_host_prep
+      vars:
+        proxmox_lxc_host_prep_phase: pre
+      when: proxmox_lxc_host_prep_enabled | default(true)
   roles:
     - role: proxmox_lxc_provision
+  post_tasks:
+    - name: Run Proxmox host preparation (post)
+      ansible.builtin.include_role:
+        name: proxmox_lxc_host_prep
+      vars:
+        proxmox_lxc_host_prep_phase: post
+      when: proxmox_lxc_host_prep_enabled | default(true)

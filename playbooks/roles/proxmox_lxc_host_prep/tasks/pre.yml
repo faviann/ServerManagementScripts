@@ -11,7 +11,7 @@
     proxmox_lxc_host_bind_paths: "{{ (proxmox_lxc_host_bind_paths | default([])) + [host_path] }}"
   vars:
     host_path: "{{ (item.value | regex_search('^[^,]+')) | default('') }}"
-  loop: "{{ proxmox_lxc_spec.mounts | default({}) | dict2items }}"
+  loop: "{{ proxmox_lxc_mounts_effective | default({}) | dict2items }}"
   when:
     - item.value is string
     - host_path | length > 0

@@ -141,29 +141,13 @@ enable_docker: true
 # host_vars/example-app.yml
 # Inherits from: tier_small, cap_docker
 
-proxmox_lxc:
+proxmox_lxc_overrides:
   vmid: 201
   hostname: example-app
   description: "Example application"
-  node: "{{ proxmox_default_node }}"
-  ostemplate: "local:/var/lib/vz/template/cache/debian-13-standard_13.1-2_amd64.tar.zst"
-  pool: homelab
-  cores: "{{ lxc_cores }}"              # Inherited: 2 from tier_small
-  memory: "{{ lxc_memory }}"            # Inherited: 2048 from tier_small
-  swap: "{{ lxc_swap | default(512) }}" # Inherited: 512 from tier_small
-  disk: "local-lvm:{{ lxc_disk }}"      # Inherited: "8" from tier_small
-  netif:
-    net0: "name=eth0,bridge={{ lxc_network_bridge }},firewall=0,ip=dhcp,ip6=auto,type=veth"
-  onboot: true
-  unprivileged: true
-  features: "{{ lxc_features | default([]) }}"  # Inherited from cap_docker
   tags:
     - ansible
     - example
-
-proxmox_lxc_start_on_create: true
-proxmox_lxc_mounts: "{{ proxmox_default_mounts | combine({}) }}"
-proxmox_lxc_idmap: "{{ proxmox_default_idmap | list }}"
 ```
 
 ### Step 4: Handle Resource Overrides
@@ -180,10 +164,8 @@ ram_size: 32768  # More than tier_large default
 ```yaml
 # host_vars/special-app.yml
 # Still in tier_large group, but override memory
-proxmox_lxc:
-  cores: "{{ lxc_cores }}"    # Inherit from group
-  memory: 32768               # OVERRIDE: 32GB instead of 16GB
-  disk: "{{ lxc_disk }}"      # Inherit from group
+proxmox_lxc_overrides:
+  memory: 32768  # OVERRIDE: 32GB instead of 16GB
 
 # Add comment explaining why
 # OVERRIDE: Extra memory needed for heavy processing workload

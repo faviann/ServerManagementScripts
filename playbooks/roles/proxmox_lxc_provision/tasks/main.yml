@@ -1,12 +1,5 @@
----
-- name: Merge container defaults with host-specific values
-  ansible.builtin.set_fact:
-    proxmox_lxc_spec: "{{ proxmox_lxc_defaults | combine(proxmox_lxc | default({}), recursive=True) }}"
-
-- name: Apply default Proxmox node when omitted
-  when: proxmox_lxc_spec.node is not defined and proxmox_default_node is defined
-  ansible.builtin.set_fact:
-    proxmox_lxc_spec: "{{ proxmox_lxc_spec | combine({'node': proxmox_default_node}) }}"
+- name: Prepare consolidated LXC specification
+  ansible.builtin.import_tasks: spec.yml
 
 - name: Allow explicit start override per host
   when: proxmox_lxc_start_on_create is defined

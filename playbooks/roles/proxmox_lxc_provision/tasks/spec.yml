@@ -1,0 +1,80 @@
+---
+- name: Assemble LXC spec layers
+  ansible.builtin.set_fact:
+    proxmox_lxc_spec_layers: >-
+      {{
+        [
+          proxmox_lxc_defaults | default({}),
+          proxmox_lxc_global_defaults | default({}),
+          proxmox_lxc_group_defaults | default({}),
+          proxmox_lxc_capability_defaults | default({}),
+          proxmox_lxc_overrides | default({}),
+          proxmox_lxc | default({})
+        ]
+      }}
+
+- name: Merge LXC spec layers into single definition
+  ansible.builtin.set_fact:
+    proxmox_lxc_spec: "{{ proxmox_lxc_spec | default({}) | combine(item, recursive=True) }}"
+  loop: "{{ proxmox_lxc_spec_layers }}"
+
+- name: Initialize dynamic defaults from tier and capability data
+  ansible.builtin.set_fact:
+    proxmox_lxc_dynamic_defaults: {}
+
+- name: Ensure tier variables are defined
+  ansible.builtin.assert:
+    that:
+      - lxc_cores is defined
+      - lxc_memory is defined
+      - lxc_swap is defined
+      - lxc_disk is defined
+      - lxc_network_bridge is defined
+    fail_msg: >-
+      Missing tier variables required to build the LXC specification. Check tier group vars for cores, memory, swap, disk, and network bridge.
+
+- name: Include CPU core defaults
+  ansible.builtin.set_fact:
+    proxmox_lxc_dynamic_defaults: "{{ proxmox_lxc_dynamic_defaults | combine({'cores': (lxc_cores | int)}) }}"
+
+- name: Include memory defaults
+  ansible.builtin.set_fact:
+    proxmox_lxc_dynamic_defaults: "{{ proxmox_lxc_dynamic_defaults | combine({'memory': (lxc_memory | int)}) }}"
+
+- name: Include swap defaults
+  ansible.builtin.set_fact:
+    proxmox_lxc_dynamic_defaults: "{{ proxmox_lxc_dynamic_defaults | combine({'swap': (lxc_swap | int)}) }}"
+
+- name: Include disk defaults
+  ansible.builtin.set_fact:
+    proxmox_lxc_dynamic_defaults: "{{ proxmox_lxc_dynamic_defaults | combine({'disk': 'local-lvm:' + (lxc_disk | string)}) }}"
+
+- name: Include network defaults
+  ansible.builtin.set_fact:
+    proxmox_lxc_dynamic_defaults: "{{ proxmox_lxc_dynamic_defaults | combine({'netif': {'net0': 'name=eth0,bridge=' + (lxc_network_bridge) + ',firewall=0,ip=dhcp,ip6=auto,type=veth'}}, recursive=True) }}"
+
+- name: Include feature defaults
+  ansible.builtin.set_fact:
+    proxmox_lxc_dynamic_defaults: "{{ proxmox_lxc_dynamic_defaults | combine({'features': lxc_features | default([])}, recursive=True) }}"
+
+- name: Merge dynamic defaults into spec
+  ansible.builtin.set_fact:
+    proxmox_lxc_spec: "{{ proxmox_lxc_spec | combine(proxmox_lxc_dynamic_defaults, recursive=True) }}"
+  when: proxmox_lxc_dynamic_defaults | length > 0
+
+- name: Resolve mount overrides
+  ansible.builtin.set_fact:
+    proxmox_lxc_mounts_overrides_effective: "{{ proxmox_lxc_mounts_overrides | default(proxmox_lxc_mounts | default({}), true) }}"
+
+- name: Determine effective mount configuration
+  ansible.builtin.set_fact:
+    proxmox_lxc_mounts_effective: "{{ proxmox_default_mounts | combine(proxmox_lxc_mounts_overrides_effective | default({}), recursive=True) }}"
+
+- name: Attach mounts to spec when available
+  ansible.builtin.set_fact:
+    proxmox_lxc_spec: "{{ proxmox_lxc_spec | combine({'mounts': proxmox_lxc_mounts_effective}, recursive=True) }}"
+  when: proxmox_lxc_mounts_effective | default({}) | length > 0
+
+- name: Determine effective idmap entries
+  ansible.builtin.set_fact:
+    proxmox_lxc_idmap_effective: "{{ proxmox_lxc_idmap | default(proxmox_default_idmap, true) }}"

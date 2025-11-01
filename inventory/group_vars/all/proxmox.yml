@@ -5,6 +5,8 @@ proxmox_api_user: "{{ vault_proxmox_api_user }}"
 proxmox_api_token_id: "{{ vault_proxmox_api_token_id }}"
 proxmox_api_token_secret: "{{ vault_proxmox_api_token_secret }}"
 proxmox_default_node: "proxmox"
+proxmox_default_pool: "homelab"
+proxmox_default_ostemplate: "local:/var/lib/vz/template/cache/debian-13-standard_13.1-2_amd64.tar.zst"
 proxmox_verify_ssl: false
 
 # Shared storage and host prep defaults used when provisioning new LXCs.
@@ -28,6 +30,18 @@ proxmox_default_idmap:
   - "g 1000 1001 1"
   - "u 1001 101001 64535"
   - "g 1001 101001 64535"
+
+proxmox_lxc_global_defaults:
+  state: present
+  update: false
+  unprivileged: true
+  onboot: true
+  start_on_create: true
+  pool: "{{ proxmox_default_pool }}"
+  ostemplate: "{{ proxmox_default_ostemplate }}"
+  node: "{{ proxmox_default_node }}"
+  tags:
+    - ansible
 
 proxmox_lxc_host_prep_enabled: true
 proxmox_host_delegate: "{{ proxmox_api_host }}"

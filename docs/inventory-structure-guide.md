@@ -168,38 +168,22 @@ Create `inventory/host_vars/mynewhost.yml`:
 # Host-specific configuration for mynewhost
 # Inherits from: tier_small, cap_docker, cap_service_agents
 
-proxmox_lxc:
+proxmox_lxc_overrides:
   vmid: 305
   hostname: mynewhost
   description: "My new service managed via Ansible"
-  node: "{{ proxmox_default_node }}"
-  ostemplate: "local:/var/lib/vz/template/cache/debian-13-standard_13.1-2_amd64.tar.zst"
-  pool: homelab
-  cores: "{{ lxc_cores }}"
-  memory: "{{ lxc_memory }}"
-  swap: "{{ lxc_swap | default(512) }}"
-  disk: "local-lvm:{{ lxc_disk }}"
-  netif:
-    net0: "name=eth0,bridge={{ lxc_network_bridge }},firewall=0,ip=dhcp,ip6=auto,type=veth"
-  onboot: true
-  unprivileged: true
-  features: "{{ lxc_features | default([]) }}"
   tags:
     - ansible
     - mynewhost
-
-proxmox_lxc_start_on_create: true
-proxmox_lxc_mounts: "{{ proxmox_default_mounts | combine({}) }}"
-proxmox_lxc_idmap: "{{ proxmox_default_idmap | list }}"
 ```
 
 ## Best Practices
 
 ### 1. Use Templates for Common Patterns
 
-Most host_vars files follow the same pattern. Copy an existing file and modify:
+Most host_vars files now only declare what is unique to the host. Copy an existing file and edit the override map:
 - Use `codeserver.yml` as template for small docker hosts
-- Use `jellyfin.yml` as template for large hosts with overrides
+- Use `jellyfin.yml` as template for large hosts with resource overrides
 
 ### 2. Document Exceptions
 
@@ -207,24 +191,17 @@ When overriding resource allocations, add a comment explaining why:
 
 ```yaml
 # OVERRIDE: Extra memory for heavy transcoding workload
-memory: 32768  # 32GB instead of tier_large default 16GB
+proxmox_lxc_overrides:
+  memory: 32768  # 32GB instead of tier_large default 16GB
 ```
 
 ### 3. Keep Defaults Generic
 
-Variables in `group_vars/` should represent sensible defaults, not host-specific values. Host-specific configuration belongs in `host_vars/`.
+Variables in `group_vars/` should represent sensible defaults, not host-specific values. Host-specific tweaks belong in `proxmox_lxc_overrides`.
 
-### 4. Use Variable References
+### 4. Override Only What You Need
 
-Prefer using variables from groups rather than hardcoding values:
-
-```yaml
-# Good: Uses inherited variable
-cores: "{{ lxc_cores }}"
-
-# Avoid: Hardcoded (makes it harder to see what's overridden)
-cores: 4
-```
+Leave CPU, memory, disk, network, and mount settings out of host_vars unless they genuinely differ. The provisioning role builds those from tier and capability groups automatically.
 
 ### 5. Organize Functional Groups Logically
 
