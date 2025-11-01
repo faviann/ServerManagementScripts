@@ -87,7 +87,7 @@ For a host named `media` in `tier_medium`, `cap_docker`, `cap_gpu`, and `cap_ser
 ```yaml
 # Inherited variables (in merge order):
 # 1. group_vars/all/proxmox.yml
-proxmox_api_host: "proxmox.lan"
+proxmox_api_host: "proxmox.internal.faviann.com"
 proxmox_default_node: "proxmox"
 proxmox_default_mounts: { ... }
 

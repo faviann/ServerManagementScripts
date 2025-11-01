@@ -32,7 +32,7 @@ This repository manages **LXC containers only**. Virtual machines (VMs/KVM) are 
 
 These defaults are configured for the target homelab:
 
-- **API host**: `proxmox.lan`
+- **API host**: `proxmox.internal.faviann.com`
 - **Node name**: `proxmox`
 - **Network bridge**: `vmbr1`
 - **Default template**: `local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst`
@@ -136,7 +136,7 @@ ansible-playbook playbooks/provision_lxc_example.yml
 Edit `inventory/group_vars/all/proxmox.yml` to configure your environment:
 
 ```yaml
-proxmox_api_host: "proxmox.lan"           # Proxmox hostname or IP
+proxmox_api_host: "proxmox.internal.faviann.com"           # Proxmox hostname or IP
 proxmox_api_port: 8006                     # API port (default 8006)
 proxmox_api_token_id: "ansible@pve!controller"  # API token ID
 proxmox_default_node: "proxmox"           # Default node for operations
@@ -218,7 +218,7 @@ Customize variables in the playbook as needed.
 
 ### Cannot reach Proxmox API
 
-- Verify controller can reach Proxmox host: `curl -k https://proxmox.lan:8006`
+- Verify controller can reach Proxmox host: `curl -k https://proxmox.internal.faviann.com:8006`
 - Check firewall rules allow HTTPS (port 8006)
 - Verify VPN/network connectivity
 

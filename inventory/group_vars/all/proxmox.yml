@@ -1,5 +1,5 @@
 ---
-proxmox_api_host: "proxmox.lan"
+proxmox_api_host: "proxmox.internal.faviann.com"
 proxmox_api_port: 8006
 proxmox_api_user: "{{ vault_proxmox_api_user }}"
 proxmox_api_token_id: "{{ vault_proxmox_api_token_id }}"
