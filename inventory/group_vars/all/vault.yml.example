@@ -65,6 +65,10 @@ vault_auth_email_use_ssl: "false"
 vault_auth_email_timeout: "30"
 vault_auth_email_from: "REPLACE_WITH_FROM_EMAIL"
 
+# Jellystat application and database
+vault_jellystat_jwt_secret: "REPLACE_WITH_RANDOM_JWT_SECRET"
+vault_jellystat_postgres_password: "REPLACE_WITH_RANDOM_DATABASE_PASSWORD"
+
 # Public RomM OIDC
 vault_public_romm_oidc_client_secret: "REPLACE_WITH_RANDOM_CLIENT_SECRET"
 vault_public_audiobookshelf_oidc_client_secret: "REPLACE_WITH_RANDOM_CLIENT_SECRET"
