@@ -4,7 +4,7 @@ x-prereq-dirs:
 
 services:
   bazarr:
-    image: lscr.io/linuxserver/bazarr:1.5.6
+    image: lscr.io/linuxserver/bazarr:latest
     container_name: bazarr
     restart: unless-stopped
     environment:
