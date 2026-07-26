@@ -5,6 +5,11 @@
 lxc_hwaddr: "BC:24:11:A1:82:92"
 default_domain: public.faviann.com
 
+lxc_docker_env_stack_vars:
+  jellystat:
+    jwt_secret: "{{ vault_jellystat_jwt_secret }}"
+    postgres_password: "{{ vault_jellystat_postgres_password }}"
+
 # Container definition for proxmox_lxc_provision role
 proxmox_lxc_overrides:
   vmid: 304
