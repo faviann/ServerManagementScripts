@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Consumed Renovate packageFiles record",
+  "type": "object",
+  "required": ["level", "msg", "config"],
+  "properties": {
+    "level": {"const": 20},
+    "msg": {"const": "packageFiles with updates"},
+    "config": {
+      "type": "object",
+      "required": ["docker-compose"],
+      "properties": {
+        "docker-compose": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["packageFile", "deps"],
+            "properties": {
+              "packageFile": {"type": "string"},
+              "deps": {"type": "array", "minItems": 1, "maxItems": 1}
+            }
+          }
+        }
+      }
+    }
+  },
+  "description": "Additional Renovate fields are intentionally tolerated; the adapter validates every field it consumes and the exact Renovate version separately."
+}

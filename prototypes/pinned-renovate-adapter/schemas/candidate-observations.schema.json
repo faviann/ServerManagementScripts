@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Prototype image update candidate observation batch",
+  "type": "object",
+  "required": ["schema_version", "provenance", "stacks", "observations"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "provenance": {
+      "type": "object",
+      "required": ["adapter_version", "renovate_version", "request_fingerprint", "scan_time", "scope"]
+    },
+    "stacks": {"type": "array"},
+    "observations": {"type": "array"}
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Prototype image update scan request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "stacks"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "stacks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["host", "stack", "tracking_mode", "services"],
+        "properties": {
+          "host": {"type": "string", "minLength": 1},
+          "stack": {"type": "string", "minLength": 1},
+          "tracking_mode": {"enum": ["image", "vendor"]},
+          "vendor": {"type": "object"},
+          "services": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["service", "image", "current_effective_reference", "current_digest", "track"],
+              "properties": {
+                "service": {"type": "string", "minLength": 1},
+                "image": {"type": "string", "minLength": 1},
+                "current_effective_reference": {"type": "string", "minLength": 1},
+                "candidate_effective_reference": {"type": "string", "minLength": 1},
+                "current_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+                "track": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["kind", "value"],
+                  "properties": {
+                    "kind": {"enum": ["major-line", "floating-tag", "exact-version"]},
+                    "value": {"type": ["integer", "string"]}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
