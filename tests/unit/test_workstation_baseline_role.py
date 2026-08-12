@@ -465,7 +465,6 @@ class WorkstationBaselineRoleTests(unittest.TestCase):
             "workstation_origin_firewall_allowed_hosts",
             "workstation_origin_firewall_nft_path",
             "workstation_origin_firewall_service_path",
-            "workstation-origin-firewall.service",
             "workstation-aoe-proxy-firewall.service",
             "daemon_reload: true",
             "state: absent",
@@ -515,22 +514,51 @@ class WorkstationBaselineRoleTests(unittest.TestCase):
         for unprotected_port in (80, 443, 22):
             self.assertNotIn(str(unprotected_port), rendered_firewall)
 
-        firewall_service_template = (
-            REPO_ROOT
-            / "playbooks/roles/config/lxc_workstation_baseline/templates/workstation-origin-firewall.service.j2"
-        ).read_text(encoding="utf-8")
-        self.assertIn('ExecStart=/usr/sbin/nft -f /etc/nftables.d/workstation-origin-firewall.nft', firewall_service_template)
-        self.assertIn('ExecStop=/usr/sbin/nft delete table inet workstation_origin', firewall_service_template)
-        self.assertIn('RemainAfterExit=yes', firewall_service_template)
+        rendered_firewall_service = environment.get_template(
+            "workstation-origin-firewall.service.j2"
+        ).render(workstation_origin_firewall_nft_path="/tmp/firewall/custom-origin.nft")
+        self.assertIn(
+            "ExecStart=/usr/sbin/nft -f /tmp/firewall/custom-origin.nft",
+            rendered_firewall_service,
+        )
+        self.assertIn(
+            "ExecStop=/usr/sbin/nft delete table inet workstation_origin",
+            rendered_firewall_service,
+        )
+        self.assertIn("RemainAfterExit=yes", rendered_firewall_service)
+
+        enabled_service_task = next(
+            task
+            for task in firewall_tasks
+            if task.get("name") == "Enable workstation origin firewall service"
+        )
+        self.assertEqual(
+            enabled_service_task["ansible.builtin.systemd"]["name"],
+            "{{ workstation_origin_firewall_service_path | basename }}",
+        )
+        disabled_service_task = next(
+            task
+            for task in firewall_tasks
+            if task.get("name") == "Stop workstation origin firewall service when disabled"
+        )
+        self.assertEqual(
+            disabled_service_task["ansible.builtin.systemd"]["name"],
+            "{{ workstation_origin_firewall_service_path | basename }}",
+        )
 
         firewall_handlers = load_yaml(
             REPO_ROOT / "playbooks/roles/config/lxc_workstation_baseline/handlers/main.yml"
         )
         self.assertEqual(len(firewall_handlers), 1)
         self.assertEqual(firewall_handlers[0]["name"], "Restart workstation origin firewall")
-        rendered_firewall_handlers = yaml.safe_dump(firewall_handlers, sort_keys=True)
-        self.assertIn("workstation-origin-firewall.service", rendered_firewall_handlers)
-        self.assertIn("state: restarted", rendered_firewall_handlers)
+        self.assertEqual(
+            firewall_handlers[0]["ansible.builtin.systemd"]["name"],
+            "{{ workstation_origin_firewall_service_path | basename }}",
+        )
+        self.assertEqual(
+            firewall_handlers[0]["ansible.builtin.systemd"]["state"],
+            "restarted",
+        )
 
     def test_workstation_bootstrap_deploy_wrapper_removed(self) -> None:
         self.assertFalse((REPO_ROOT / "scripts/workstation-bootstrap-deploy.sh").exists())

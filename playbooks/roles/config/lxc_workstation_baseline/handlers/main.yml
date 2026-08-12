@@ -1,6 +1,6 @@
 ---
 - name: Restart workstation origin firewall
   ansible.builtin.systemd:
-    name: workstation-origin-firewall.service
+    name: "{{ workstation_origin_firewall_service_path | basename }}"
     daemon_reload: true
     state: restarted
