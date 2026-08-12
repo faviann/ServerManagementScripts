@@ -12,7 +12,9 @@ sys.path.insert(0, str(REPO_ROOT))
 from stack_update_policy import (  # noqa: E402
     GitHubReadError,
     GitHubRepositoryState,
+    StackInputSnapshot,
     build_repository_snapshot,
+    read_github_repository,
 )
 
 
@@ -94,6 +96,48 @@ def create_nested_compose_gitlink(repository: Path) -> tuple[Path, str, str, str
     git(repository, "add", compose_path)
     git(repository, "commit", "-m", "use nested gitlink in compose tree")
     return nested, compose_path, first_commit, second_commit
+
+
+def test_github_reader_resolves_hex_shaped_default_branch_through_branch_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    request_log = tmp_path / "requests.log"
+    branch = "a" * 40
+    tip = "b" * 40
+    fake_gh = fake_bin / "gh"
+    fake_gh.write_text(
+        r"""#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$FAKE_GH_REQUEST_LOG"
+case "$*" in
+  "api --method GET repos/example/homelab")
+    printf '{"default_branch":"%s"}\n' "$FAKE_GH_BRANCH"
+    ;;
+  api\ --method\ GET\ repos/example/homelab/branches/*)
+    printf '{"commit":{"sha":"%s"}}\n' "$FAKE_GH_TIP"
+    ;;
+  *)
+    exit 41
+    ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    fake_gh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_GH_REQUEST_LOG", str(request_log))
+    monkeypatch.setenv("FAKE_GH_BRANCH", branch)
+    monkeypatch.setenv("FAKE_GH_TIP", tip)
+
+    state = read_github_repository("example", "homelab")
+
+    assert state == GitHubRepositoryState(branch, tip)
+    assert request_log.read_text(encoding="utf-8").splitlines() == [
+        "api --method GET repos/example/homelab",
+        f"api --method GET repos/example/homelab/branches/{branch}",
+    ]
 
 
 def test_clean_default_branch_checkout_has_publishable_stack_snapshot(
@@ -750,6 +794,273 @@ updates:
     assert snapshot.changed_inputs == (
         "stacks/media/example/docs/upgrade.md",
         "stacks/media/example/stack.yaml",
+    )
+    assert snapshot.complete is False
+
+
+def test_checked_in_symlinked_runbook_directory_binds_link_and_target(
+    tmp_path: Path,
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    stack = repository / "stacks/media/example"
+    (stack / "stack.yaml").write_text(
+        """\
+updates:
+  mode: images
+  track: stable
+  procedure:
+    mode: assisted
+    runbook: docs/upgrade.md
+""",
+        encoding="utf-8",
+    )
+    (stack / "runbooks").mkdir()
+    (stack / "runbooks/upgrade.md").write_text("# Upgrade\n", encoding="utf-8")
+    (stack / "docs").symlink_to("runbooks", target_is_directory=True)
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "add symlinked runbook directory")
+    commit = git(repository, "rev-parse", "HEAD")
+    before_status = git(repository, "status", "--porcelain=v1", "--untracked-files=all")
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+    repeated = build_repository_snapshot(
+        repository,
+        ["stacks/media/example", "stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+
+    assert result.errors == ()
+    assert result.snapshot is not None
+    assert repeated.snapshot == result.snapshot
+    assert (
+        git(repository, "status", "--porcelain=v1", "--untracked-files=all")
+        == before_status
+    )
+    snapshot = result.snapshot.stacks[0]
+    assert snapshot.complete is True
+    assert snapshot.changed_inputs == ()
+    assert snapshot.relevant_inputs == (
+        "stacks/media/example/compose.yaml",
+        "stacks/media/example/docs",
+        "stacks/media/example/runbooks/upgrade.md",
+        "stacks/media/example/stack.yaml",
+    )
+
+
+def test_checked_in_runbook_symlink_fingerprint_binds_link_and_target(
+    tmp_path: Path,
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    stack = repository / "stacks/media/example"
+    (stack / "stack.yaml").write_text(
+        """\
+updates:
+  mode: images
+  track: stable
+  procedure:
+    mode: assisted
+    runbook: guide.md
+""",
+        encoding="utf-8",
+    )
+    (stack / "runbooks").mkdir()
+    target = stack / "runbooks/upgrade.md"
+    target.write_text("# Upgrade\n", encoding="utf-8")
+    alternate = stack / "runbooks/alternate.md"
+    alternate.write_bytes(target.read_bytes())
+    link = stack / "guide.md"
+    link.symlink_to("runbooks/upgrade.md")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "add symlinked runbook")
+
+    def snapshot_at_head() -> StackInputSnapshot:
+        commit = git(repository, "rev-parse", "HEAD")
+        result = build_repository_snapshot(
+            repository,
+            ["stacks/media/example"],
+            github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+        )
+        assert result.snapshot is not None
+        return result.snapshot.stacks[0]
+
+    original = snapshot_at_head()
+    target.write_text("# Changed upgrade\n", encoding="utf-8")
+    git(repository, "add", "stacks/media/example/runbooks/upgrade.md")
+    git(repository, "commit", "-m", "change runbook target")
+    changed_target = snapshot_at_head()
+    link.unlink()
+    link.symlink_to("runbooks/alternate.md")
+    git(repository, "add", "stacks/media/example/guide.md")
+    git(repository, "commit", "-m", "change runbook link")
+    changed_link = snapshot_at_head()
+
+    assert (
+        len(
+            {
+                original.fingerprint,
+                changed_target.fingerprint,
+                changed_link.fingerprint,
+            }
+        )
+        == 3
+    )
+
+
+def test_checked_in_runbook_symlink_chain_returns_each_link_and_final_target(
+    tmp_path: Path,
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    stack = repository / "stacks/media/example"
+    (stack / "stack.yaml").write_text(
+        """\
+updates:
+  mode: images
+  track: stable
+  procedure:
+    mode: assisted
+    runbook: docs/upgrade.md
+""",
+        encoding="utf-8",
+    )
+    (stack / "runbooks/content").mkdir(parents=True)
+    (stack / "runbooks/content/final.md").write_text(
+        "# Upgrade\n", encoding="utf-8"
+    )
+    (stack / "runbooks/upgrade.md").symlink_to("content/final.md")
+    (stack / "docs").symlink_to("runbooks", target_is_directory=True)
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "add runbook symlink chain")
+    commit = git(repository, "rev-parse", "HEAD")
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+
+    assert result.errors == ()
+    assert result.snapshot is not None
+    snapshot = result.snapshot.stacks[0]
+    assert snapshot.complete is True
+    assert snapshot.relevant_inputs == (
+        "stacks/media/example/compose.yaml",
+        "stacks/media/example/docs",
+        "stacks/media/example/runbooks/content/final.md",
+        "stacks/media/example/runbooks/upgrade.md",
+        "stacks/media/example/stack.yaml",
+    )
+
+
+@pytest.mark.parametrize(
+    ("changed_input", "staged"),
+    [
+        ("stacks/media/example/guide.md", False),
+        ("stacks/media/example/guide.md", True),
+        ("stacks/media/example/runbooks/upgrade.md", False),
+        ("stacks/media/example/runbooks/upgrade.md", True),
+    ],
+)
+def test_checked_in_leaf_symlink_and_target_dirtiness_is_stack_local(
+    tmp_path: Path, changed_input: str, staged: bool
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    stack = repository / "stacks/media/example"
+    (stack / "stack.yaml").write_text(
+        """\
+updates:
+  mode: images
+  track: stable
+  procedure:
+    mode: assisted
+    runbook: guide.md
+""",
+        encoding="utf-8",
+    )
+    (stack / "runbooks").mkdir()
+    target = stack / "runbooks/upgrade.md"
+    target.write_text("# Upgrade\n", encoding="utf-8")
+    link = stack / "guide.md"
+    link.symlink_to("runbooks/upgrade.md")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "add symlinked runbook")
+    commit = git(repository, "rev-parse", "HEAD")
+    reader = lambda owner, name: GitHubRepositoryState("main", commit)
+    clean = build_repository_snapshot(
+        repository, ["stacks/media/example"], github_reader=reader
+    )
+
+    if changed_input.endswith("guide.md"):
+        link.unlink()
+        link.symlink_to("runbooks/local.md")
+    else:
+        target.write_text("locally changed\n", encoding="utf-8")
+    if staged:
+        git(repository, "add", changed_input)
+    dirty = build_repository_snapshot(
+        repository, ["stacks/media/example"], github_reader=reader
+    )
+
+    assert clean.snapshot is not None
+    assert dirty.snapshot is not None
+    clean_stack = clean.snapshot.stacks[0]
+    dirty_stack = dirty.snapshot.stacks[0]
+    assert clean_stack.complete is True
+    assert clean_stack.relevant_inputs == (
+        "stacks/media/example/compose.yaml",
+        "stacks/media/example/guide.md",
+        "stacks/media/example/runbooks/upgrade.md",
+        "stacks/media/example/stack.yaml",
+    )
+    assert dirty_stack.relevant_inputs == clean_stack.relevant_inputs
+    assert dirty_stack.changed_inputs == (changed_input,)
+    assert dirty_stack.complete is False
+    assert dirty_stack.fingerprint == clean_stack.fingerprint
+
+
+def test_unchecked_in_symlink_substitution_never_follows_external_runbook(
+    tmp_path: Path,
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    stack = repository / "stacks/media/example"
+    (stack / "stack.yaml").write_text(
+        """\
+updates:
+  mode: images
+  track: stable
+  procedure:
+    mode: assisted
+    runbook: docs/upgrade.md
+""",
+        encoding="utf-8",
+    )
+    git(repository, "add", "stacks/media/example/stack.yaml")
+    git(repository, "commit", "-m", "declare absent runbook")
+    commit = git(repository, "rev-parse", "HEAD")
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "upgrade.md").write_text("external secret\n", encoding="utf-8")
+    (stack / "docs").symlink_to(external, target_is_directory=True)
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+
+    assert result.errors == ()
+    assert result.snapshot is not None
+    snapshot = result.snapshot.stacks[0]
+    assert snapshot.relevant_inputs == (
+        "stacks/media/example/compose.yaml",
+        "stacks/media/example/docs/upgrade.md",
+        "stacks/media/example/stack.yaml",
+    )
+    assert snapshot.changed_inputs == (
+        "stacks/media/example/docs/upgrade.md",
     )
     assert snapshot.complete is False
 

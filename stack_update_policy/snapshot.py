@@ -137,7 +137,7 @@ def read_github_repository(owner: str, name: str) -> GitHubRepositoryState:
                 "api",
                 "--method",
                 "GET",
-                f"repos/{owner}/{name}/commits/{quote(default_branch, safe='')}",
+                f"repos/{owner}/{name}/branches/{quote(default_branch, safe='')}",
             ],
             check=True,
             capture_output=True,
@@ -146,7 +146,10 @@ def read_github_repository(owner: str, name: str) -> GitHubRepositoryState:
         branch_payload = json.loads(branch.stdout)
         if not isinstance(branch_payload, dict):
             raise GitHubReadError("GitHub repository could not be read")
-        commit = branch_payload.get("sha")
+        commit_payload = branch_payload.get("commit")
+        commit = (
+            commit_payload.get("sha") if isinstance(commit_payload, dict) else None
+        )
         return GitHubRepositoryState(
             default_branch, commit if isinstance(commit, str) else ""
         )
@@ -425,39 +428,92 @@ def _index_differs_from_head(repository: Path, path: str) -> bool:
         raise
 
 
-def _checked_in_runbook(repository: Path, stack_identity: str) -> str | None:
+def _resolve_checked_in_runbook(
+    repository: Path, stack_identity: str, lexical_path: str
+) -> tuple[str, ...]:
+    """Return the checked-in symlinks and final object for one policy runbook."""
+    stack_parts = PurePosixPath(stack_identity).parts
+    lexical_parts = PurePosixPath(lexical_path).parts
+    current = list(stack_parts)
+    remaining = list(lexical_parts[len(stack_parts) :])
+    relevant: list[str] = []
+    visited_links: set[str] = set()
+
+    while remaining:
+        component = remaining.pop(0)
+        candidate = PurePosixPath(*current, component).as_posix()
+        entry = _tree_entry(repository, "HEAD", candidate)
+        if entry is not None and entry[0] == "120000" and entry[1] == "blob":
+            relevant.append(candidate)
+            if candidate in visited_links:
+                return tuple(dict.fromkeys(relevant))
+            visited_links.add(candidate)
+            try:
+                raw_target = _git(repository, "show", f"HEAD:{candidate}", text=False)
+                assert isinstance(raw_target, bytes)
+                target = raw_target.decode("utf-8")
+                target_path = PurePosixPath(target)
+            except (UnicodeDecodeError, ValueError, subprocess.CalledProcessError):
+                return tuple(dict.fromkeys(relevant))
+            if (
+                not target
+                or not _is_filesystem_encodable(target)
+                or target_path.is_absolute()
+                or any(part in {"", ".", ".."} for part in target.split("/"))
+            ):
+                return tuple(dict.fromkeys(relevant))
+            replacement = [*current, *target_path.parts]
+            if tuple(replacement[: len(stack_parts)]) != stack_parts:
+                return tuple(dict.fromkeys(relevant))
+            remaining = [*replacement[len(current) :], *remaining]
+            continue
+        if entry is None:
+            relevant.append(PurePosixPath(candidate, *remaining).as_posix())
+            return tuple(dict.fromkeys(relevant))
+        current.append(component)
+        if not remaining:
+            relevant.append(candidate)
+        elif entry[1] != "tree":
+            relevant.append(candidate)
+            return tuple(dict.fromkeys(relevant))
+
+    return tuple(dict.fromkeys(relevant))
+
+
+def _checked_in_runbook(repository: Path, stack_identity: str) -> tuple[str, ...]:
     manifest_path = f"{stack_identity}/stack.yaml"
     entry = _tree_entry(repository, "HEAD", manifest_path)
     if entry is None or entry[1] != "blob":
-        return None
+        return ()
     try:
         content = _git(repository, "show", f"HEAD:{manifest_path}", text=False)
         assert isinstance(content, bytes)
         metadata = yaml.safe_load(content.decode("utf-8"))
     except (UnicodeDecodeError, RecursionError, yaml.YAMLError):
-        return None
+        return ()
     if not isinstance(metadata, dict):
-        return None
+        return ()
     updates = metadata.get("updates")
     procedure = updates.get("procedure") if isinstance(updates, dict) else None
     if not isinstance(procedure, dict) or procedure.get("mode") != "assisted":
-        return None
+        return ()
     runbook = procedure.get("runbook")
     if not isinstance(runbook, str):
-        return None
+        return ()
     raw_runbook_path = runbook.partition("#")[0]
     if not _is_filesystem_encodable(raw_runbook_path) or any(
         ord(character) < 32 or ord(character) == 127
         for character in raw_runbook_path
     ):
-        return None
+        return ()
     try:
         runbook_path = PurePosixPath(raw_runbook_path)
     except ValueError:
-        return None
+        return ()
     if runbook_path.is_absolute() or not runbook_path.parts or ".." in runbook_path.parts:
-        return None
-    return (PurePosixPath(stack_identity) / runbook_path).as_posix()
+        return ()
+    lexical_path = (PurePosixPath(stack_identity) / runbook_path).as_posix()
+    return _resolve_checked_in_runbook(repository, stack_identity, lexical_path)
 
 
 def build_repository_snapshot(
@@ -624,9 +680,8 @@ def build_repository_snapshot(
             candidates = tuple(
                 f"{stack_identity}/{filename}" for filename in supported
             )
-            runbook = _checked_in_runbook(resolved_root, stack_identity)
-            if runbook is not None:
-                candidates += (runbook,)
+            runbook_inputs = _checked_in_runbook(resolved_root, stack_identity)
+            candidates += runbook_inputs
             candidates = tuple(sorted(set(candidates)))
             checked_in: dict[str, bool] = {}
             indexed: dict[str, bool] = {}
@@ -642,6 +697,7 @@ def build_repository_snapshot(
                     for path in candidates
                     if checked_in[path]
                     or indexed[path]
+                    or path in runbook_inputs
                     or (
                         _has_safe_worktree_parents(resolved_root, path)
                         and os.path.lexists(resolved_root / path)
