@@ -103,6 +103,10 @@ def validate_request(value: Any) -> tuple[dict[str, Any], dict[str, dict[str, An
             service = _object(raw_service, f"request schema services[{service_number}]")
             required = {"service", "image", "current_effective_reference", "current_digest", "track"}
             _exact_keys(service, required, {"candidate_effective_reference"}, "request schema service")
+            if stack["tracking_mode"] == "vendor" and "candidate_effective_reference" not in service:
+                raise ContractError("request schema vendor tracking requires candidate_effective_reference")
+            if stack["tracking_mode"] == "image" and "candidate_effective_reference" in service:
+                raise ContractError("request schema image tracking prohibits candidate_effective_reference")
             service_name = _string(service["service"], "request schema service identity")
             image = _string(service["image"], "request schema image")
             if not IDENTITY.fullmatch(service_name):
@@ -145,7 +149,7 @@ def _config(index: dict[str, dict[str, Any]]) -> dict[str, Any]:
     rules: list[dict[str, Any]] = [{"matchDatasources": ["docker"], "pinDigests": True, "separateMajorMinor": True}]
     for path, item in index.items():
         track = item["service"]["track"]
-        if track["kind"] == "floating-tag":
+        if track["kind"] in {"floating-tag", "exact-version"}:
             rules.append({"matchFileNames": [path], "allowedVersions": f"/^{re.escape(str(track['value']))}$/"})
     return {"$schema": "https://docs.renovatebot.com/renovate-schema.json", "enabledManagers": ["docker-compose"], "packageRules": rules}
 
@@ -255,16 +259,22 @@ def _normalize(request: dict[str, Any], index: dict[str, dict[str, Any]], batch:
                 raise ContractError(f"raw schema selected update for {path} has no comparable digest")
             supplied_reference = service.get("candidate_effective_reference")
             if supplied_reference is not None:
-                _, _, supplied_digest = _split_reference(
+                _, supplied_tag, supplied_digest = _split_reference(
                     supplied_reference,
                     "request schema candidate_effective_reference",
                 )
+                if supplied_tag != selected["newValue"]:
+                    raise ContractError(
+                        f"request schema candidate effective reference tag disagrees with Renovate selection for {path}"
+                    )
                 if supplied_digest is not None and supplied_digest != digest:
                     raise ContractError(
                         f"request schema candidate effective reference digest disagrees with Renovate selection for {path}"
                     )
-            exact_ref = f"{service['image']}:{selected['newValue']}" + (f"@{digest}" if digest else "")
-            candidate = {"effective_reference": supplied_reference or exact_ref, "digest": digest, "update_type": selected["updateType"], "proposed_exact_reference": exact_ref}
+            proposed_reference = f"{service['image']}:{selected['newValue']}"
+            if selected["updateType"] == "digest":
+                proposed_reference += f"@{digest}"
+            candidate = {"effective_reference": supplied_reference or proposed_reference, "digest": digest, "update_type": selected["updateType"], "proposed_exact_reference": proposed_reference}
         alternatives = []
         for update in updates:
             if update["updateType"] == "major":

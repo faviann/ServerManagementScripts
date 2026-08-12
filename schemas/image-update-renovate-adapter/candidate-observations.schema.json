@@ -59,8 +59,13 @@
                   "effective_reference": {"type": "string", "minLength": 1},
                   "digest": {"$ref": "#/$defs/digest"},
                   "update_type": {"enum": ["digest", "patch", "minor", "major"]},
-                  "proposed_exact_reference": {"type": "string", "pattern": "@sha256:[0-9a-f]{64}$"}
-                }
+                  "proposed_exact_reference": {"type": "string", "minLength": 1}
+                },
+                "allOf": [{
+                  "if": {"properties": {"update_type": {"const": "digest"}}},
+                  "then": {"properties": {"proposed_exact_reference": {"pattern": "^.+:[^@]+@sha256:[0-9a-f]{64}$"}}},
+                  "else": {"properties": {"proposed_exact_reference": {"pattern": "^.+:[^@]+$"}}}
+                }]
               }
             ]
           },

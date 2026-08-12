@@ -46,6 +46,10 @@ def test_contract_fixtures_cross_the_real_pinned_renovate_boundary() -> None:
     assert floating["candidate"]["proposed_exact_reference"].startswith("alpine:3.20@sha256:")
     vendor = next(item for item in result["observations"] if item["identity"]["stack"] == "vendor-baseline")
     assert vendor["candidate"]["effective_reference"] == "ghcr.io/immich-app/immich-server:v2.7.5"
+    assert vendor["candidate"]["proposed_exact_reference"] == "ghcr.io/immich-app/immich-server:v2.7.5"
     exact = next(item for item in result["observations"] if item["identity"]["stack"] == "exact-with-major")
     assert exact["candidate"]["update_type"] in {"minor", "patch"}
+    assert exact["candidate"]["effective_reference"] == exact["candidate"]["proposed_exact_reference"]
+    assert "@" not in exact["candidate"]["proposed_exact_reference"]
+    assert exact["candidate"]["digest"].startswith("sha256:")
     assert exact["visible_major_alternatives"]

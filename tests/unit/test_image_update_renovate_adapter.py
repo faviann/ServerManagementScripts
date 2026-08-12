@@ -130,6 +130,27 @@ def test_lookup_warning_is_incomplete_only_for_its_stack(tmp_path: Path) -> None
     assert failed["limitations"] == [{"kind": "dependency-lookup-warning", "message": "lookup unavailable"}]
 
 
+def test_image_exact_version_uses_readable_selected_reference_and_separate_digest(tmp_path: Path) -> None:
+    value = request(stack("web"))
+    service = value["stacks"][0]["services"][0]
+    service["current_effective_reference"] = f"alpine:3.19@{DIGEST_A}"
+    service["track"] = {"kind": "exact-version", "value": "3.20"}
+    body = FAKE_SUCCESS.replace(
+        '[{"updateType": "digest", "newValue": tag, "newDigest": "sha256:" + "b" * 64}]',
+        '[{"updateType": "minor", "newValue": "3.20", "newDigest": "sha256:" + "b" * 64}]',
+    )
+
+    completed, _ = run_adapter(tmp_path, value, body)
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["observations"][0]["candidate"] == {
+        "effective_reference": "alpine:3.20",
+        "digest": DIGEST_B,
+        "update_type": "minor",
+        "proposed_exact_reference": "alpine:3.20",
+    }
+
+
 def test_vendor_exact_track_selects_requested_tag_and_keeps_major_alternative(tmp_path: Path) -> None:
     value = request({
         "host": "media",
@@ -149,7 +170,7 @@ def test_vendor_exact_track_selects_requested_tag_and_keeps_major_alternative(tm
         '[{"updateType": "digest", "newValue": tag, "newDigest": "sha256:" + "b" * 64}]',
         '[{"updateType": "minor", "newValue": "2.7.5", "newDigest": "sha256:" + "b" * 64}, {"updateType": "major", "newValue": "3.1.0", "newDigest": "sha256:" + "c" * 64}]',
     )
-    completed, _ = run_adapter(tmp_path, value, body)
+    completed, capture = run_adapter(tmp_path, value, body)
 
     assert completed.returncode == 0, completed.stderr
     observation = json.loads(completed.stdout)["observations"][0]
@@ -157,7 +178,7 @@ def test_vendor_exact_track_selects_requested_tag_and_keeps_major_alternative(tm
         "effective_reference": "example/photos:2.7.5",
         "digest": DIGEST_B,
         "update_type": "minor",
-        "proposed_exact_reference": f"example/photos:2.7.5@{DIGEST_B}",
+        "proposed_exact_reference": "example/photos:2.7.5",
     }
     assert observation["visible_major_alternatives"] == [{
         "effective_reference": f"example/photos:3.1.0@sha256:{'c' * 64}",
@@ -165,6 +186,10 @@ def test_vendor_exact_track_selects_requested_tag_and_keeps_major_alternative(tm
         "digest": "sha256:" + "c" * 64,
     }]
     assert observation["vendor"] == {"repository": "https://github.com/example/photos", "candidate_commit": "abc123"}
+    assert capture["config"]["packageRules"][-1] == {
+        "matchFileNames": ["projections/media/photos/server/compose.yaml"],
+        "allowedVersions": "/^2\\.7\\.5$/",
+    }
 
 
 def test_vendor_candidate_embedded_digest_must_match_renovate_selection(tmp_path: Path) -> None:
@@ -191,6 +216,33 @@ def test_vendor_candidate_embedded_digest_must_match_renovate_selection(tmp_path
     assert completed.returncode != 0
     assert completed.stdout == ""
     assert "candidate effective reference" in completed.stderr
+
+
+def test_vendor_candidate_tag_must_match_renovate_selection(tmp_path: Path) -> None:
+    value = request({
+        "host": "media",
+        "stack": "photos",
+        "tracking_mode": "vendor",
+        "vendor": {"repository": "https://github.com/example/photos", "candidate_commit": "abc123"},
+        "services": [{
+            "service": "server",
+            "image": "example/photos",
+            "current_effective_reference": f"example/photos:2.5.0@{DIGEST_A}",
+            "candidate_effective_reference": "example/photos:2.7.5",
+            "current_digest": DIGEST_A,
+            "track": {"kind": "major-line", "value": 2},
+        }],
+    })
+    body = FAKE_SUCCESS.replace(
+        '[{"updateType": "digest", "newValue": tag, "newDigest": "sha256:" + "b" * 64}]',
+        '[{"updateType": "minor", "newValue": "2.8.0", "newMajor": 2, "newDigest": "sha256:" + "b" * 64}]',
+    )
+
+    completed, _ = run_adapter(tmp_path, value, body)
+
+    assert completed.returncode != 0
+    assert completed.stdout == ""
+    assert "candidate effective reference tag disagrees with Renovate selection" in completed.stderr
 
 
 @pytest.mark.parametrize(
@@ -271,6 +323,33 @@ def test_request_schema_failure_happens_before_renovate(tmp_path: Path) -> None:
     assert completed.stdout == ""
     assert capture == {}
     assert "request schema" in completed.stderr
+
+
+def test_vendor_tracking_requires_candidate_reference_before_renovate(tmp_path: Path) -> None:
+    value = request(stack("photos", image="example/photos"))
+    value["stacks"][0].update({
+        "tracking_mode": "vendor",
+        "vendor": {"repository": "https://github.com/example/photos", "candidate_commit": "abc123"},
+    })
+
+    completed, capture = run_adapter(tmp_path, value, FAKE_SUCCESS)
+
+    assert completed.returncode != 0
+    assert completed.stdout == ""
+    assert capture == {}
+    assert "vendor tracking requires candidate_effective_reference" in completed.stderr
+
+
+def test_image_tracking_rejects_candidate_reference_before_renovate(tmp_path: Path) -> None:
+    value = request(stack("web"))
+    value["stacks"][0]["services"][0]["candidate_effective_reference"] = "alpine:3.20"
+
+    completed, capture = run_adapter(tmp_path, value, FAKE_SUCCESS)
+
+    assert completed.returncode != 0
+    assert completed.stdout == ""
+    assert capture == {}
+    assert "image tracking prohibits candidate_effective_reference" in completed.stderr
 
 
 @pytest.mark.parametrize("kind", ["floating-tag", "exact-version", "major-line"])

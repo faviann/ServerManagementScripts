@@ -48,7 +48,25 @@
               }
             }
           }
-        }
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"tracking_mode": {"const": "vendor"}}},
+            "then": {
+              "properties": {
+                "services": {"items": {"required": ["candidate_effective_reference"]}}
+              }
+            }
+          },
+          {
+            "if": {"properties": {"tracking_mode": {"const": "image"}}},
+            "then": {
+              "properties": {
+                "services": {"items": {"not": {"required": ["candidate_effective_reference"]}}}
+              }
+            }
+          }
+        ]
       }
     }
   },
