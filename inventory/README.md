@@ -31,12 +31,12 @@ and does not run Hawser because it hosts Dockhand and Traefik instead of acting 
 
 ## Current Hosts
 
-| Host | Tier | Capability Groups | VMID | Notes |
-|------|------|-------------------|------|-------|
-| `auth` | `tier_small` | `cap_docker` | `303` | Auth stack host |
-| `portal` | `tier_medium` | `cap_docker` | `300` | Traefik host (`traefik_kop_enabled: false`) |
-| `servarr` | `tier_medium` | `cap_docker` | `302` | Servarr application host |
-| `seedbox` | `tier_large` | `cap_docker`, `cap_wireguard` | `301` | Download/tunneled host |
+| Host | Tier | Capability Groups | Notes |
+|------|------|-------------------|-------|
+| `auth` | `tier_small` | `cap_docker` | Auth stack host |
+| `portal` | `tier_medium` | `cap_docker` | Traefik host (`traefik_kop_enabled: false`) |
+| `servarr` | `tier_medium` | `cap_docker` | Servarr application host |
+| `seedbox` | `tier_large` | `cap_docker`, `cap_wireguard` | Download/tunneled host |
 
 ## Directory Layout
 
@@ -94,7 +94,7 @@ Host-specific overrides:
 ```yaml
 # host_vars/servarr.yml
 proxmox_lxc_overrides:
-  vmid: 302
+  vmid: 303
   hostname: servarr
 ```
 
