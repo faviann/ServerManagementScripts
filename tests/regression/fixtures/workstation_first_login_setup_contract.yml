@@ -9,8 +9,8 @@
     workstation_uid: "{{ lookup('pipe', 'id -u') | int }}"
     workstation_gid: "{{ lookup('pipe', 'id -g') | int }}"
     workstation_home: "{{ temp_root }}/home/{{ workstation_username }}"
-    workstation_aoe_proxy_firewall_nft_dir: "{{ temp_root }}/etc/nftables.d"
-    workstation_aoe_proxy_firewall_service_path: "{{ temp_root }}/etc/systemd/system/workstation-aoe-proxy-firewall.service"
+    workstation_origin_firewall_nft_dir: "{{ temp_root }}/etc/nftables.d"
+    workstation_origin_firewall_service_path: "{{ temp_root }}/etc/systemd/system/workstation-origin-firewall.service"
     workstation_packages: []
     workstation_locale_enabled: false
     workstation_chezmoi_install_enabled: false

@@ -4,8 +4,13 @@
 
 lxc_hwaddr: "BC:24:11:57:80:06"
 workstation_enabled: true
-workstation_aoe_proxy_firewall_enabled: true
-workstation_aoe_proxy_firewall_allowed_hosts:
+workstation_origin_firewall_enabled: true
+workstation_origin_firewall_protected_ports:
+  - 4001 # Agent of Empires proxy
+  - 9119 # Hermes dashboard
+  - 18789 # OpenClaw gateway
+  - 8788 # Reserved Collie origin
+workstation_origin_firewall_allowed_hosts:
   - portal
 # Persist selected workstation home paths across intentional LXC rebuilds.
 workstation_persistent_home_enabled: true

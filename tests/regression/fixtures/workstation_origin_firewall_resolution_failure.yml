@@ -1,5 +1,5 @@
 ---
-- name: Test AoE firewall allowlist resolution failure behavior
+- name: Test workstation origin firewall allowlist resolution failure behavior
   hosts: localhost
   connection: local
   gather_facts: false
@@ -8,15 +8,19 @@
     workstation_uid: "{{ lookup('pipe', 'id -u') | int }}"
     workstation_gid: "{{ lookup('pipe', 'id -g') | int }}"
     workstation_home: "{{ temp_root }}/home/{{ workstation_username }}"
-    workstation_aoe_proxy_firewall_nft_dir: "{{ temp_root }}/etc/nftables.d"
-    workstation_aoe_proxy_firewall_service_path: "{{ temp_root }}/etc/systemd/system/workstation-aoe-proxy-firewall.service"
+    workstation_origin_firewall_nft_dir: "{{ temp_root }}/etc/nftables.d"
+    workstation_origin_firewall_service_path: "{{ temp_root }}/etc/systemd/system/workstation-origin-firewall.service"
     workstation_packages: []
     workstation_locale_enabled: false
     workstation_persistent_home_enabled: false
-    workstation_aoe_proxy_firewall_enabled: true
-    workstation_aoe_proxy_firewall_allowed_hosts:
+    workstation_origin_firewall_enabled: true
+    workstation_origin_firewall_protected_ports:
+      - 4001
+      - 9119
+      - 18789
+      - 8788
+    workstation_origin_firewall_allowed_hosts:
       - broken-portal
-    workstation_openclaw_gateway_port: 18789
     workstation_setup_bin_path: "{{ temp_root }}/bin/workstation-setup"
     workstation_setup_profile_hook_path: "{{ temp_root }}/etc/profile.d/workstation-setup.sh"
     workstation_system_bin_owner: "{{ lookup('pipe', 'id -un') }}"

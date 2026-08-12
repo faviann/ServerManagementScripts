@@ -38,8 +38,8 @@
     mode: "0644"
   when: workstation_locale_enabled | default(true) | bool
 
-- name: Configure AoE LAN proxy firewall
-  ansible.builtin.include_tasks: aoe_proxy_firewall.yml
+- name: Configure workstation origin firewall
+  ansible.builtin.include_tasks: origin_firewall.yml
 
 - name: Configure workstation persistent home mounts
   ansible.builtin.include_tasks: persistent_home.yml
