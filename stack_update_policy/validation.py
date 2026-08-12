@@ -786,6 +786,33 @@ def _validate_common_image_vendor_policy(
     return service_policies
 
 
+def _validate_update_fields(
+    updates: dict[str, Any],
+    allowed_keys: set[str],
+    errors: list[ValidationError],
+) -> None:
+    unknown = sorted(
+        (key for key in updates if not isinstance(key, str) or key not in allowed_keys),
+        key=str,
+    )
+    if not unknown:
+        return
+    rendered = ", ".join(
+        "<secret-key>"
+        if isinstance(key, str) and _is_secret_key(key)
+        else key
+        if isinstance(key, str)
+        else "<non-string-key>"
+        for key in unknown
+    )
+    _error(
+        errors,
+        "invalid-policy",
+        "stack.yaml.updates",
+        f"unsupported policy fields: {rendered}",
+    )
+
+
 def _validate_image_policy(
     stack_root: Path,
     metadata: dict[str, Any],
@@ -804,31 +831,7 @@ def _validate_image_policy(
     if updates.get("mode") != "images":
         _error(errors, "unsupported-mode", "stack.yaml.updates.mode", "strict validation supports only images mode")
     allowed_update_keys = {"mode", "track", "services", "procedure", "low_confidence"}
-    unknown = sorted(
-        (
-            key
-            for key in updates
-            if not isinstance(key, str) or key not in allowed_update_keys
-        ),
-        key=str,
-    )
-    if unknown:
-        rendered_unknown = ", ".join(
-            (
-                "<secret-key>"
-                if isinstance(key, str) and _is_secret_key(key)
-                else key
-                if isinstance(key, str)
-                else "<non-string-key>"
-            )
-            for key in unknown
-        )
-        _error(
-            errors,
-            "invalid-policy",
-            "stack.yaml.updates",
-            f"unsupported policy fields: {rendered_unknown}",
-        )
+    _validate_update_fields(updates, allowed_update_keys, errors)
     service_policies = _validate_common_image_vendor_policy(
         updates, effective, errors
     )
@@ -881,25 +884,7 @@ def _validate_vendor_policy(
         "procedure",
         "low_confidence",
     }
-    unknown = sorted(
-        (key for key in updates if not isinstance(key, str) or key not in allowed_update_keys),
-        key=str,
-    )
-    if unknown:
-        rendered = ", ".join(
-            "<secret-key>"
-            if isinstance(key, str) and _is_secret_key(key)
-            else key
-            if isinstance(key, str)
-            else "<non-string-key>"
-            for key in unknown
-        )
-        _error(
-            errors,
-            "invalid-policy",
-            "stack.yaml.updates",
-            f"unsupported policy fields: {rendered}",
-        )
+    _validate_update_fields(updates, allowed_update_keys, errors)
     service_policies = _validate_common_image_vendor_policy(
         updates, effective, errors
     )
@@ -950,6 +935,7 @@ def _validate_vendor_policy(
         not vendor_base.is_file()
         or vendor_base.is_symlink()
         or (stack_root / "compose.yml").exists()
+        or (stack_root / "compose.yml").is_symlink()
     ):
         _error(
             errors,
@@ -959,6 +945,7 @@ def _validate_vendor_policy(
         )
     if (
         (stack_root / "compose.override.yml").exists()
+        or (stack_root / "compose.override.yml").is_symlink()
         or vendor_override.is_symlink()
         or (vendor_override.exists() and not vendor_override.is_file())
     ):

@@ -802,6 +802,21 @@ def test_vendor_policy_rejects_unknown_services_and_unsupported_layout(
     )
 
 
+def test_vendor_policy_rejects_dangling_compose_yml_symlink(tmp_path: Path) -> None:
+    upstream = tmp_path / "upstream"
+    stack = write_vendor_stack(tmp_path, upstream)
+    (stack / "compose.yml").symlink_to("missing-compose.yml")
+
+    completed = run_validate(tmp_path, env=vendor_environment(upstream))
+
+    assert completed.returncode == 1
+    assert {
+        "code": "unsupported-vendor-layout",
+        "message": "vendor base must be a checked-in compose.yaml file",
+        "path": "compose",
+    } in json.loads(completed.stdout)["errors"]
+
+
 def test_vendor_override_must_be_a_regular_file(tmp_path: Path) -> None:
     upstream = tmp_path / "upstream"
     stack = write_vendor_stack(tmp_path, upstream)
@@ -814,6 +829,23 @@ def test_vendor_override_must_be_a_regular_file(tmp_path: Path) -> None:
     assert "unsupported-vendor-layout" in {
         error["code"] for error in json.loads(completed.stdout)["errors"]
     }
+
+
+def test_vendor_policy_rejects_dangling_compose_override_yml_symlink(
+    tmp_path: Path,
+) -> None:
+    upstream = tmp_path / "upstream"
+    stack = write_vendor_stack(tmp_path, upstream)
+    (stack / "compose.override.yml").symlink_to("missing-compose.override.yml")
+
+    completed = run_validate(tmp_path, env=vendor_environment(upstream))
+
+    assert completed.returncode == 1
+    assert {
+        "code": "unsupported-vendor-layout",
+        "message": "vendor override must use compose.override.yaml",
+        "path": "compose",
+    } in json.loads(completed.stdout)["errors"]
 
 
 def test_vendor_git_failures_are_structured_and_redact_external_output(
