@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+module_name="$(basename "${1:?missing Ansible module path}")"
+state_root="${WORKSTATION_ORIGIN_FIREWALL_STUB_STATE:?missing stub state path}"
+
+case "$module_name" in
+  AnsiballZ_apt.py)
+    mkdir -p "$state_root"
+    if [[ -e "$state_root/apt" ]]; then
+      changed=false
+    else
+      touch "$state_root/apt"
+      changed=true
+    fi
+    printf '{"changed":%s}\n' "$changed"
+    ;;
+  AnsiballZ_systemd.py | AnsiballZ_systemd_service.py)
+    mkdir -p "$state_root"
+    if [[ -e "$state_root/systemd" ]]; then
+      changed=false
+    else
+      touch "$state_root/systemd"
+      changed=true
+    fi
+    printf '{"changed":%s,"status":{}}\n' "$changed"
+    ;;
+  *)
+    exec /usr/bin/python3 "$@"
+    ;;
+esac

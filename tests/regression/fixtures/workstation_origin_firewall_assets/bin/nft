@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+state_root="${WORKSTATION_ORIGIN_FIREWALL_STUB_STATE:?missing stub state path}"
+
+if [[ "${1:-}" == "-c" && "${2:-}" == "-f" ]]; then
+  test -f "${3:?missing ruleset path}"
+  touch "$state_root/validated-rules"
+  exit 0
+fi
+
+if [[ "${1:-}" == "delete" ]]; then
+  table_marker="$state_root/legacy-table"
+  if [[ -e "$table_marker" ]]; then
+    rm "$table_marker"
+    exit 0
+  fi
+  exit 1
+fi

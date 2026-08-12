@@ -1,0 +1,215 @@
+---
+- name: Assert workstation origin firewall inputs are valid
+  ansible.builtin.assert:
+    that:
+      - workstation_origin_firewall_protected_ports | length > 0
+      - workstation_origin_firewall_protected_ports | min | int > 0
+      - workstation_origin_firewall_protected_ports | max | int < 65536
+      - workstation_origin_firewall_protected_ports | unique | list | length == workstation_origin_firewall_protected_ports | length
+      - workstation_origin_firewall_allowed_hosts | length == 1
+    fail_msg: >-
+      config/lxc_workstation_baseline requires unique protected TCP ports and exactly one allowed inventory host
+      when workstation_origin_firewall_enabled is true.
+  when: workstation_origin_firewall_enabled | bool
+
+- name: Set workstation origin firewall allowlist host
+  ansible.builtin.set_fact:
+    workstation_origin_firewall_allowed_host: "{{ workstation_origin_firewall_allowed_hosts | first }}"
+  when: workstation_origin_firewall_enabled | bool
+
+- name: Assert workstation origin firewall host exists in inventory
+  ansible.builtin.assert:
+    that:
+      - workstation_origin_firewall_allowed_host in hostvars
+    fail_msg: >-
+      config/lxc_workstation_baseline cannot resolve allowed host '{{ workstation_origin_firewall_allowed_host }}'
+      because it is not present in inventory.
+  when: workstation_origin_firewall_enabled | bool
+
+- name: Derive workstation origin firewall allowlist endpoint
+  ansible.builtin.set_fact:
+    workstation_origin_firewall_allowed_endpoint: >-
+      {{
+        hostvars[workstation_origin_firewall_allowed_host].ansible_host
+        | default(workstation_origin_firewall_allowed_host)
+      }}
+  when: workstation_origin_firewall_enabled | bool
+
+- name: Resolve workstation origin firewall allowlist address
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      getent ahostsv4 {{ workstation_origin_firewall_allowed_endpoint | quote }} | awk '{print $1}' | sort -u
+    executable: /bin/bash
+  register: workstation_origin_firewall_resolution
+  failed_when: false
+  changed_when: false
+  check_mode: false
+  delegate_to: localhost
+  when: workstation_origin_firewall_enabled | bool
+
+- name: Assert workstation origin firewall host resolution succeeded
+  ansible.builtin.assert:
+    that:
+      - workstation_origin_firewall_resolution.rc == 0
+      - ( workstation_origin_firewall_resolution.stdout_lines | default([]) | select('match', '^[0-9]+(?:\\.[0-9]+){3}$') | list | length
+        ) > 0
+    fail_msg: >-
+      config/lxc_workstation_baseline could not resolve any IPv4 address for
+      allowed host '{{ workstation_origin_firewall_allowed_host }}' using endpoint
+      '{{ workstation_origin_firewall_allowed_endpoint }}'.
+      Fix inventory ansible_host/DNS for this host before enabling
+      workstation_origin_firewall_enabled.
+  when: workstation_origin_firewall_enabled | bool
+
+- name: Collect workstation origin firewall IPv4 allowlist
+  ansible.builtin.set_fact:
+    workstation_origin_firewall_allowed_ipv4: >-
+      {{
+        workstation_origin_firewall_resolution.stdout_lines
+        | default([])
+        | select('match', '^[0-9]+(?:\.[0-9]+){3}$')
+        | unique
+        | list
+      }}
+  when: workstation_origin_firewall_enabled | bool
+
+- name: Assert workstation origin firewall allowlist resolved
+  ansible.builtin.assert:
+    that:
+      - workstation_origin_firewall_allowed_ipv4 | length > 0
+    fail_msg: >-
+      config/lxc_workstation_baseline could not resolve any IPv4 addresses for
+      workstation_origin_firewall_allowed_hosts.
+  when: workstation_origin_firewall_enabled | bool
+
+- name: Install workstation origin firewall package
+  ansible.builtin.apt:
+    name: nftables
+    state: present
+    update_cache: true
+  when: workstation_origin_firewall_enabled | bool
+
+- name: Ensure workstation origin firewall include directory exists
+  ansible.builtin.file:
+    path: "{{ workstation_origin_firewall_nft_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: workstation_origin_firewall_enabled | bool
+
+- name: Deploy workstation origin firewall rules
+  ansible.builtin.template:
+    src: workstation-origin-firewall.nft.j2
+    dest: "{{ workstation_origin_firewall_nft_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart workstation origin firewall
+  when: workstation_origin_firewall_enabled | bool
+
+- name: Validate workstation origin firewall ruleset
+  ansible.builtin.command:
+    argv:
+      - nft
+      - -c
+      - -f
+      - "{{ workstation_origin_firewall_nft_path }}"
+  changed_when: false
+  when:
+    - workstation_origin_firewall_enabled | bool
+    - not ansible_check_mode
+
+- name: Deploy workstation origin firewall service
+  ansible.builtin.template:
+    src: workstation-origin-firewall.service.j2
+    dest: "{{ workstation_origin_firewall_service_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart workstation origin firewall
+  when: workstation_origin_firewall_enabled | bool
+
+- name: Enable workstation origin firewall service
+  ansible.builtin.systemd:
+    name: "{{ workstation_origin_firewall_service_path | basename }}"
+    daemon_reload: true
+    enabled: true
+    state: started
+  when: workstation_origin_firewall_enabled | bool
+
+- name: Flush workstation origin firewall handlers
+  ansible.builtin.meta: flush_handlers
+  when:
+    - workstation_origin_firewall_enabled | bool
+    - not ansible_check_mode
+
+- name: Stat workstation origin firewall unit file
+  ansible.builtin.stat:
+    path: "{{ workstation_origin_firewall_service_path }}"
+  register: _workstation_origin_firewall_service_stat
+  when: not workstation_origin_firewall_enabled | bool
+
+- name: Stop workstation origin firewall service when disabled
+  ansible.builtin.systemd:
+    name: "{{ workstation_origin_firewall_service_path | basename }}"
+    daemon_reload: true
+    enabled: false
+    state: stopped
+  failed_when: false
+  when:
+    - not workstation_origin_firewall_enabled | bool
+    - _workstation_origin_firewall_service_stat.stat.exists | default(false)
+
+- name: Remove live workstation origin firewall table when disabled
+  ansible.builtin.command:
+    argv: [nft, delete, table, inet, workstation_origin]
+  register: workstation_origin_firewall_delete_result
+  changed_when: workstation_origin_firewall_delete_result.rc == 0
+  failed_when: false
+  when: not workstation_origin_firewall_enabled | bool
+
+- name: Remove workstation origin firewall artifacts when disabled
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ workstation_origin_firewall_service_path }}"
+    - "{{ workstation_origin_firewall_nft_path }}"
+  when: not workstation_origin_firewall_enabled | bool
+
+- name: Stat legacy AoE LAN proxy firewall unit file
+  ansible.builtin.stat:
+    path: "{{ workstation_origin_firewall_service_path | dirname }}/workstation-aoe-proxy-firewall.service"
+  register: _workstation_legacy_aoe_firewall_service_stat
+
+- name: Stop legacy AoE LAN proxy firewall service
+  ansible.builtin.systemd:
+    name: workstation-aoe-proxy-firewall.service
+    daemon_reload: true
+    enabled: false
+    state: stopped
+  failed_when: false
+  when: _workstation_legacy_aoe_firewall_service_stat.stat.exists | default(false)
+
+- name: Remove legacy AoE LAN proxy firewall table
+  ansible.builtin.command:
+    argv: [nft, delete, table, inet, workstation_aoe_proxy]
+  register: workstation_legacy_aoe_firewall_delete_result
+  changed_when: workstation_legacy_aoe_firewall_delete_result.rc == 0
+  failed_when: false
+
+- name: Remove legacy AoE LAN proxy firewall rules
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ workstation_origin_firewall_service_path | dirname }}/workstation-aoe-proxy-firewall.service"
+    - "{{ workstation_origin_firewall_nft_dir }}/workstation-aoe-proxy.nft"
+
+- name: Reload systemd after workstation origin firewall cleanup
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when:
+    - not workstation_origin_firewall_enabled | bool or _workstation_legacy_aoe_firewall_service_stat.stat.exists | default(false)

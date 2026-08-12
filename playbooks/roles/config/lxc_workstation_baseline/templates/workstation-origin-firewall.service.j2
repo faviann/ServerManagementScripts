@@ -1,0 +1,13 @@
+[Unit]
+Description=Workstation origin firewall
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f {{ workstation_origin_firewall_nft_path }}
+ExecStop=/usr/sbin/nft delete table inet workstation_origin
+
+[Install]
+WantedBy=multi-user.target

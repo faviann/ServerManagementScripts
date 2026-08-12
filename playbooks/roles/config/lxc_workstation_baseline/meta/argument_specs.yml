@@ -31,33 +31,20 @@ argument_specs:
         type: str
         required: false
         description: Filesystem home directory for the workstation login account.
-      workstation_aoe_proxy_firewall_enabled:
+      workstation_origin_firewall_enabled:
         type: bool
         required: false
-        description: Whether to restrict the AoE LAN proxy port inside the workstation LXC.
-      workstation_aoe_proxy_firewall_port:
-        type: int
+        description: Whether to restrict declared workstation origin ports inside the LXC.
+      workstation_origin_firewall_protected_ports:
+        type: list
+        elements: int
         required: false
-        description: TCP port exposed by the workstation-local AoE LAN proxy.
-      workstation_aoe_proxy_firewall_allowed_hosts:
+        description: TCP origin ports restricted to loopback and the allowed inventory host.
+      workstation_origin_firewall_allowed_hosts:
         type: list
         elements: str
         required: false
-        description: Inventory hosts allowed to reach the AoE LAN proxy port.
-      workstation_hermes_dashboard_port:
-        type: int
-        required: false
-        description: >-
-          Port the Hermes Agent dashboard binds to (default 9119). Firewall
-          rules for this port are added to the AoE nft table when
-          workstation_aoe_proxy_firewall_enabled is true.
-      workstation_openclaw_gateway_port:
-        type: int
-        required: false
-        description: >-
-          Port the OpenClaw gateway dashboard binds to (default 18789). Firewall
-          rules for this port are added to the AoE nft table when
-          workstation_aoe_proxy_firewall_enabled is true.
+        description: Single inventory host allowed to reach protected workstation origin ports.
       workstation_persistent_home_enabled:
         type: bool
         required: false

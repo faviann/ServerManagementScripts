@@ -1,0 +1,19 @@
+table inet workstation_origin {
+  set allowed_ipv4 {
+    type ipv4_addr
+    elements = { {% for address in workstation_origin_firewall_allowed_ipv4 %}{{ address }}{% if not loop.last %}, {% endif %}{% endfor %} }
+  }
+
+  set protected_tcp_ports {
+    type inet_service
+    elements = { {% for port in workstation_origin_firewall_protected_ports %}{{ port }}{% if not loop.last %}, {% endif %}{% endfor %} }
+  }
+
+  chain input {
+    type filter hook input priority 0; policy accept;
+
+    iifname "lo" tcp dport @protected_tcp_ports accept
+    ip saddr @allowed_ipv4 tcp dport @protected_tcp_ports accept
+    tcp dport @protected_tcp_ports drop
+  }
+}
