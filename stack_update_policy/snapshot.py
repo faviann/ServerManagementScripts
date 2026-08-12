@@ -11,7 +11,6 @@ import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from urllib.parse import quote
 
 import yaml
 
@@ -116,43 +115,51 @@ def _git(repository: Path, *arguments: str, text: bool = True) -> str | bytes:
 
 def read_github_repository(owner: str, name: str) -> GitHubRepositoryState:
     """Resolve a repository's current default branch and commit using GitHub reads."""
+    query = (
+        "query($owner:String!,$name:String!){"
+        "repository(owner:$owner,name:$name){"
+        "defaultBranchRef{name target{... on Commit{oid}}}}}"
+    )
     try:
         repository = subprocess.run(
-            ["gh", "api", "--method", "GET", f"repos/{owner}/{name}"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        repository_payload = json.loads(repository.stdout)
-        if not isinstance(repository_payload, dict):
-            raise GitHubReadError("GitHub repository could not be read")
-        default_branch = repository_payload.get("default_branch")
-        if not isinstance(default_branch, str) or not default_branch:
-            return GitHubRepositoryState("", "")
-        if not _is_valid_git_branch_name(default_branch):
-            return GitHubRepositoryState(default_branch, "")
-        branch = subprocess.run(
             [
                 "gh",
                 "api",
-                "--method",
-                "GET",
-                f"repos/{owner}/{name}/branches/{quote(default_branch, safe='')}",
+                "graphql",
+                "-f",
+                f"query={query}",
+                "-F",
+                f"owner={owner}",
+                "-F",
+                f"name={name}",
             ],
             check=True,
             capture_output=True,
             text=True,
         )
-        branch_payload = json.loads(branch.stdout)
-        if not isinstance(branch_payload, dict):
+        payload = json.loads(repository.stdout)
+        if not isinstance(payload, dict) or set(payload) != {"data"}:
             raise GitHubReadError("GitHub repository could not be read")
-        commit_payload = branch_payload.get("commit")
-        commit = (
-            commit_payload.get("sha") if isinstance(commit_payload, dict) else None
-        )
-        return GitHubRepositoryState(
-            default_branch, commit if isinstance(commit, str) else ""
-        )
+        data = payload["data"]
+        if not isinstance(data, dict) or set(data) != {"repository"}:
+            raise GitHubReadError("GitHub repository could not be read")
+        repository_payload = data["repository"]
+        if (
+            not isinstance(repository_payload, dict)
+            or set(repository_payload) != {"defaultBranchRef"}
+        ):
+            raise GitHubReadError("GitHub repository could not be read")
+        branch = repository_payload["defaultBranchRef"]
+        if not isinstance(branch, dict) or set(branch) != {"name", "target"}:
+            raise GitHubReadError("GitHub repository could not be read")
+        target = branch["target"]
+        if not isinstance(target, dict) or set(target) != {"oid"}:
+            raise GitHubReadError("GitHub repository could not be read")
+        default_branch = branch["name"]
+        commit = target["oid"]
+        if not isinstance(default_branch, str) or not isinstance(commit, str):
+            raise GitHubReadError("GitHub repository could not be read")
+        return GitHubRepositoryState(default_branch, commit)
     except (OSError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
         raise GitHubReadError("GitHub repository could not be read") from exc
 
@@ -459,13 +466,22 @@ def _resolve_checked_in_runbook(
                 not target
                 or not _is_filesystem_encodable(target)
                 or target_path.is_absolute()
-                or any(part in {"", ".", ".."} for part in target.split("/"))
             ):
                 return tuple(dict.fromkeys(relevant))
-            replacement = [*current, *target_path.parts]
+            replacement = list(current)
+            for part in target.split("/"):
+                if part in {"", "."}:
+                    continue
+                if part == "..":
+                    if len(replacement) == len(stack_parts):
+                        return tuple(dict.fromkeys(relevant))
+                    replacement.pop()
+                else:
+                    replacement.append(part)
             if tuple(replacement[: len(stack_parts)]) != stack_parts:
                 return tuple(dict.fromkeys(relevant))
-            remaining = [*replacement[len(current) :], *remaining]
+            current = list(stack_parts)
+            remaining = [*replacement[len(stack_parts) :], *remaining]
             continue
         if entry is None:
             relevant.append(PurePosixPath(candidate, *remaining).as_posix())

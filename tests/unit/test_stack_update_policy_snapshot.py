@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -98,30 +99,33 @@ def create_nested_compose_gitlink(repository: Path) -> tuple[Path, str, str, str
     return nested, compose_path, first_commit, second_commit
 
 
-def test_github_reader_resolves_hex_shaped_default_branch_through_branch_endpoint(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("branch", ["release/stable", "a" * 40])
+def test_github_reader_reads_one_coherent_default_branch_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, branch: str
 ) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     request_log = tmp_path / "requests.log"
-    branch = "a" * 40
     tip = "b" * 40
     fake_gh = fake_bin / "gh"
     fake_gh.write_text(
-        r"""#!/bin/sh
-set -eu
-printf '%s\n' "$*" >> "$FAKE_GH_REQUEST_LOG"
-case "$*" in
-  "api --method GET repos/example/homelab")
-    printf '{"default_branch":"%s"}\n' "$FAKE_GH_BRANCH"
-    ;;
-  api\ --method\ GET\ repos/example/homelab/branches/*)
-    printf '{"commit":{"sha":"%s"}}\n' "$FAKE_GH_TIP"
-    ;;
-  *)
-    exit 41
-    ;;
-esac
+        r"""#!/usr/bin/env python3
+import json
+import os
+import sys
+
+with open(os.environ["FAKE_GH_REQUEST_LOG"], "a", encoding="utf-8") as log:
+    log.write(json.dumps(sys.argv[1:]) + "\n")
+print(json.dumps({
+    "data": {
+        "repository": {
+            "defaultBranchRef": {
+                "name": os.environ["FAKE_GH_BRANCH"],
+                "target": {"oid": os.environ["FAKE_GH_TIP"]},
+            }
+        }
+    }
+}))
 """,
         encoding="utf-8",
     )
@@ -134,10 +138,75 @@ esac
     state = read_github_repository("example", "homelab")
 
     assert state == GitHubRepositoryState(branch, tip)
-    assert request_log.read_text(encoding="utf-8").splitlines() == [
-        "api --method GET repos/example/homelab",
-        f"api --method GET repos/example/homelab/branches/{branch}",
+    requests = request_log.read_text(encoding="utf-8").splitlines()
+    assert len(requests) == 1
+    arguments = json.loads(requests[0])
+    assert arguments[:2] == ["api", "graphql"]
+    assert "-F" in arguments
+    assert "owner=example" in arguments
+    assert "name=homelab" in arguments
+    query_arguments = [
+        argument for argument in arguments if argument.startswith("query=")
     ]
+    assert len(query_arguments) == 1
+    assert "$owner" in query_arguments[0]
+    assert "$name" in query_arguments[0]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"data": {}, "unexpected": True},
+        {"data": {"repository": {"defaultBranchRef": None}}},
+        {
+            "data": {
+                "repository": {
+                    "defaultBranchRef": {"name": "main", "target": {}}
+                }
+            }
+        },
+        {
+            "data": {
+                "repository": {
+                    "defaultBranchRef": {
+                        "name": "main",
+                        "target": {"oid": 123},
+                    }
+                }
+            }
+        },
+    ],
+)
+def test_github_reader_fails_safe_for_malformed_coherent_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: object,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    request_log = tmp_path / "requests.log"
+    fake_gh = fake_bin / "gh"
+    fake_gh.write_text(
+        r"""#!/usr/bin/env python3
+import os
+import sys
+
+with open(os.environ["FAKE_GH_REQUEST_LOG"], "a", encoding="utf-8") as log:
+    log.write("called\n")
+sys.stdout.write(os.environ["FAKE_GH_PAYLOAD"])
+""",
+        encoding="utf-8",
+    )
+    fake_gh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_GH_REQUEST_LOG", str(request_log))
+    monkeypatch.setenv("FAKE_GH_PAYLOAD", json.dumps(payload))
+
+    with pytest.raises(GitHubReadError, match="could not be read"):
+        read_github_repository("example", "homelab")
+
+    assert request_log.read_text(encoding="utf-8").splitlines() == ["called"]
 
 
 def test_clean_default_branch_checkout_has_publishable_stack_snapshot(
@@ -953,6 +1022,122 @@ updates:
         "stacks/media/example/runbooks/upgrade.md",
         "stacks/media/example/stack.yaml",
     )
+
+
+def test_checked_in_runbook_symlink_targets_normalize_within_selected_stack(
+    tmp_path: Path,
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    stack = repository / "stacks/media/example"
+    (stack / "stack.yaml").write_text(
+        """\
+updates:
+  mode: images
+  track: stable
+  procedure:
+    mode: assisted
+    runbook: docs/upgrade.md
+""",
+        encoding="utf-8",
+    )
+    (stack / "docs").mkdir()
+    (stack / "runbooks").mkdir()
+    target = stack / "runbooks/final.md"
+    target.write_text("# Upgrade\n", encoding="utf-8")
+    (stack / "runbooks/upgrade.md").symlink_to("./content/../final.md")
+    (stack / "docs/upgrade.md").symlink_to("../runbooks/upgrade.md")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "add normalized runbook symlink chain")
+    commit = git(repository, "rev-parse", "HEAD")
+    reader = lambda owner, name: GitHubRepositoryState("main", commit)
+
+    clean = build_repository_snapshot(
+        repository, ["stacks/media/example"], github_reader=reader
+    )
+    target.write_text("locally changed\n", encoding="utf-8")
+    dirty = build_repository_snapshot(
+        repository, ["stacks/media/example"], github_reader=reader
+    )
+
+    assert clean.errors == ()
+    assert clean.snapshot is not None
+    assert dirty.snapshot is not None
+    clean_stack = clean.snapshot.stacks[0]
+    dirty_stack = dirty.snapshot.stacks[0]
+    assert clean_stack.complete is True
+    assert clean_stack.relevant_inputs == (
+        "stacks/media/example/compose.yaml",
+        "stacks/media/example/docs/upgrade.md",
+        "stacks/media/example/runbooks/final.md",
+        "stacks/media/example/runbooks/upgrade.md",
+        "stacks/media/example/stack.yaml",
+    )
+    assert dirty_stack.complete is False
+    assert dirty_stack.changed_inputs == (
+        "stacks/media/example/runbooks/final.md",
+    )
+    git(repository, "add", "stacks/media/example/runbooks/final.md")
+    git(repository, "commit", "-m", "change normalized runbook target")
+    changed_commit = git(repository, "rev-parse", "HEAD")
+    committed = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState(
+            "main", changed_commit
+        ),
+    )
+
+    assert committed.snapshot is not None
+    committed_stack = committed.snapshot.stacks[0]
+    assert committed_stack.complete is True
+    assert committed_stack.fingerprint != clean_stack.fingerprint
+
+
+def test_checked_in_runbook_symlink_target_cannot_escape_selected_stack(
+    tmp_path: Path,
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    stack = repository / "stacks/media/example"
+    (stack / "stack.yaml").write_text(
+        """\
+updates:
+  mode: images
+  track: stable
+  procedure:
+    mode: assisted
+    runbook: docs/upgrade.md
+""",
+        encoding="utf-8",
+    )
+    (stack / "docs").mkdir()
+    external_target = repository / "stacks/media/shared.md"
+    external_target.write_text("# Not this stack's runbook\n", encoding="utf-8")
+    (stack / "docs/upgrade.md").symlink_to("../../shared.md")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "add escaping runbook symlink")
+    commit = git(repository, "rev-parse", "HEAD")
+    reader = lambda owner, name: GitHubRepositoryState("main", commit)
+
+    clean = build_repository_snapshot(
+        repository, ["stacks/media/example"], github_reader=reader
+    )
+    external_target.write_text(
+        "locally changed outside selected stack\n", encoding="utf-8"
+    )
+    dirty_external = build_repository_snapshot(
+        repository, ["stacks/media/example"], github_reader=reader
+    )
+
+    assert clean.snapshot is not None
+    assert dirty_external.snapshot is not None
+    clean_stack = clean.snapshot.stacks[0]
+    dirty_stack = dirty_external.snapshot.stacks[0]
+    assert clean_stack.relevant_inputs == (
+        "stacks/media/example/compose.yaml",
+        "stacks/media/example/docs/upgrade.md",
+        "stacks/media/example/stack.yaml",
+    )
+    assert dirty_stack == clean_stack
 
 
 @pytest.mark.parametrize(
