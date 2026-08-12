@@ -455,6 +455,22 @@ def _resolve_checked_in_path(
 
     while remaining:
         component = remaining.pop(0)
+        if component in {"", "."}:
+            continue
+        if component == "..":
+            if len(current) == len(stack_parts):
+                return _CheckedInPathResolution(
+                    tuple(dict.fromkeys(relevant)), None
+                )
+            crossed_path = PurePosixPath(*current).as_posix()
+            crossed_entry = _tree_entry(repository, "HEAD", crossed_path)
+            if crossed_entry is None or crossed_entry[1] != "tree":
+                relevant.append(crossed_path)
+                return _CheckedInPathResolution(
+                    tuple(dict.fromkeys(relevant)), None
+                )
+            current.pop()
+            continue
         candidate = PurePosixPath(*current, component).as_posix()
         entry = _tree_entry(repository, "HEAD", candidate)
         if entry is not None and entry[0] == "120000" and entry[1] == "blob":
@@ -475,27 +491,18 @@ def _resolve_checked_in_path(
                 or target_path.is_absolute()
             ):
                 return _CheckedInPathResolution(tuple(dict.fromkeys(relevant)), None)
-            replacement = list(current)
-            for part in target.split("/"):
-                if part in {"", "."}:
-                    continue
-                if part == "..":
-                    if len(replacement) == len(stack_parts):
-                        return _CheckedInPathResolution(
-                            tuple(dict.fromkeys(relevant)), None
-                        )
-                    replacement.pop()
-                else:
-                    replacement.append(part)
-            if tuple(replacement[: len(stack_parts)]) != stack_parts:
-                return _CheckedInPathResolution(tuple(dict.fromkeys(relevant)), None)
             if target.endswith("/") and not remaining:
                 requires_directory = True
+            replacement = [*current[len(stack_parts) :], *target.split("/")]
             current = list(stack_parts)
-            remaining = [*replacement[len(stack_parts) :], *remaining]
+            remaining = [*replacement, *remaining]
             continue
         if entry is None:
-            final_path = PurePosixPath(candidate, *remaining).as_posix()
+            final_path = (
+                candidate
+                if ".." in remaining
+                else PurePosixPath(candidate, *remaining).as_posix()
+            )
             relevant.append(final_path)
             return _CheckedInPathResolution(
                 tuple(dict.fromkeys(relevant)), None
@@ -512,7 +519,8 @@ def _resolve_checked_in_path(
             relevant.append(PurePosixPath(candidate, *remaining).as_posix())
             return _CheckedInPathResolution(tuple(dict.fromkeys(relevant)), None)
 
-    final_path = relevant[-1] if relevant else lexical_path
+    final_path = PurePosixPath(*current).as_posix()
+    relevant.append(final_path)
     return _CheckedInPathResolution(tuple(dict.fromkeys(relevant)), final_path)
 
 

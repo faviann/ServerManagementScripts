@@ -1151,6 +1151,120 @@ updates:
         assert snapshot.changed_inputs == ()
 
 
+@pytest.mark.parametrize("input_kind", ["compose", "runbook"])
+@pytest.mark.parametrize("obstacle_kind", ["missing", "file"])
+def test_checked_in_input_symlink_cannot_cancel_an_unproven_parent_component(
+    tmp_path: Path, input_kind: str, obstacle_kind: str
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    stack = repository / "stacks/media/example"
+    target = stack / "real.yaml"
+    target.write_text("services: {}\n", encoding="utf-8")
+    obstacle = stack / f"{obstacle_kind}-component"
+    if obstacle_kind == "file":
+        obstacle.write_text("not a directory\n", encoding="utf-8")
+    if input_kind == "compose":
+        link = stack / "compose.yaml"
+    else:
+        link = stack / "guide.yaml"
+        (stack / "stack.yaml").write_text(
+            """\
+updates:
+  mode: images
+  track: stable
+  procedure:
+    mode: assisted
+    runbook: guide.yaml
+""",
+            encoding="utf-8",
+        )
+    link.unlink(missing_ok=True)
+    link.symlink_to(f"{obstacle.name}/../real.yaml")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", f"add impossible {input_kind} parent traversal")
+    commit = git(repository, "rev-parse", "HEAD")
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+
+    assert result.errors == ()
+    assert result.snapshot is not None
+    snapshot = result.snapshot.stacks[0]
+    link_path = link.relative_to(repository).as_posix()
+    obstacle_path = obstacle.relative_to(repository).as_posix()
+    assert snapshot.complete is False
+    assert link_path in snapshot.relevant_inputs
+    assert obstacle_path in snapshot.relevant_inputs
+    assert target.relative_to(repository).as_posix() not in snapshot.relevant_inputs
+    if obstacle_kind == "missing":
+        assert obstacle_path in snapshot.changed_inputs
+    else:
+        assert obstacle_path not in snapshot.changed_inputs
+
+
+@pytest.mark.parametrize("input_kind", ["compose", "runbook"])
+@pytest.mark.parametrize("link_target", [".", "./", "fragments/.."])
+def test_terminal_directory_symlink_binds_resolved_tree_and_descendant_changes(
+    tmp_path: Path, input_kind: str, link_target: str
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    stack = repository / "stacks/media/example"
+    if link_target == "fragments/..":
+        (stack / "fragments").mkdir()
+        (stack / "fragments/proof.txt").write_text(
+            "checked-in tree\n", encoding="utf-8"
+        )
+    if input_kind == "compose":
+        link = stack / "compose.yaml"
+    else:
+        link = stack / "guide"
+        (stack / "stack.yaml").write_text(
+            """\
+updates:
+  mode: images
+  track: stable
+  procedure:
+    mode: assisted
+    runbook: guide
+""",
+            encoding="utf-8",
+        )
+    link.unlink(missing_ok=True)
+    link.symlink_to(link_target, target_is_directory=True)
+    descendant = stack / "bound-descendant.txt"
+    descendant.write_text("original\n", encoding="utf-8")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", f"bind {input_kind} to stack directory")
+
+    def snapshot_at_head() -> StackInputSnapshot:
+        commit = git(repository, "rev-parse", "HEAD")
+        result = build_repository_snapshot(
+            repository,
+            ["stacks/media/example"],
+            github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+        )
+        assert result.errors == ()
+        assert result.snapshot is not None
+        return result.snapshot.stacks[0]
+
+    clean = snapshot_at_head()
+    descendant.write_text("local change\n", encoding="utf-8")
+    dirty = snapshot_at_head()
+    git(repository, "add", descendant.relative_to(repository).as_posix())
+    git(repository, "commit", "-m", "change bound directory descendant")
+    committed = snapshot_at_head()
+
+    assert clean.complete is True
+    assert "stacks/media/example" in clean.relevant_inputs
+    assert dirty.complete is False
+    assert "stacks/media/example" in dirty.changed_inputs
+    assert committed.complete is True
+    assert committed.fingerprint != clean.fingerprint
+
+
 def test_checked_in_symlinked_policy_is_parsed_from_its_resolved_target(
     tmp_path: Path,
 ) -> None:
@@ -1403,6 +1517,10 @@ updates:
     )
     (stack / "docs").mkdir()
     (stack / "runbooks").mkdir()
+    (stack / "runbooks/content").mkdir()
+    (stack / "runbooks/content/proof.txt").write_text(
+        "checked-in tree\n", encoding="utf-8"
+    )
     target = stack / "runbooks/final.md"
     target.write_text("# Upgrade\n", encoding="utf-8")
     (stack / "runbooks/upgrade.md").symlink_to("./content/../final.md")
