@@ -106,6 +106,20 @@ class WorkstationBaselineRoleTests(unittest.TestCase):
                     "mode": "0700",
                 },
                 {
+                    "name": "herdr",
+                    "type": "bind_mount",
+                    "path": "{{ workstation_home }}/.config/herdr",
+                    "target": "{{ workstation_persistent_home_root }}/.config/herdr",
+                    "mode": "0700",
+                },
+                {
+                    "name": "collie_state",
+                    "type": "bind_mount",
+                    "path": "{{ workstation_home }}/.local/state/collie",
+                    "target": "{{ workstation_persistent_home_root }}/.local/state/collie",
+                    "mode": "0700",
+                },
+                {
                     "name": "repos",
                     "type": "bind_mount",
                     "path": "{{ workstation_home }}/repos",

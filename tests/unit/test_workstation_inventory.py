@@ -69,6 +69,28 @@ class WorkstationInventoryTests(unittest.TestCase):
             links,
         )
 
+        # Collie regenerates its user unit at ~/.config/systemd/user/collie.service, and herdr
+        # rebuilds its agent-detection cache under ~/.local/state/herdr. Persisting either would
+        # pin a stale copy, so both stay outside the required persistence contract.
+        excluded_fragments = (
+            "systemd/user",
+            "collie.service",
+            ".local/state/herdr",
+            "agent-detection",
+        )
+        for link in links:
+            for field in ("path", "target"):
+                value = link[field]
+                for fragment in excluded_fragments:
+                    self.assertNotIn(
+                        fragment,
+                        value,
+                        msg=(
+                            f"persistent home entry {link['name']!r} {field} must not reference "
+                            f"regenerable state {fragment!r}"
+                        ),
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()
