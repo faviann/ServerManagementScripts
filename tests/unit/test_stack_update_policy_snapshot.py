@@ -390,6 +390,62 @@ def test_mismatched_compose_gitlink_worktree_is_incomplete_without_mutation(
     assert git(compose, "rev-parse", "HEAD") == before_gitlink_head
 
 
+@pytest.mark.parametrize("deviation", ["worktree", "index", "untracked"])
+def test_dirty_matching_compose_gitlink_is_incomplete_without_mutation(
+    tmp_path: Path, deviation: str
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    compose, compose_path, pinned_commit, _second_commit = create_compose_gitlink(
+        repository
+    )
+    commit = git(repository, "rev-parse", "HEAD")
+    nested_input = compose / "compose.yaml"
+    if deviation == "worktree":
+        nested_input.write_text("services:\n  local: {}\n", encoding="utf-8")
+    elif deviation == "index":
+        nested_input.write_text("services:\n  staged: {}\n", encoding="utf-8")
+        git(compose, "add", "compose.yaml")
+        nested_input.write_text("services: {}\n", encoding="utf-8")
+    else:
+        (compose / "local.yaml").write_text("services: {}\n", encoding="utf-8")
+
+    before_parent_status = git(
+        repository, "status", "--porcelain=v1", "--untracked-files=all"
+    )
+    before_parent_index = git(repository, "ls-files", "--stage", "--", compose_path)
+    before_nested_status = git(
+        compose, "status", "--porcelain=v1", "--untracked-files=all"
+    )
+    before_nested_index = git(compose, "ls-files", "--stage")
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+
+    assert before_parent_status == f"M {compose_path}"
+    assert result.snapshot is not None
+    stack = result.snapshot.stacks[0]
+    assert stack.complete is False
+    assert stack.changed_inputs == (compose_path,)
+    assert git(repository, "rev-parse", "HEAD") == commit
+    assert git(compose, "rev-parse", "HEAD") == pinned_commit
+    assert (
+        git(repository, "status", "--porcelain=v1", "--untracked-files=all")
+        == before_parent_status
+    )
+    assert (
+        git(repository, "ls-files", "--stage", "--", compose_path)
+        == before_parent_index
+    )
+    assert (
+        git(compose, "status", "--porcelain=v1", "--untracked-files=all")
+        == before_nested_status
+    )
+    assert git(compose, "ls-files", "--stage") == before_nested_index
+
+
 @pytest.mark.parametrize("deviation", ["worktree-content", "index-content", "type"])
 def test_local_compose_tree_deviation_makes_stack_incomplete(
     tmp_path: Path, deviation: str
@@ -610,6 +666,54 @@ def test_binary_checked_in_policy_has_deterministic_snapshot_without_runbook(
     assert runbook_path not in snapshot.relevant_inputs
     assert len(snapshot.fingerprint) == 64
     assert second.snapshot.stacks == first.snapshot.stacks
+    assert (
+        git(repository, "status", "--porcelain=v1", "--untracked-files=all")
+        == before_status
+    )
+    assert git(repository, "ls-files", "--stage", "--", policy_path) == before_index
+
+
+def test_checked_in_policy_with_nul_runbook_has_snapshot_without_runbook(
+    tmp_path: Path,
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    stack = repository / "stacks/media/example"
+    policy_path = "stacks/media/example/stack.yaml"
+    (stack / "stack.yaml").write_text(
+        """\
+updates:
+  mode: images
+  track: stable
+  procedure:
+    mode: assisted
+    runbook: "bad\\0path"
+""",
+        encoding="utf-8",
+    )
+    git(repository, "add", policy_path)
+    git(repository, "commit", "-m", "add malformed assisted runbook")
+    commit = git(repository, "rev-parse", "HEAD")
+    before_status = git(
+        repository, "status", "--porcelain=v1", "--untracked-files=all"
+    )
+    before_index = git(repository, "ls-files", "--stage", "--", policy_path)
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+
+    assert result.errors == ()
+    assert result.snapshot is not None
+    snapshot = result.snapshot.stacks[0]
+    assert snapshot.complete is True
+    assert snapshot.changed_inputs == ()
+    assert snapshot.relevant_inputs == (
+        "stacks/media/example/compose.yaml",
+        policy_path,
+    )
+    assert len(snapshot.fingerprint) == 64
     assert (
         git(repository, "status", "--porcelain=v1", "--untracked-files=all")
         == before_status

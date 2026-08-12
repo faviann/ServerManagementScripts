@@ -273,7 +273,17 @@ def _gitlink_differs_from_worktree(
     worktree_commit = str(
         _git(filesystem_path, "rev-parse", "--verify", "HEAD^{commit}")
     ).strip()
-    return worktree_commit != head_object_id
+    if worktree_commit != head_object_id:
+        return True
+    nested_status = str(
+        _git(
+            filesystem_path,
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        )
+    )
+    return bool(nested_status)
 
 
 def _working_tree_differs_from_head(repository: Path, path: str) -> bool:
@@ -320,7 +330,13 @@ def _checked_in_runbook(repository: Path, stack_identity: str) -> str | None:
     runbook = procedure.get("runbook")
     if not isinstance(runbook, str):
         return None
-    runbook_path = PurePosixPath(runbook.partition("#")[0])
+    raw_runbook_path = runbook.partition("#")[0]
+    try:
+        runbook_path = PurePosixPath(raw_runbook_path)
+    except ValueError:
+        return None
+    if "\0" in raw_runbook_path:
+        return None
     if runbook_path.is_absolute() or not runbook_path.parts or ".." in runbook_path.parts:
         return None
     return (PurePosixPath(stack_identity) / runbook_path).as_posix()
