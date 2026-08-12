@@ -65,6 +65,12 @@ class StackPolicyValidation:
     errors: tuple[ValidationError, ...]
     result: ValidatedStackPolicy | None
 
+    def __post_init__(self) -> None:
+        if not self.errors and self.result is None:
+            raise ValueError("successful validation requires a result")
+        if self.errors and self.result is not None:
+            raise ValueError("failed validation cannot include a result")
+
     @property
     def valid(self) -> bool:
         return not self.errors
@@ -633,7 +639,7 @@ def validate_stack(repository_root: Path, identity: str) -> StackPolicyValidatio
             "missing-stack", "identity", "selected stack directory does not exist"
         )
         return StackPolicyValidation((error,), None)
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         error = ValidationError(
             "invalid-repository-root",
             "repository-root",
@@ -647,7 +653,7 @@ def validate_stack(repository_root: Path, identity: str) -> StackPolicyValidatio
             "missing-stack", "identity", "selected stack directory does not exist"
         )
         return StackPolicyValidation((error,), None)
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         error = ValidationError(
             "invalid-identity",
             "identity",

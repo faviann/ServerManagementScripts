@@ -11,6 +11,9 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
+
+from stack_update_policy import StackPolicyValidation, validate_stack  # noqa: E402
 
 
 def write_valid_stack(repository: Path) -> Path:
@@ -81,6 +84,28 @@ def run_validate_with_compose_json(
     environment["COMPOSE_JSON"] = compose_json
     environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
     return run_validate(repository, env=environment)
+
+
+def test_stack_policy_validation_rejects_success_without_result(tmp_path: Path) -> None:
+    write_valid_stack(tmp_path)
+    valid_result = validate_stack(tmp_path, "stacks/media/example").result
+
+    assert valid_result is not None
+    assert StackPolicyValidation((), valid_result).valid is True
+    with pytest.raises(ValueError, match="successful validation requires a result"):
+        StackPolicyValidation((), None)
+
+
+def test_stack_policy_validation_rejects_failure_with_result(tmp_path: Path) -> None:
+    write_valid_stack(tmp_path)
+    successful = validate_stack(tmp_path, "stacks/media/example")
+    failed = validate_stack(tmp_path, "stacks/media/missing")
+
+    assert successful.result is not None
+    assert failed.errors
+    assert StackPolicyValidation(failed.errors, None).valid is False
+    with pytest.raises(ValueError, match="failed validation cannot include a result"):
+        StackPolicyValidation(failed.errors, successful.result)
 
 
 def test_valid_image_tracked_stack_returns_reusable_versioned_result(tmp_path: Path) -> None:
@@ -1229,6 +1254,63 @@ def test_stack_selection_symlink_loop_returns_a_versioned_cli_failure(
         "schema_version": 1,
         "valid": False,
     }
+    assert "Traceback" not in completed.stderr
+
+
+def test_nul_repository_root_returns_a_versioned_cli_failure(tmp_path: Path) -> None:
+    startup = tmp_path / "startup"
+    startup.mkdir()
+    (startup / "sitecustomize.py").write_text(
+        """\
+import os
+import sys
+
+marker = os.environ["NUL_ARGUMENT_MARKER"]
+sys.argv[:] = [argument.replace(marker, "\\0") for argument in sys.argv]
+""",
+        encoding="utf-8",
+    )
+    marker = "repository-root-with-nul"
+    environment = os.environ.copy()
+    environment["NUL_ARGUMENT_MARKER"] = marker
+    environment["PYTHONPATH"] = os.pathsep.join((str(startup), str(REPO_ROOT)))
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-m",
+            "stack_update_policy",
+            "validate",
+            "--repository-root",
+            marker,
+            "stacks/media/example",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=environment,
+    )
+
+    assert completed.returncode == 1
+    assert completed.stdout, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "command": "validate",
+        "errors": [
+            {
+                "code": "invalid-repository-root",
+                "message": "repository root could not be resolved",
+                "path": "repository-root",
+            }
+        ],
+        "result": None,
+        "schema_version": 1,
+        "valid": False,
+    }
+    assert completed.stderr == (
+        "repository-root: repository root could not be resolved\n"
+    )
     assert "Traceback" not in completed.stderr
 
 
