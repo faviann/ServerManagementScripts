@@ -271,8 +271,8 @@ def test_camel_case_credential_keys_are_rejected_as_secret_metadata(tmp_path: Pa
         (error["code"], error["path"])
         for error in json.loads(completed.stdout)["errors"]
     ] == [
-        ("secret-metadata", "stack.yaml.apiToken"),
-        ("secret-metadata", "stack.yaml.clientSecret"),
+        ("secret-metadata", "stack.yaml.<secret-key-1>"),
+        ("secret-metadata", "stack.yaml.<secret-key-2>"),
     ]
 
 
@@ -331,7 +331,32 @@ def test_secret_named_fields_are_rejected_without_leaking_their_values(
         {
             "code": "secret-metadata",
             "message": "secret-shaped metadata is forbidden",
-            "path": f"stack.yaml.{field}",
+            "path": "stack.yaml.<secret-key-1>",
+        }
+    ]
+    assert marker not in completed.stdout
+    assert marker not in completed.stderr
+
+
+def test_secret_shaped_mapping_key_is_rejected_without_leaking_the_key(
+    tmp_path: Path,
+) -> None:
+    stack = write_valid_stack(tmp_path)
+    marker = "fixture-secret-key-marker-that-must-stay-private"
+    metadata = (stack / "stack.yaml").read_text(encoding="utf-8")
+    (stack / "stack.yaml").write_text(
+        metadata + f'{json.dumps(f"apiToken-{marker}")}: placeholder\n',
+        encoding="utf-8",
+    )
+
+    completed = run_validate(tmp_path)
+
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout)["errors"] == [
+        {
+            "code": "secret-metadata",
+            "message": "secret-shaped metadata is forbidden",
+            "path": "stack.yaml.<secret-key-1>",
         }
     ]
     assert marker not in completed.stdout
@@ -585,6 +610,33 @@ def test_assisted_procedure_rejects_a_symlink_escape_to_repository_docs(
             "path": "stack.yaml.updates.procedure.runbook",
         }
     ]
+
+
+def test_assisted_procedure_symlink_loop_returns_a_versioned_cli_failure(
+    tmp_path: Path,
+) -> None:
+    stack = write_valid_stack(tmp_path)
+    (stack / "RUNBOOK.md").symlink_to("RUNBOOK.md")
+    metadata = (stack / "stack.yaml").read_text(encoding="utf-8")
+    (stack / "stack.yaml").write_text(
+        metadata
+        + "  procedure:\n"
+        + "    mode: assisted\n"
+        + "    runbook: RUNBOOK.md\n",
+        encoding="utf-8",
+    )
+
+    completed = run_validate(tmp_path)
+
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout)["errors"] == [
+        {
+            "code": "invalid-runbook",
+            "message": "runbook path could not be resolved",
+            "path": "stack.yaml.updates.procedure.runbook",
+        }
+    ]
+    assert "Traceback" not in completed.stderr
 
 
 def test_assisted_procedure_rejects_a_missing_markdown_fragment_target(
@@ -843,6 +895,33 @@ def test_stack_selection_rejects_a_stack_root_symlink_outside_the_repository(tmp
             "path": "identity",
         }
     ]
+    assert "Traceback" not in completed.stderr
+
+
+def test_stack_selection_symlink_loop_returns_a_versioned_cli_failure(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    stack_parent = repository / "stacks/media"
+    stack_parent.mkdir(parents=True)
+    (stack_parent / "example").symlink_to("example", target_is_directory=True)
+
+    completed = run_validate(repository)
+
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout) == {
+        "command": "validate",
+        "errors": [
+            {
+                "code": "invalid-identity",
+                "message": "selected stack directory could not be resolved",
+                "path": "identity",
+            }
+        ],
+        "result": None,
+        "schema_version": 1,
+        "valid": False,
+    }
     assert "Traceback" not in completed.stderr
 
 

@@ -115,9 +115,12 @@ updates:
 Rules:
 
 - `stack.yaml` is not copied to `/conf/docker/stacks`.
-- `stack.yaml` is parsed only as `lxc_stack_sync_manifest_plan.stack_metadata`.
+- During deployment, stack sync parses `stack.yaml` only as
+  `lxc_stack_sync_manifest_plan.stack_metadata`; repository policy validation
+  independently reads it to validate and normalize the image update policy.
 - `stack.yaml` must not contain secrets, vault references, API tokens, passwords, private keys, or credentials.
-- `stack.yaml` does not define Ansible variables and does not override host vars.
+- Neither use loads `stack.yaml` into Ansible variable scope: it does not define
+  Ansible variables or override host vars.
 - Host requirements listed in metadata are documentation until a future explicit aggregation design exists.
 
 ### Image Update Policy

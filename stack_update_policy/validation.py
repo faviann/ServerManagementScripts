@@ -87,6 +87,28 @@ def _is_nonempty_string(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def _is_secret_key(key: str) -> bool:
+    key_with_word_boundaries = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", key)
+    key_with_word_boundaries = re.sub(
+        r"([a-z0-9])([A-Z])", r"\1_\2", key_with_word_boundaries
+    )
+    normalized_key = re.sub(
+        r"[^a-z0-9]+", "_", key_with_word_boundaries.lower()
+    ).strip("_")
+    return bool(SECRET_KEY.search(normalized_key) or "vault" in normalized_key)
+
+
+def _mapping_child_path(
+    path: str, key: Any, secret_key_number: int | None = None
+) -> str:
+    if not isinstance(key, str):
+        return f"{path}[<non-string-key>]"
+    if _is_secret_key(key):
+        suffix = f"-{secret_key_number}" if secret_key_number is not None else ""
+        return f"{path}.<secret-key{suffix}>"
+    return f"{path}.{key}"
+
+
 def _markdown_targets(document: str) -> set[str]:
     targets: set[str] = set()
     in_fence = False
@@ -131,6 +153,7 @@ def _validate_json_metadata(
         active_containers.add(identity)
     if isinstance(value, dict):
         try:
+            secret_key_number = 0
             for key, child in value.items():
                 if not isinstance(key, str):
                     _error(
@@ -140,10 +163,12 @@ def _validate_json_metadata(
                         "metadata mapping keys must be strings",
                     )
                     continue
+                if _is_secret_key(key):
+                    secret_key_number += 1
                 _validate_json_metadata(
                     child,
                     errors,
-                    f"{path}.{key}",
+                    _mapping_child_path(path, key, secret_key_number),
                     active_containers,
                 )
         finally:
@@ -189,25 +214,15 @@ def _find_secrets(
         active_containers.add(identity)
     if isinstance(value, dict):
         try:
+            secret_key_number = 0
             for key, child in value.items():
-                child_path = (
-                    f"{path}.{key}"
-                    if isinstance(key, str)
-                    else f"{path}[<non-string-key>]"
-                )
+                if isinstance(key, str) and _is_secret_key(key):
+                    secret_key_number += 1
+                child_path = _mapping_child_path(path, key, secret_key_number)
                 if not isinstance(key, str):
                     found.extend(_find_secrets(child, child_path, active_containers))
                     continue
-                key_with_word_boundaries = re.sub(
-                    r"(.)([A-Z][a-z]+)", r"\1_\2", key
-                )
-                key_with_word_boundaries = re.sub(
-                    r"([a-z0-9])([A-Z])", r"\1_\2", key_with_word_boundaries
-                )
-                normalized_key = re.sub(
-                    r"[^a-z0-9]+", "_", key_with_word_boundaries.lower()
-                ).strip("_")
-                if SECRET_KEY.search(normalized_key) or "vault" in normalized_key:
+                if _is_secret_key(key):
                     found.append(child_path)
                 found.extend(_find_secrets(child, child_path, active_containers))
         finally:
@@ -388,9 +403,26 @@ def _validate_procedure(
             "runbook must stay within the selected stack",
         )
         return None
-    candidate = (stack_root / relative_runbook).resolve()
     try:
-        candidate.relative_to(stack_root.resolve())
+        candidate = (stack_root / relative_runbook).resolve(strict=True)
+    except FileNotFoundError:
+        _error(
+            errors,
+            "invalid-runbook",
+            "stack.yaml.updates.procedure.runbook",
+            "runbook does not resolve to a local file",
+        )
+        return None
+    except (OSError, RuntimeError):
+        _error(
+            errors,
+            "invalid-runbook",
+            "stack.yaml.updates.procedure.runbook",
+            "runbook path could not be resolved",
+        )
+        return None
+    try:
+        candidate.relative_to(stack_root)
     except ValueError:
         _error(
             errors,
@@ -438,7 +470,14 @@ def _validate_image_policy(
     )
     if unknown:
         rendered_unknown = ", ".join(
-            key if isinstance(key, str) else repr(key) for key in unknown
+            (
+                "<secret-key>"
+                if isinstance(key, str) and _is_secret_key(key)
+                else key
+                if isinstance(key, str)
+                else repr(key)
+            )
+            for key in unknown
         )
         _error(
             errors,
@@ -467,7 +506,7 @@ def _validate_image_policy(
         return {}, procedure
     compose_services = effective["services"]
     for service_name, policy in sorted(service_policies.items(), key=lambda item: str(item[0])):
-        path = f"stack.yaml.updates.services.{service_name}"
+        path = _mapping_child_path("stack.yaml.updates.services", service_name)
         if service_name not in compose_services:
             _error(errors, "unknown-service", path, "policy service is not in effective Compose")
             continue
@@ -500,8 +539,34 @@ def validate_stack(repository_root: Path, identity: str) -> StackPolicyValidatio
         error = ValidationError("invalid-identity", "identity", "expected stacks/<host>/<stack>")
         return StackPolicyValidation((error,), None)
     host, name = parts[1:]
-    resolved_repository_root = repository_root.resolve()
-    stack_root = (resolved_repository_root / identity).resolve()
+    try:
+        resolved_repository_root = repository_root.resolve(strict=True)
+    except FileNotFoundError:
+        error = ValidationError(
+            "missing-stack", "identity", "selected stack directory does not exist"
+        )
+        return StackPolicyValidation((error,), None)
+    except (OSError, RuntimeError):
+        error = ValidationError(
+            "invalid-repository-root",
+            "repository-root",
+            "repository root could not be resolved",
+        )
+        return StackPolicyValidation((error,), None)
+    try:
+        stack_root = (resolved_repository_root / identity).resolve(strict=True)
+    except FileNotFoundError:
+        error = ValidationError(
+            "missing-stack", "identity", "selected stack directory does not exist"
+        )
+        return StackPolicyValidation((error,), None)
+    except (OSError, RuntimeError):
+        error = ValidationError(
+            "invalid-identity",
+            "identity",
+            "selected stack directory could not be resolved",
+        )
+        return StackPolicyValidation((error,), None)
     try:
         stack_root.relative_to(resolved_repository_root)
     except ValueError:
