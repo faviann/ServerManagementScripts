@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from stack_update_policy import (  # noqa: E402
     build_repository_snapshot,
     read_github_repository,
 )
+from stack_update_policy import snapshot as snapshot_module  # noqa: E402
 
 
 def git(repository: Path, *arguments: str) -> str:
@@ -244,6 +246,47 @@ sys.stdout.write(os.environ["FAKE_GH_PAYLOAD"])
         read_github_repository("example", "homelab")
 
     assert request_log.read_text(encoding="utf-8").splitlines() == ["called"]
+
+
+def test_github_reader_times_out_safely_and_terminates_gh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    process_id = tmp_path / "gh.pid"
+    fake_gh = fake_bin / "gh"
+    fake_gh.write_text(
+        r"""#!/usr/bin/env python3
+import os
+import sys
+import time
+
+with open(os.environ["FAKE_GH_PID"], "w", encoding="utf-8") as pid_file:
+    pid_file.write(str(os.getpid()))
+sys.stdout.write("unsafe stdout")
+sys.stderr.write("unsafe stderr")
+sys.stdout.flush()
+sys.stderr.flush()
+time.sleep(30)
+""",
+        encoding="utf-8",
+    )
+    fake_gh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_GH_PID", str(process_id))
+    monkeypatch.setattr(snapshot_module, "_GITHUB_READ_TIMEOUT_SECONDS", 0.05)
+
+    started = time.monotonic()
+    with pytest.raises(GitHubReadError) as raised:
+        read_github_repository("example", "homelab")
+    elapsed = time.monotonic() - started
+
+    assert str(raised.value) == "GitHub repository could not be read"
+    assert "unsafe" not in str(raised.value)
+    assert elapsed < 2
+    pid = int(process_id.read_text(encoding="utf-8"))
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
 
 
 def test_clean_default_branch_checkout_has_publishable_stack_snapshot(
