@@ -71,6 +71,31 @@ def create_compose_gitlink(repository: Path) -> tuple[Path, str, str, str]:
     return compose, compose_path, first_commit, second_commit
 
 
+def create_nested_compose_gitlink(repository: Path) -> tuple[Path, str, str, str]:
+    compose_path = "stacks/media/example/compose.yaml"
+    compose = repository / compose_path
+    compose.unlink()
+    compose.mkdir()
+    (compose / "fragment.yaml").write_text("services: {}\n", encoding="utf-8")
+    nested = compose / "vendor/plugin"
+    nested.mkdir(parents=True)
+    git(nested, "init", "-b", "main")
+    git(nested, "config", "user.name", "Snapshot Test")
+    git(nested, "config", "user.email", "snapshot@example.invalid")
+    (nested / "plugin.yaml").write_text("version: 1\n", encoding="utf-8")
+    git(nested, "add", "plugin.yaml")
+    git(nested, "commit", "-m", "first plugin input")
+    first_commit = git(nested, "rev-parse", "HEAD")
+    (nested / "plugin.yaml").write_text("version: 2\n", encoding="utf-8")
+    git(nested, "add", "plugin.yaml")
+    git(nested, "commit", "-m", "second plugin input")
+    second_commit = git(nested, "rev-parse", "HEAD")
+    git(nested, "checkout", "--detach", first_commit)
+    git(repository, "add", compose_path)
+    git(repository, "commit", "-m", "use nested gitlink in compose tree")
+    return nested, compose_path, first_commit, second_commit
+
+
 def test_clean_default_branch_checkout_has_publishable_stack_snapshot(
     tmp_path: Path,
 ) -> None:
@@ -496,6 +521,60 @@ def test_dirty_matching_compose_gitlink_is_incomplete_without_mutation(
     assert git(compose, "ls-files", "--stage") == before_nested_index
 
 
+@pytest.mark.parametrize(
+    ("deviation", "expected_complete"),
+    [("clean", True), ("mismatched", False), ("dirty", False)],
+)
+def test_nested_compose_gitlink_is_compared_atomically_without_mutation(
+    tmp_path: Path, deviation: str, expected_complete: bool
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    nested, compose_path, pinned_commit, second_commit = (
+        create_nested_compose_gitlink(repository)
+    )
+    commit = git(repository, "rev-parse", "HEAD")
+    if deviation == "mismatched":
+        git(nested, "checkout", "--detach", second_commit)
+    elif deviation == "dirty":
+        (nested / "plugin.yaml").write_text("version: local\n", encoding="utf-8")
+
+    before_parent_status = git(
+        repository, "status", "--porcelain=v1", "--untracked-files=all"
+    )
+    before_parent_index = git(repository, "ls-files", "--stage", "--", compose_path)
+    before_nested_head = git(nested, "rev-parse", "HEAD")
+    before_nested_status = git(
+        nested, "status", "--porcelain=v1", "--untracked-files=all"
+    )
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+
+    assert result.snapshot is not None
+    stack = result.snapshot.stacks[0]
+    assert stack.complete is expected_complete
+    assert stack.changed_inputs == (() if expected_complete else (compose_path,))
+    assert git(repository, "rev-parse", "HEAD") == commit
+    assert git(nested, "rev-parse", "HEAD") == before_nested_head
+    assert (
+        git(repository, "status", "--porcelain=v1", "--untracked-files=all")
+        == before_parent_status
+    )
+    assert (
+        git(repository, "ls-files", "--stage", "--", compose_path)
+        == before_parent_index
+    )
+    assert (
+        git(nested, "status", "--porcelain=v1", "--untracked-files=all")
+        == before_nested_status
+    )
+    if deviation == "clean":
+        assert before_nested_head == pinned_commit
+
+
 @pytest.mark.parametrize("deviation", ["worktree-content", "index-content", "type"])
 def test_local_compose_tree_deviation_makes_stack_incomplete(
     tmp_path: Path, deviation: str
@@ -723,6 +802,32 @@ def test_binary_checked_in_policy_has_deterministic_snapshot_without_runbook(
     assert git(repository, "ls-files", "--stage", "--", policy_path) == before_index
 
 
+def test_deep_checked_in_policy_has_snapshot_without_runbook(tmp_path: Path) -> None:
+    repository, _ = create_repository(tmp_path)
+    policy_path = "stacks/media/example/stack.yaml"
+    (repository / policy_path).write_text("- " * 2000 + "value\n", encoding="utf-8")
+    git(repository, "add", policy_path)
+    git(repository, "commit", "-m", "add deeply nested policy")
+    commit = git(repository, "rev-parse", "HEAD")
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+
+    assert result.errors == ()
+    assert result.snapshot is not None
+    snapshot = result.snapshot.stacks[0]
+    assert snapshot.complete is True
+    assert snapshot.changed_inputs == ()
+    assert snapshot.relevant_inputs == (
+        "stacks/media/example/compose.yaml",
+        policy_path,
+    )
+    assert len(snapshot.fingerprint) == 64
+
+
 def test_checked_in_policy_with_nul_runbook_has_snapshot_without_runbook(
     tmp_path: Path,
 ) -> None:
@@ -948,6 +1053,72 @@ def test_missing_or_invalid_github_origin_fails_structurally(
 
     assert result.snapshot is None
     assert [error.code for error in result.errors] == [code]
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://github.com/example/bad?query.git",
+        "https://github.com/example/bad#fragment.git",
+        "https://github.com/example/bad%2Frepository.git",
+        "https://github.com/example/bad\\repository.git",
+        "https://github.com/example/bad\tname.git",
+        "https://github.com/./homelab.git",
+        "https://github.com/example/..git",
+        "https://github.com/example/trailing..git",
+    ],
+)
+def test_endpoint_unsafe_github_origin_fails_before_reader(
+    tmp_path: Path, origin: str
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    git(repository, "remote", "set-url", "origin", origin)
+
+    def unexpected_reader(owner: str, name: str) -> GitHubRepositoryState:
+        raise AssertionError(f"reader called for {owner}/{name}")
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=unexpected_reader,
+    )
+
+    assert result.snapshot is None
+    assert [(error.code, error.path) for error in result.errors] == [
+        ("invalid-origin", "repository.origin")
+    ]
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://github.com/example-org/homelab_iac.config-2.git",
+        "https://github.com/example-org/homelab_iac.config-2",
+        "git@github.com:example-org/homelab_iac.config-2.git",
+        "ssh://git@github.com/example-org/homelab_iac.config-2.git",
+    ],
+)
+def test_supported_github_origin_forms_resolve_safe_identity(
+    tmp_path: Path, origin: str
+) -> None:
+    repository, commit = create_repository(tmp_path)
+    git(repository, "remote", "set-url", "origin", origin)
+    identities: list[tuple[str, str]] = []
+
+    def reader(owner: str, name: str) -> GitHubRepositoryState:
+        identities.append((owner, name))
+        return GitHubRepositoryState("main", commit)
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=reader,
+    )
+
+    assert result.errors == ()
+    assert result.snapshot is not None
+    assert result.snapshot.repository == "example-org/homelab_iac.config-2"
+    assert identities == [("example-org", "homelab_iac.config-2")]
 
 
 def test_github_read_failure_is_structured(tmp_path: Path) -> None:

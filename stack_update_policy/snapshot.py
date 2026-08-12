@@ -156,10 +156,26 @@ def read_github_repository(owner: str, name: str) -> GitHubRepositoryState:
 
 def _github_identity(origin: str) -> tuple[str, str] | None:
     match = re.fullmatch(
-        r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([^/]+)/([^/]+?)(?:\.git)?/?",
-        origin.strip(),
+        r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)"
+        r"([^/]+)/([^/]+)",
+        origin,
     )
-    return (match.group(1), match.group(2)) if match else None
+    if match is None:
+        return None
+    owner, name = match.groups()
+    if name.endswith(".git"):
+        name = name[:-4]
+    if (
+        len(owner) > 39
+        or re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", owner)
+        is None
+        or len(name) > 100
+        or re.fullmatch(r"[A-Za-z0-9._-]+", name) is None
+        or not any(character != "." for character in name)
+        or name.endswith(".")
+    ):
+        return None
+    return owner, name
 
 
 def _is_filesystem_encodable(path: str) -> bool:
@@ -277,6 +293,7 @@ def _tree_differs_from_worktree(repository: Path, path: str) -> bool:
     )
     assert isinstance(raw, bytes)
     expected_paths: set[str] = set()
+    gitlink_paths: set[str] = set()
     descendant_prefix = f"{path}/"
     for raw_entry in (entry for entry in raw.split(b"\0") if entry):
         metadata, separator, raw_path = raw_entry.partition(b"\t")
@@ -286,7 +303,7 @@ def _tree_differs_from_worktree(repository: Path, path: str) -> bool:
         entry_path = os.fsdecode(raw_path)
         if not entry_path.startswith(descendant_prefix):
             continue
-        mode, object_type, _object_id = (field.decode("ascii") for field in fields)
+        mode, object_type, object_id = (field.decode("ascii") for field in fields)
         expected_paths.add(entry_path)
         filesystem_path = repository / entry_path
         if object_type == "tree":
@@ -295,11 +312,27 @@ def _tree_differs_from_worktree(repository: Path, path: str) -> bool:
         elif object_type == "blob":
             if _blob_differs_from_worktree(repository, entry_path, mode):
                 return True
-        elif not os.path.lexists(filesystem_path):
+        elif mode == "160000" and object_type == "commit":
+            gitlink_paths.add(entry_path)
+            if _gitlink_differs_from_worktree(repository, entry_path, object_id):
+                return True
+        else:
             return True
-    actual_paths = {
-        item.relative_to(repository).as_posix() for item in root.rglob("*")
-    }
+    actual_paths: set[str] = set()
+    for directory, child_directories, filenames in os.walk(root):
+        directory_path = Path(directory)
+        for name in child_directories:
+            child_path = (directory_path / name).relative_to(repository).as_posix()
+            actual_paths.add(child_path)
+        for name in filenames:
+            child_path = (directory_path / name).relative_to(repository).as_posix()
+            actual_paths.add(child_path)
+        child_directories[:] = [
+            name
+            for name in child_directories
+            if (directory_path / name).relative_to(repository).as_posix()
+            not in gitlink_paths
+        ]
     return actual_paths != expected_paths
 
 
@@ -363,7 +396,7 @@ def _checked_in_runbook(repository: Path, stack_identity: str) -> str | None:
         content = _git(repository, "show", f"HEAD:{manifest_path}", text=False)
         assert isinstance(content, bytes)
         metadata = yaml.safe_load(content.decode("utf-8"))
-    except (UnicodeDecodeError, yaml.YAMLError):
+    except (UnicodeDecodeError, RecursionError, yaml.YAMLError):
         return None
     if not isinstance(metadata, dict):
         return None
@@ -415,7 +448,9 @@ def build_repository_snapshot(
         )
         return RepositorySnapshotBuild((error,), None)
     try:
-        origin = str(_git(resolved_root, "config", "--get", "remote.origin.url")).strip()
+        origin = str(
+            _git(resolved_root, "config", "--get", "remote.origin.url")
+        ).rstrip("\r\n")
     except subprocess.CalledProcessError:
         error = SnapshotError(
             "missing-origin", "repository.origin", "origin remote is required"
