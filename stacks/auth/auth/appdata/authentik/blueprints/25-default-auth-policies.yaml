@@ -15,7 +15,7 @@ entries:
       return (
           ak_client_ip in ip_network("10.1.0.0/18")
           or ak_client_ip in ip_network("10.0.0.0/24")
-          or ak_client_ip in ip_network("12.200.196.0/24")
+          or ak_client_ip in ip_network("10.200.196.0/24")
       )
 - model: authentik_stages_identification.identificationstage
   state: present
