@@ -224,7 +224,16 @@ def _is_valid_git_branch_name(branch: str) -> bool:
 def _tree_entry(
     repository: Path, treeish: str, path: str
 ) -> tuple[str, str, str] | None:
-    raw = _git(repository, "ls-tree", "-z", treeish, "--", path, text=False)
+    raw = _git(
+        repository,
+        "--literal-pathspecs",
+        "ls-tree",
+        "-z",
+        treeish,
+        "--",
+        path,
+        text=False,
+    )
     assert isinstance(raw, bytes)
     entries = [entry for entry in raw.split(b"\0") if entry]
     if len(entries) != 1:
@@ -244,7 +253,16 @@ def _tree_entry(
 
 
 def _index_has_path(repository: Path, path: str) -> bool:
-    raw = _git(repository, "ls-files", "--cached", "-z", "--", path, text=False)
+    raw = _git(
+        repository,
+        "--literal-pathspecs",
+        "ls-files",
+        "--cached",
+        "-z",
+        "--",
+        path,
+        text=False,
+    )
     assert isinstance(raw, bytes)
     encoded_path = path.encode()
     return any(
@@ -329,7 +347,16 @@ def _tree_differs_from_worktree(repository: Path, path: str) -> bool:
     if not stat.S_ISDIR(root_mode):
         return True
     raw = _git(
-        repository, "ls-tree", "-r", "-t", "-z", "HEAD", "--", path, text=False
+        repository,
+        "--literal-pathspecs",
+        "ls-tree",
+        "-r",
+        "-t",
+        "-z",
+        "HEAD",
+        "--",
+        path,
+        text=False,
     )
     assert isinstance(raw, bytes)
     expected_paths: set[str] = set()
@@ -433,7 +460,16 @@ def _working_tree_differs_from_head(repository: Path, path: str) -> bool:
 
 def _index_differs_from_head(repository: Path, path: str) -> bool:
     try:
-        _git(repository, "diff-index", "--cached", "--quiet", "HEAD", "--", path)
+        _git(
+            repository,
+            "--literal-pathspecs",
+            "diff-index",
+            "--cached",
+            "--quiet",
+            "HEAD",
+            "--",
+            path,
+        )
         return False
     except subprocess.CalledProcessError as exc:
         if exc.returncode == 1:

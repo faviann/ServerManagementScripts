@@ -50,6 +50,43 @@ def create_repository(tmp_path: Path) -> tuple[Path, str]:
     return repository, git(repository, "rev-parse", "HEAD")
 
 
+def create_literal_pathspec_collision_repository(
+    tmp_path: Path, selected_name: str, sibling_name: str
+) -> tuple[Path, str, str, str]:
+    repository, _ = create_repository(tmp_path)
+    original = repository / "stacks/media/example"
+    selected = repository / "stacks/media" / selected_name
+    original.rename(selected)
+    (selected / "stack.yaml").write_text(
+        """\
+updates:
+  mode: images
+  track: stable
+  procedure:
+    mode: assisted
+    runbook: docs/upgrade.md
+""",
+        encoding="utf-8",
+    )
+    (selected / "docs").mkdir()
+    (selected / "docs/upgrade.md").write_text("# Upgrade\n", encoding="utf-8")
+    sibling = repository / "stacks/media" / sibling_name
+    sibling.mkdir()
+    for relative_path in ("compose.yaml", "stack.yaml", "docs/upgrade.md"):
+        source = selected / relative_path
+        target = sibling / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source.read_bytes())
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "add literal pathspec collision stacks")
+    return (
+        repository,
+        git(repository, "rev-parse", "HEAD"),
+        f"stacks/media/{selected_name}",
+        f"stacks/media/{sibling_name}",
+    )
+
+
 def create_compose_gitlink(repository: Path) -> tuple[Path, str, str, str]:
     compose_path = "stacks/media/example/compose.yaml"
     compose = repository / compose_path
@@ -348,6 +385,72 @@ def test_unrelated_dirtiness_does_not_change_publishable_stack_snapshot(
     assert dirty.snapshot is not None
     assert clean.snapshot is not None
     assert dirty.snapshot.stacks == clean.snapshot.stacks
+
+
+@pytest.mark.parametrize(
+    ("selected_name", "sibling_name"),
+    [("app*", "appx"), ("app?", "appx"), ("app[ab]", "appa")],
+)
+@pytest.mark.parametrize("relative_path", ["compose.yaml", "docs/upgrade.md"])
+def test_staged_pathspec_collision_does_not_change_selected_stack_snapshot(
+    tmp_path: Path,
+    selected_name: str,
+    sibling_name: str,
+    relative_path: str,
+) -> None:
+    repository, commit, selected_identity, sibling_identity = (
+        create_literal_pathspec_collision_repository(
+            tmp_path, selected_name, sibling_name
+        )
+    )
+    sibling_path = f"{sibling_identity}/{relative_path}"
+    (repository / sibling_path).write_text("staged sibling change\n", encoding="utf-8")
+    git(repository, "--literal-pathspecs", "add", "--", sibling_path)
+
+    result = build_repository_snapshot(
+        repository,
+        [selected_identity],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+
+    assert result.errors == ()
+    assert result.snapshot is not None
+    snapshot = result.snapshot.stacks[0]
+    assert snapshot.identity == selected_identity
+    assert snapshot.complete is True
+    assert snapshot.changed_inputs == ()
+
+
+@pytest.mark.parametrize(
+    ("selected_name", "sibling_name"),
+    [("app*", "appx"), ("app?", "appx"), ("app[ab]", "appa")],
+)
+def test_staged_literal_pathspec_input_change_is_detected(
+    tmp_path: Path, selected_name: str, sibling_name: str
+) -> None:
+    repository, commit, selected_identity, _ = (
+        create_literal_pathspec_collision_repository(
+            tmp_path, selected_name, sibling_name
+        )
+    )
+    selected_path = f"{selected_identity}/compose.yaml"
+    selected_input = repository / selected_path
+    head_content = selected_input.read_bytes()
+    selected_input.write_text("staged selected change\n", encoding="utf-8")
+    git(repository, "--literal-pathspecs", "add", "--", selected_path)
+    selected_input.write_bytes(head_content)
+
+    result = build_repository_snapshot(
+        repository,
+        [selected_identity],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+
+    assert result.errors == ()
+    assert result.snapshot is not None
+    snapshot = result.snapshot.stacks[0]
+    assert snapshot.complete is False
+    assert snapshot.changed_inputs == (selected_path,)
 
 
 def test_changed_relevant_input_makes_only_its_stack_incomplete(
