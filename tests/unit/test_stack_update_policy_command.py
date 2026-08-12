@@ -637,6 +637,41 @@ def test_vendor_update_mode_returns_a_reusable_normalized_result(tmp_path: Path)
     }
 
 
+def test_vendor_validation_ignores_inherited_git_repository_state(
+    tmp_path: Path,
+) -> None:
+    upstream = tmp_path / "upstream"
+    write_vendor_stack(tmp_path, upstream)
+    baseline = subprocess.run(
+        ["git", "-C", str(upstream), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    hostile = tmp_path / "hostile"
+    hostile.mkdir()
+    (hostile / "docker-compose.yml").write_text(
+        "services:\n  attacker:\n    image: attacker.invalid/image:latest\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-q", "-b", "stable", str(hostile)], check=True)
+    subprocess.run(["git", "-C", str(hostile), "add", "docker-compose.yml"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(hostile), "-c", "user.name=Fixture",
+            "-c", "user.email=fixture@example.invalid", "commit", "-qm", "hostile",
+        ],
+        check=True,
+    )
+    environment = vendor_environment(upstream)
+    environment["GIT_DIR"] = str(hostile / ".git")
+
+    completed = run_validate(tmp_path, env=environment)
+
+    assert completed.returncode == 0
+    assert json.loads(completed.stdout)["result"]["vendor"]["baseline_commit"] == baseline
+
+
 def test_vendor_update_mode_rejects_top_level_upstream_authority(tmp_path: Path) -> None:
     upstream = tmp_path / "upstream"
     stack = write_vendor_stack(tmp_path, upstream)
@@ -772,6 +807,35 @@ def test_vendor_base_resolves_to_its_commit_within_the_selected_track(
         [
             "git", "-C", str(upstream), "-c", "user.name=Fixture",
             "-c", "user.email=fixture@example.invalid", "commit", "-qm", "next",
+        ],
+        check=True,
+    )
+
+    completed = run_validate(tmp_path, env=vendor_environment(upstream))
+
+    assert completed.returncode == 0
+    assert json.loads(completed.stdout)["result"]["vendor"]["baseline_commit"] == baseline
+
+
+def test_vendor_base_resolves_before_compose_path_deletion_on_selected_track(
+    tmp_path: Path,
+) -> None:
+    upstream = tmp_path / "upstream"
+    write_vendor_stack(tmp_path, upstream)
+    baseline = subprocess.run(
+        ["git", "-C", str(upstream), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "-C", str(upstream), "rm", "-q", "docker-compose.yml"],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git", "-C", str(upstream), "-c", "user.name=Fixture",
+            "-c", "user.email=fixture@example.invalid", "commit", "-qm", "remove compose",
         ],
         check=True,
     )

@@ -510,9 +510,7 @@ def _resolve_vendor_baseline(
 ) -> str | None:
     git_environment = os.environ.copy()
     for key in tuple(git_environment):
-        if key in {"GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"} or re.fullmatch(
-            r"GIT_CONFIG_(?:KEY|VALUE)_\d+", key
-        ):
+        if key.startswith("GIT_"):
             git_environment.pop(key)
     git_environment.update(
         {
@@ -560,6 +558,7 @@ def _resolve_vendor_baseline(
                     checkout,
                     "log",
                     "--format=%H",
+                    "--diff-filter=AM",
                     "--",
                     compose_path,
                 ],
