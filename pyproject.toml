@@ -9,6 +9,7 @@ dependencies = [
     "yamllint>=1.32.0",
     "requests>=1.1",
     "proxmoxer>=2.0",
+    "pyyaml>=6.0.3",
 ]
 
 [dependency-groups]

@@ -4,6 +4,10 @@ This context describes how the repository plans and applies changes to the manag
 
 ## Language
 
+**Image update track**:
+An operator-selected version or release line used to discover eligible updates for one effective Compose image. An image-tracked stack can declare a shared default and service-specific exceptions, but every image-bearing service must have an intentional effective image update track.
+_Avoid_: Channel, version inferred from the current tag
+
 **Targeted LXC set**:
 The managed LXCs selected for a lifecycle run. Safety checks and the pre-action planning barrier apply to this set, not automatically to every LXC in inventory.
 _Avoid_: Fleet, all LXCs

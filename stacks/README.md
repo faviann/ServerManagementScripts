@@ -104,15 +104,50 @@ exposure:
   traefik: protected
   homepage_instances:
     - admin
+updates:
+  mode: images
+  track: stable
+  services:
+    database:
+      track: "16"
 ```
 
 Rules:
 
 - `stack.yaml` is not copied to `/conf/docker/stacks`.
-- `stack.yaml` is parsed only as `lxc_stack_sync_manifest_plan.stack_metadata`.
+- During deployment, stack sync parses `stack.yaml` only as
+  `lxc_stack_sync_manifest_plan.stack_metadata`; repository policy validation
+  independently reads it to validate and normalize the image update policy.
 - `stack.yaml` must not contain secrets, vault references, API tokens, passwords, private keys, or credentials.
-- `stack.yaml` does not define Ansible variables and does not override host vars.
+- Neither use loads `stack.yaml` into Ansible variable scope: it does not define
+  Ansible variables or override host vars.
 - Host requirements listed in metadata are documentation until a future explicit aggregation design exists.
+
+### Image Update Policy
+
+An image-tracked stack declares `updates.mode: images`. Its optional stack-level `track` is the default image update track. `updates.services.<compose-service>.track` supplies an exception or complete per-service coverage when there is no shared default. Service keys always name services from effective Compose after the supported `compose.override.yaml` or `compose.override.yml` has been applied. Every effective image-bearing service must have an intentional effective image update track; a service without an image cannot be selected.
+
+An update procedure is stack-wide and assisted only:
+
+```yaml
+updates:
+  mode: images
+  track: stable
+  procedure:
+    mode: assisted
+    runbook: docs/upgrade.md
+```
+
+The runbook path is relative to the stack directory and must resolve to a repository file. Per-service assistance and permanent service exclusions are unsupported. A missing `stack.yaml`, missing `updates`, unsupported mode (including `vendor` in this validator), unknown service, missing image update track, or secret-shaped metadata is a strict validation failure.
+
+Validate exactly one repo-managed stack without changing repository or deployed state:
+
+```bash
+uv run --locked python -B -m stack_update_policy validate \
+  --repository-root . stacks/<host>/<stack>
+```
+
+The command writes schema-versioned JSON to standard output, diagnostics to standard error, and exits nonzero for an invalid contract. Its normalized result is the shared validation model for later planning and Create Stack integration; consumers should not reparse policy rules independently.
 
 ## Build a Stack
 
