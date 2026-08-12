@@ -439,7 +439,13 @@ def test_committed_type_only_change_changes_fingerprint_and_is_clean(
     compose_path = "stacks/media/example/compose.yaml"
     compose = repository / compose_path
     compose.write_bytes(b"compose-source.yaml")
-    git(repository, "add", compose_path)
+    (compose.parent / "compose-source.yaml").write_bytes(b"compose-source.yaml")
+    git(
+        repository,
+        "add",
+        compose_path,
+        "stacks/media/example/compose-source.yaml",
+    )
     git(repository, "commit", "-m", "use same bytes for regular compose input")
     regular_commit = git(repository, "rev-parse", "HEAD")
     regular = build_repository_snapshot(
@@ -1030,6 +1036,56 @@ def test_checked_in_compose_symlink_binds_link_and_target(
     assert clean.snapshot.stacks[0].complete is True
     assert dirty.snapshot.stacks[0].changed_inputs == (target_path,)
     assert dirty.snapshot.stacks[0].complete is False
+
+
+@pytest.mark.parametrize(
+    "canonical_name",
+    [
+        "stack.yaml",
+        "compose.yaml",
+        "compose.yml",
+        "compose.override.yaml",
+        "compose.override.yml",
+    ],
+)
+def test_checked_in_canonical_symlink_with_missing_target_is_incomplete_and_bound(
+    tmp_path: Path, canonical_name: str
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    stack = repository / "stacks/media/example"
+    canonical = stack / canonical_name
+    canonical.unlink(missing_ok=True)
+    canonical.symlink_to("fragments/missing.yaml")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", f"symlink {canonical_name} to missing input")
+
+    def at_head() -> StackInputSnapshot:
+        commit = git(repository, "rev-parse", "HEAD")
+        result = build_repository_snapshot(
+            repository,
+            ["stacks/media/example"],
+            github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+        )
+        assert result.snapshot is not None
+        return result.snapshot.stacks[0]
+
+    original = at_head()
+    repeated = at_head()
+    canonical_path = f"stacks/media/example/{canonical_name}"
+    missing_path = "stacks/media/example/fragments/missing.yaml"
+
+    assert canonical_path in original.relevant_inputs
+    assert missing_path in original.relevant_inputs
+    assert original.changed_inputs == (missing_path,)
+    assert original.complete is False
+    assert repeated.fingerprint == original.fingerprint
+
+    canonical.unlink()
+    canonical.symlink_to("fragments/other-missing.yaml")
+    git(repository, "add", canonical_path)
+    git(repository, "commit", "-m", f"retarget {canonical_name}")
+
+    assert at_head().fingerprint != original.fingerprint
 
 
 def test_checked_in_symlinked_policy_is_parsed_from_its_resolved_target(

@@ -495,7 +495,7 @@ def _resolve_checked_in_path(
             final_path = PurePosixPath(candidate, *remaining).as_posix()
             relevant.append(final_path)
             return _CheckedInPathResolution(
-                tuple(dict.fromkeys(relevant)), final_path
+                tuple(dict.fromkeys(relevant)), None
             )
         current.append(component)
         if not remaining:
@@ -718,6 +718,7 @@ def build_repository_snapshot(
             candidates = canonical_paths
             resolutions_complete = True
             resolutions: dict[str, _CheckedInPathResolution] = {}
+            resolution_inputs: set[str] = set()
             for path in canonical_paths:
                 entry = _tree_entry(resolved_root, "HEAD", path)
                 if entry is not None and entry[0] == "120000" and entry[1] == "blob":
@@ -726,6 +727,7 @@ def build_repository_snapshot(
                     )
                     resolutions[path] = resolution
                     candidates += resolution.paths
+                    resolution_inputs.update(resolution.paths)
                     resolutions_complete = (
                         resolutions_complete and resolution.final_path is not None
                     )
@@ -754,6 +756,7 @@ def build_repository_snapshot(
                     for path in candidates
                     if checked_in[path]
                     or indexed[path]
+                    or path in resolution_inputs
                     or path in runbook_inputs
                     or (
                         _has_safe_worktree_parents(resolved_root, path)
