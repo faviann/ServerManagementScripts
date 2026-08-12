@@ -47,6 +47,30 @@ def create_repository(tmp_path: Path) -> tuple[Path, str]:
     return repository, git(repository, "rev-parse", "HEAD")
 
 
+def create_compose_gitlink(repository: Path) -> tuple[Path, str, str, str]:
+    compose_path = "stacks/media/example/compose.yaml"
+    compose = repository / compose_path
+    compose.unlink()
+    compose.mkdir()
+    git(compose, "init", "-b", "main")
+    git(compose, "config", "user.name", "Snapshot Test")
+    git(compose, "config", "user.email", "snapshot@example.invalid")
+    (compose / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    git(compose, "add", "compose.yaml")
+    git(compose, "commit", "-m", "first compose input")
+    first_commit = git(compose, "rev-parse", "HEAD")
+    (compose / "compose.yaml").write_text(
+        "services:\n  changed: {}\n", encoding="utf-8"
+    )
+    git(compose, "add", "compose.yaml")
+    git(compose, "commit", "-m", "second compose input")
+    second_commit = git(compose, "rev-parse", "HEAD")
+    git(compose, "checkout", "--detach", first_commit)
+    git(repository, "add", compose_path)
+    git(repository, "commit", "-m", "use gitlink compose input")
+    return compose, compose_path, first_commit, second_commit
+
+
 def test_clean_default_branch_checkout_has_publishable_stack_snapshot(
     tmp_path: Path,
 ) -> None:
@@ -301,6 +325,71 @@ def test_committed_compose_tree_changes_fingerprint_and_is_clean(
     )
 
 
+def test_matching_compose_gitlink_worktree_is_complete_without_mutation(
+    tmp_path: Path,
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    compose, compose_path, first_commit, _second_commit = create_compose_gitlink(
+        repository
+    )
+    commit = git(repository, "rev-parse", "HEAD")
+    before_status = git(
+        repository, "status", "--porcelain=v1", "--untracked-files=all"
+    )
+    before_index = git(repository, "ls-files", "--stage", "--", compose_path)
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+
+    assert result.snapshot is not None
+    stack = result.snapshot.stacks[0]
+    assert stack.complete is True
+    assert stack.changed_inputs == ()
+    assert compose_path in stack.relevant_inputs
+    assert (
+        git(repository, "status", "--porcelain=v1", "--untracked-files=all")
+        == before_status
+    )
+    assert git(repository, "ls-files", "--stage", "--", compose_path) == before_index
+    assert git(compose, "rev-parse", "HEAD") == first_commit
+
+
+def test_mismatched_compose_gitlink_worktree_is_incomplete_without_mutation(
+    tmp_path: Path,
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    compose, compose_path, _first_commit, second_commit = create_compose_gitlink(
+        repository
+    )
+    commit = git(repository, "rev-parse", "HEAD")
+    git(compose, "checkout", "--detach", second_commit)
+    before_status = git(
+        repository, "status", "--porcelain=v1", "--untracked-files=all"
+    )
+    before_index = git(repository, "ls-files", "--stage", "--", compose_path)
+    before_gitlink_head = git(compose, "rev-parse", "HEAD")
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+
+    assert result.snapshot is not None
+    stack = result.snapshot.stacks[0]
+    assert stack.complete is False
+    assert stack.changed_inputs == (compose_path,)
+    assert (
+        git(repository, "status", "--porcelain=v1", "--untracked-files=all")
+        == before_status
+    )
+    assert git(repository, "ls-files", "--stage", "--", compose_path) == before_index
+    assert git(compose, "rev-parse", "HEAD") == before_gitlink_head
+
+
 @pytest.mark.parametrize("deviation", ["worktree-content", "index-content", "type"])
 def test_local_compose_tree_deviation_makes_stack_incomplete(
     tmp_path: Path, deviation: str
@@ -478,6 +567,54 @@ updates:
         "stacks/media/example/stack.yaml",
     )
     assert snapshot.complete is False
+
+
+def test_binary_checked_in_policy_has_deterministic_snapshot_without_runbook(
+    tmp_path: Path,
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    stack = repository / "stacks/media/example"
+    policy_path = "stacks/media/example/stack.yaml"
+    runbook_path = "stacks/media/example/docs/upgrade.md"
+    (stack / "stack.yaml").write_bytes(
+        b"\xffupdates:\n  procedure:\n    mode: assisted\n    runbook: docs/upgrade.md\n"
+    )
+    (stack / "docs").mkdir()
+    (stack / "docs/upgrade.md").write_text("# Upgrade\n", encoding="utf-8")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "add binary policy")
+    commit = git(repository, "rev-parse", "HEAD")
+    before_status = git(
+        repository, "status", "--porcelain=v1", "--untracked-files=all"
+    )
+    before_index = git(repository, "ls-files", "--stage", "--", policy_path)
+    reader = lambda owner, name: GitHubRepositoryState("main", commit)
+
+    first = build_repository_snapshot(
+        repository, ["stacks/media/example"], github_reader=reader
+    )
+    second = build_repository_snapshot(
+        repository, ["stacks/media/example"], github_reader=reader
+    )
+
+    assert first.errors == ()
+    assert first.snapshot is not None
+    assert second.snapshot is not None
+    snapshot = first.snapshot.stacks[0]
+    assert snapshot.complete is True
+    assert snapshot.changed_inputs == ()
+    assert snapshot.relevant_inputs == (
+        "stacks/media/example/compose.yaml",
+        policy_path,
+    )
+    assert runbook_path not in snapshot.relevant_inputs
+    assert len(snapshot.fingerprint) == 64
+    assert second.snapshot.stacks == first.snapshot.stacks
+    assert (
+        git(repository, "status", "--porcelain=v1", "--untracked-files=all")
+        == before_status
+    )
+    assert git(repository, "ls-files", "--stage", "--", policy_path) == before_index
 
 
 def test_locally_added_runbook_named_by_checked_in_policy_is_relevant(

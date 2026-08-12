@@ -259,16 +259,37 @@ def _tree_differs_from_worktree(repository: Path, path: str) -> bool:
     return actual_paths != expected_paths
 
 
+def _gitlink_differs_from_worktree(
+    repository: Path, path: str, head_object_id: str
+) -> bool:
+    filesystem_path = repository / path
+    if not filesystem_path.is_dir() or filesystem_path.is_symlink():
+        return True
+    top_level = Path(
+        str(_git(filesystem_path, "rev-parse", "--show-toplevel")).strip()
+    ).resolve()
+    if top_level != filesystem_path.resolve():
+        return True
+    worktree_commit = str(
+        _git(filesystem_path, "rev-parse", "--verify", "HEAD^{commit}")
+    ).strip()
+    return worktree_commit != head_object_id
+
+
 def _working_tree_differs_from_head(repository: Path, path: str) -> bool:
     try:
         entry = _tree_entry(repository, "HEAD", path)
         if entry is None:
             return True
-        head_mode, head_type, _head_object_id = entry
+        head_mode, head_type, head_object_id = entry
         if head_type == "blob":
             return _blob_differs_from_worktree(repository, path, head_mode)
         if head_type == "tree":
             return _tree_differs_from_worktree(repository, path)
+        if head_mode == "160000" and head_type == "commit":
+            return _gitlink_differs_from_worktree(
+                repository, path, head_object_id
+            )
         return not os.path.lexists(repository / path)
     except (OSError, subprocess.CalledProcessError):
         return True
@@ -285,9 +306,10 @@ def _index_differs_from_head(repository: Path, path: str) -> bool:
 def _checked_in_runbook(repository: Path, stack_identity: str) -> str | None:
     manifest_path = f"{stack_identity}/stack.yaml"
     try:
-        content = _git(repository, "show", f"HEAD:{manifest_path}")
-        metadata = yaml.safe_load(str(content))
-    except (subprocess.CalledProcessError, yaml.YAMLError):
+        content = _git(repository, "show", f"HEAD:{manifest_path}", text=False)
+        assert isinstance(content, bytes)
+        metadata = yaml.safe_load(content.decode("utf-8"))
+    except (UnicodeDecodeError, subprocess.CalledProcessError, yaml.YAMLError):
         return None
     if not isinstance(metadata, dict):
         return None
