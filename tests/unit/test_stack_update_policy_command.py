@@ -92,12 +92,59 @@ updates:
 
 
 def vendor_environment(upstream: Path) -> dict[str, str]:
+    fake_bin = upstream.parent / ".vendor-git-bin"
+    fake_bin.mkdir()
+    git = fake_bin / "git"
+    git.write_text(
+        """#!/bin/sh
+if [ "${GIT_CONFIG_COUNT+x}" = x ] ||
+   [ "${GIT_CONFIG_NOSYSTEM-}" != 1 ] ||
+   [ "${GIT_CONFIG_GLOBAL-}" != /dev/null ] ||
+   [ "${GIT_CONFIG_SYSTEM-}" != /dev/null ]; then
+  printf '%s\n' 'unsafe inherited Git configuration' >&2
+  exit 42
+fi
+if [ "$1" = clone ]; then
+  case " $* " in
+    *" -- https://github.com/example/vendor "*) ;;
+    *) printf '%s\n' 'unexpected repository authority' >&2; exit 42 ;;
+  esac
+  for destination do :; done
+  mkdir -p "$destination"
+  exit 0
+fi
+if [ "$3" = log ]; then
+  shift 2
+  exec "$VENDOR_FIXTURE_GIT" -C "$VENDOR_FIXTURE_REPOSITORY" "$@"
+fi
+if [ "$3" = show ]; then
+  shift 2
+  exec "$VENDOR_FIXTURE_GIT" -C "$VENDOR_FIXTURE_REPOSITORY" "$@"
+fi
+exit 42
+""",
+        encoding="utf-8",
+    )
+    git.chmod(0o755)
+    global_config = upstream.parent / ".hostile-global-gitconfig"
+    system_config = upstream.parent / ".hostile-system-gitconfig"
+    hostile_config = (
+        '[url "https://attacker.invalid/"]\n'
+        "\tinsteadOf = https://github.com/example/vendor\n"
+    )
+    global_config.write_text(hostile_config, encoding="utf-8")
+    system_config.write_text(hostile_config, encoding="utf-8")
     environment = os.environ.copy()
     environment.update(
         {
+            "PATH": f"{fake_bin}:{environment['PATH']}",
             "GIT_CONFIG_COUNT": "1",
-            "GIT_CONFIG_KEY_0": "url.file://" + str(upstream) + ".insteadOf",
+            "GIT_CONFIG_GLOBAL": str(global_config),
+            "GIT_CONFIG_KEY_0": "url.https://attacker.invalid/.insteadOf",
+            "GIT_CONFIG_SYSTEM": str(system_config),
             "GIT_CONFIG_VALUE_0": "https://github.com/example/vendor",
+            "VENDOR_FIXTURE_GIT": shutil.which("git", path=os.environ.get("PATH")) or "git",
+            "VENDOR_FIXTURE_REPOSITORY": str(upstream),
         }
     )
     return environment
@@ -640,6 +687,36 @@ def test_vendor_authority_path_and_track_are_strict(
     assert code in {error["code"] for error in json.loads(completed.stdout)["errors"]}
 
 
+@pytest.mark.parametrize("component", [".", ".."])
+def test_vendor_repository_rejects_dot_path_components(
+    tmp_path: Path, component: str
+) -> None:
+    upstream = tmp_path / "upstream"
+    stack = write_vendor_stack(tmp_path, upstream)
+    metadata = (stack / "stack.yaml").read_text(encoding="utf-8")
+    (stack / "stack.yaml").write_text(
+        metadata.replace(
+            "https://github.com/example/vendor",
+            f"https://github.com/{component}/vendor",
+        ),
+        encoding="utf-8",
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    git = fake_bin / "git"
+    git.write_text("#!/bin/sh\nexit 42\n", encoding="utf-8")
+    git.chmod(0o755)
+    environment = os.environ.copy()
+    environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+
+    completed = run_validate(tmp_path, env=environment)
+
+    assert completed.returncode == 1
+    assert "invalid-vendor-authority" in {
+        error["code"] for error in json.loads(completed.stdout)["errors"]
+    }
+
+
 def test_vendor_base_must_match_the_resolved_commit_exactly(tmp_path: Path) -> None:
     upstream = tmp_path / "upstream"
     stack = write_vendor_stack(tmp_path, upstream)
@@ -725,6 +802,20 @@ def test_vendor_policy_rejects_unknown_services_and_unsupported_layout(
     )
 
 
+def test_vendor_override_must_be_a_regular_file(tmp_path: Path) -> None:
+    upstream = tmp_path / "upstream"
+    stack = write_vendor_stack(tmp_path, upstream)
+    (stack / "compose.override.yaml").unlink()
+    (stack / "compose.override.yaml").mkdir()
+
+    completed = run_validate(tmp_path, env=vendor_environment(upstream))
+
+    assert completed.returncode == 1
+    assert "unsupported-vendor-layout" in {
+        error["code"] for error in json.loads(completed.stdout)["errors"]
+    }
+
+
 def test_vendor_git_failures_are_structured_and_redact_external_output(
     tmp_path: Path,
 ) -> None:
@@ -784,6 +875,50 @@ exit 42
 
     assert completed.returncode == 1
     assert json.loads(completed.stdout)["errors"][-1]["code"] == "vendor-resolution"
+    assert marker not in completed.stdout
+    assert marker not in completed.stderr
+
+
+def test_vendor_git_show_failures_are_structured_and_redacted(
+    tmp_path: Path,
+) -> None:
+    upstream = tmp_path / "upstream"
+    write_vendor_stack(tmp_path, upstream)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    marker = "unsafe-show-output"
+    git = fake_bin / "git"
+    git.write_text(
+        f"""#!/bin/sh
+if [ "$1" = clone ]; then
+  for destination do :; done
+  mkdir -p "$destination"
+  exit 0
+fi
+if [ "$3" = log ]; then
+  printf '%040d\\n' 1
+  exit 0
+fi
+if [ "$3" = show ]; then
+  printf '%s\\n' '{marker}' >&2
+  exit 42
+fi
+exit 42
+""",
+        encoding="utf-8",
+    )
+    git.chmod(0o755)
+    environment = os.environ.copy()
+    environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+
+    completed = run_validate(tmp_path, env=environment)
+
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout)["errors"][-1] == {
+        "code": "vendor-resolution",
+        "message": "official Compose history could not be read",
+        "path": "stack.yaml.updates.upstream.compose_path",
+    }
     assert marker not in completed.stdout
     assert marker not in completed.stderr
 

@@ -477,6 +477,8 @@ def _canonical_official_repository(value: Any) -> str | None:
         return None
     if not re.fullmatch(r"/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", parsed.path):
         return None
+    if any(component in {".", ".."} for component in parsed.path.split("/")[1:]):
+        return None
     if parsed.path.endswith(".git"):
         return None
     return value
@@ -507,7 +509,20 @@ def _resolve_vendor_baseline(
     errors: list[ValidationError],
 ) -> str | None:
     git_environment = os.environ.copy()
-    git_environment.update({"GCM_INTERACTIVE": "Never", "GIT_TERMINAL_PROMPT": "0"})
+    for key in tuple(git_environment):
+        if key in {"GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"} or re.fullmatch(
+            r"GIT_CONFIG_(?:KEY|VALUE)_\d+", key
+        ):
+            git_environment.pop(key)
+    git_environment.update(
+        {
+            "GCM_INTERACTIVE": "Never",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+    )
     try:
         with tempfile.TemporaryDirectory(prefix="stack-policy-vendor-") as checkout:
             clone = subprocess.run(
@@ -597,7 +612,15 @@ def _resolve_vendor_baseline(
                     env=git_environment,
                     timeout=30,
                 )
-                if upstream.returncode == 0 and upstream.stdout == checked_in:
+                if upstream.returncode != 0:
+                    _error(
+                        errors,
+                        "vendor-resolution",
+                        "stack.yaml.updates.upstream.compose_path",
+                        "official Compose history could not be read",
+                    )
+                    return None
+                if upstream.stdout == checked_in:
                     return commit
             _error(
                 errors,
@@ -700,6 +723,69 @@ def _validate_procedure(
     return {"mode": "assisted", "runbook": runbook}
 
 
+def _validate_common_image_vendor_policy(
+    updates: dict[str, Any],
+    effective: dict[str, Any] | None,
+    errors: list[ValidationError],
+) -> dict[Any, Any]:
+    if "low_confidence" in updates and updates["low_confidence"] != "assisted":
+        _error(
+            errors,
+            "invalid-value",
+            "stack.yaml.updates.low_confidence",
+            "low_confidence must be assisted",
+        )
+
+    service_policies = updates.get("services", {})
+    if not isinstance(service_policies, dict):
+        _error(
+            errors,
+            "invalid-policy",
+            "stack.yaml.updates.services",
+            "services must be a mapping",
+        )
+        return {}
+    if effective is None:
+        return service_policies
+
+    compose_services = effective["services"]
+    for service_name, policy in sorted(
+        service_policies.items(), key=lambda item: str(item[0])
+    ):
+        path = _mapping_child_path("stack.yaml.updates.services", service_name)
+        if service_name not in compose_services:
+            _error(
+                errors,
+                "unknown-service",
+                path,
+                "policy service is not in effective Compose",
+            )
+            continue
+        if "image" not in compose_services[service_name]:
+            _error(
+                errors,
+                "non-image-service",
+                path,
+                "tracked service has no effective image",
+            )
+        if not isinstance(policy, dict) or set(policy) != {"track"}:
+            _error(
+                errors,
+                "invalid-policy",
+                path,
+                "service policy must contain only track",
+            )
+            continue
+        if not _is_nonempty_string(policy.get("track")):
+            _error(
+                errors,
+                "invalid-value",
+                f"{path}.track",
+                "image update track must be a non-empty string",
+            )
+    return service_policies
+
+
 def _validate_image_policy(
     stack_root: Path,
     metadata: dict[str, Any],
@@ -743,39 +829,17 @@ def _validate_image_policy(
             "stack.yaml.updates",
             f"unsupported policy fields: {rendered_unknown}",
         )
-    if "low_confidence" in updates and updates["low_confidence"] != "assisted":
-        _error(
-            errors,
-            "invalid-value",
-            "stack.yaml.updates.low_confidence",
-            "low_confidence must be assisted",
-        )
+    service_policies = _validate_common_image_vendor_policy(
+        updates, effective, errors
+    )
     default_track = updates.get("track")
     if default_track is not None and not _is_nonempty_string(default_track):
         _error(errors, "invalid-value", "stack.yaml.updates.track", "image update track must be a non-empty string")
         default_track = None
-    service_policies = updates.get("services", {})
-    if not isinstance(service_policies, dict):
-        _error(errors, "invalid-policy", "stack.yaml.updates.services", "services must be a mapping")
-        service_policies = {}
-
     procedure = _validate_procedure(stack_root, updates, errors)
     if effective is None:
         return {}, procedure
     compose_services = effective["services"]
-    for service_name, policy in sorted(service_policies.items(), key=lambda item: str(item[0])):
-        path = _mapping_child_path("stack.yaml.updates.services", service_name)
-        if service_name not in compose_services:
-            _error(errors, "unknown-service", path, "policy service is not in effective Compose")
-            continue
-        if "image" not in compose_services[service_name]:
-            _error(errors, "non-image-service", path, "tracked service has no effective image")
-        if not isinstance(policy, dict) or set(policy) != {"track"}:
-            _error(errors, "invalid-policy", path, "service policy must contain only track")
-            continue
-        if not _is_nonempty_string(policy.get("track")):
-            _error(errors, "invalid-value", f"{path}.track", "image update track must be a non-empty string")
-
     resolved: dict[str, dict[str, str]] = {}
     for service_name, service in sorted(compose_services.items()):
         if "image" not in service:
@@ -836,13 +900,9 @@ def _validate_vendor_policy(
             "stack.yaml.updates",
             f"unsupported policy fields: {rendered}",
         )
-    if "low_confidence" in updates and updates["low_confidence"] != "assisted":
-        _error(
-            errors,
-            "invalid-value",
-            "stack.yaml.updates.low_confidence",
-            "low_confidence must be assisted",
-        )
+    service_policies = _validate_common_image_vendor_policy(
+        updates, effective, errors
+    )
 
     track = updates.get("track")
     if not _is_nonempty_string(track) or any(
@@ -897,7 +957,11 @@ def _validate_vendor_policy(
             "compose",
             "vendor base must be a checked-in compose.yaml file",
         )
-    if (stack_root / "compose.override.yml").exists() or vendor_override.is_symlink():
+    if (
+        (stack_root / "compose.override.yml").exists()
+        or vendor_override.is_symlink()
+        or (vendor_override.exists() and not vendor_override.is_file())
+    ):
         _error(
             errors,
             "unsupported-vendor-layout",
@@ -905,53 +969,10 @@ def _validate_vendor_policy(
             "vendor override must use compose.override.yaml",
         )
 
-    service_policies = updates.get("services", {})
-    if not isinstance(service_policies, dict):
-        _error(
-            errors,
-            "invalid-policy",
-            "stack.yaml.updates.services",
-            "services must be a mapping",
-        )
-        service_policies = {}
     procedure = _validate_procedure(stack_root, updates, errors)
     services: dict[str, dict[str, str | None]] = {}
     if effective is not None:
         compose_services = effective["services"]
-        for service_name, policy in sorted(
-            service_policies.items(), key=lambda item: str(item[0])
-        ):
-            path = _mapping_child_path("stack.yaml.updates.services", service_name)
-            if service_name not in compose_services:
-                _error(
-                    errors,
-                    "unknown-service",
-                    path,
-                    "policy service is not in effective Compose",
-                )
-                continue
-            if "image" not in compose_services[service_name]:
-                _error(
-                    errors,
-                    "non-image-service",
-                    path,
-                    "tracked service has no effective image",
-                )
-            if not isinstance(policy, dict) or set(policy) != {"track"}:
-                _error(
-                    errors,
-                    "invalid-policy",
-                    path,
-                    "service policy must contain only track",
-                )
-                continue
-            if not _is_nonempty_string(policy.get("track")):
-                _error(
-                    errors,
-                    "invalid-value",
-                    f"{path}.track",
-                    "image update track must be a non-empty string",
-                )
         for service_name, service in sorted(compose_services.items()):
             if "image" not in service:
                 continue
