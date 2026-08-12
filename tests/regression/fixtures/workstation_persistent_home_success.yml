@@ -59,6 +59,16 @@
         path: "{{ workstation_home }}/.openclaw"
         target: "{{ workstation_persistent_home_root }}/.openclaw"
         mode: "0700"
+      - name: herdr
+        type: bind_mount
+        path: "{{ workstation_home }}/.config/herdr"
+        target: "{{ workstation_persistent_home_root }}/.config/herdr"
+        mode: "0700"
+      - name: collie_state
+        type: bind_mount
+        path: "{{ workstation_home }}/.local/state/collie"
+        target: "{{ workstation_persistent_home_root }}/.local/state/collie"
+        mode: "0700"
       - name: repos
         type: bind_mount
         path: "{{ workstation_home }}/repos"
@@ -171,6 +181,16 @@
         path: "{{ temp_root }}/ephemeral/workstation/home/.openclaw"
       register: openclaw_state_dir_stat
 
+    - name: Stat herdr persistent home directory
+      ansible.builtin.stat:
+        path: "{{ temp_root }}/ephemeral/workstation/home/.config/herdr"
+      register: herdr_state_dir_stat
+
+    - name: Stat Collie persistent home directory
+      ansible.builtin.stat:
+        path: "{{ temp_root }}/ephemeral/workstation/home/.local/state/collie"
+      register: collie_state_dir_stat
+
     - name: Stat Claude home path
       ansible.builtin.stat:
         path: "{{ workstation_home }}/.claude"
@@ -210,6 +230,16 @@
       ansible.builtin.stat:
         path: "{{ workstation_home }}/.openclaw"
       register: openclaw_home_path_stat
+
+    - name: Stat herdr home path
+      ansible.builtin.stat:
+        path: "{{ workstation_home }}/.config/herdr"
+      register: herdr_home_path_stat
+
+    - name: Stat Collie state home path
+      ansible.builtin.stat:
+        path: "{{ workstation_home }}/.local/state/collie"
+      register: collie_home_path_stat
 
     - name: Assert workstation persistent home mount paths were prepared safely
       ansible.builtin.assert:
@@ -254,6 +284,14 @@
           - openclaw_state_dir_stat.stat.uid == workstation_uid
           - openclaw_state_dir_stat.stat.gid == workstation_gid
           - openclaw_state_dir_stat.stat.mode == "0700"
+          - herdr_state_dir_stat.stat.isdir
+          - herdr_state_dir_stat.stat.uid == workstation_uid
+          - herdr_state_dir_stat.stat.gid == workstation_gid
+          - herdr_state_dir_stat.stat.mode == "0700"
+          - collie_state_dir_stat.stat.isdir
+          - collie_state_dir_stat.stat.uid == workstation_uid
+          - collie_state_dir_stat.stat.gid == workstation_gid
+          - collie_state_dir_stat.stat.mode == "0700"
           - claude_home_path_stat.stat.isdir
           - not (claude_home_path_stat.stat.islnk | default(false))
           - codex_home_path_stat.stat.isdir
@@ -268,6 +306,10 @@
           - not (hermes_home_path_stat.stat.islnk | default(false))
           - openclaw_home_path_stat.stat.isdir
           - not (openclaw_home_path_stat.stat.islnk | default(false))
+          - herdr_home_path_stat.stat.isdir
+          - not (herdr_home_path_stat.stat.islnk | default(false))
+          - collie_home_path_stat.stat.isdir
+          - not (collie_home_path_stat.stat.islnk | default(false))
           - repos_home_path_stat.stat.isdir
           - not (repos_home_path_stat.stat.islnk | default(false))
         fail_msg: "Workstation persistent home directories or mount paths were not prepared as expected"
