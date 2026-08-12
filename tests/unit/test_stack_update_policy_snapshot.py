@@ -167,8 +167,12 @@ updates:
     )
 
 
-def test_checkout_not_at_remote_default_branch_commit_fails_before_stack_discovery(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "selected_stacks",
+    [["stacks/media/does-not-exist"], [None]],
+)
+def test_checkout_not_at_remote_default_branch_commit_fails_before_stack_inspection(
+    tmp_path: Path, selected_stacks: list[object]
 ) -> None:
     repository, commit = create_repository(tmp_path)
     git(repository, "checkout", "-b", "feature")
@@ -178,7 +182,7 @@ def test_checkout_not_at_remote_default_branch_commit_fails_before_stack_discove
 
     result = build_repository_snapshot(
         repository,
-        ["stacks/media/does-not-exist"],
+        selected_stacks,  # type: ignore[arg-type]
         github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
     )
 
@@ -990,6 +994,49 @@ def test_invalid_default_branch_resolution_is_structured(
     assert [(error.code, error.path) for error in result.errors] == [(code, path)]
 
 
+@pytest.mark.parametrize(
+    "default_branch",
+    ["main\0unsafe", "main\nunsafe", "main\ud800unsafe", "main..unsafe"],
+)
+def test_unsafe_default_branch_fails_with_safe_structured_error(
+    tmp_path: Path, default_branch: str
+) -> None:
+    repository, commit = create_repository(tmp_path)
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState(
+            default_branch, commit
+        ),
+    )
+
+    assert result.snapshot is None
+    assert [error.as_dict() for error in result.errors] == [
+        {
+            "code": "invalid-default-branch",
+            "message": "GitHub returned an invalid default branch",
+            "path": "repository.default_branch",
+        }
+    ]
+
+
+def test_valid_slash_default_branch_is_preserved_in_snapshot(tmp_path: Path) -> None:
+    repository, commit = create_repository(tmp_path)
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState(
+            "release/stable", commit
+        ),
+    )
+
+    assert result.errors == ()
+    assert result.snapshot is not None
+    assert result.snapshot.default_branch == "release/stable"
+
+
 def test_snapshot_is_deterministic_and_leaves_repository_and_worktree_unchanged(
     tmp_path: Path,
 ) -> None:
@@ -1054,6 +1101,31 @@ def test_unrepresentable_selected_stack_identity_fails_structurally(
     result = build_repository_snapshot(
         repository,
         [selected],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+
+    assert result.snapshot is None
+    assert [error.as_dict() for error in result.errors] == [
+        {
+            "code": "invalid-stack-identity",
+            "message": "selected stack identity must be stacks/<host>/<stack>",
+            "path": "stack.identity",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "selected_stacks",
+    [[None], ["stacks/media/example", None]],
+)
+def test_non_string_selected_stack_identity_fails_structurally(
+    tmp_path: Path, selected_stacks: list[object]
+) -> None:
+    repository, commit = create_repository(tmp_path)
+
+    result = build_repository_snapshot(
+        repository,
+        selected_stacks,  # type: ignore[arg-type]
         github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
     )
 

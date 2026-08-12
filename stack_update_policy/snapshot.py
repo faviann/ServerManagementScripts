@@ -129,6 +129,8 @@ def read_github_repository(owner: str, name: str) -> GitHubRepositoryState:
         default_branch = repository_payload.get("default_branch")
         if not isinstance(default_branch, str) or not default_branch:
             return GitHubRepositoryState("", "")
+        if not _is_valid_git_branch_name(default_branch):
+            return GitHubRepositoryState(default_branch, "")
         branch = subprocess.run(
             [
                 "gh",
@@ -168,6 +170,23 @@ def _is_filesystem_encodable(path: str) -> bool:
     except UnicodeEncodeError:
         return False
     return os.fsdecode(encoded) == path
+
+
+def _is_valid_git_branch_name(branch: str) -> bool:
+    if not _is_filesystem_encodable(branch) or any(
+        ord(character) < 32 or ord(character) == 127 for character in branch
+    ):
+        return False
+    try:
+        completed = subprocess.run(
+            ["git", "check-ref-format", "--branch", branch],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return False
+    return completed.stdout.strip() == branch
 
 
 def _tree_entry(
@@ -430,6 +449,13 @@ def build_repository_snapshot(
             "GitHub did not resolve a default branch",
         )
         return RepositorySnapshotBuild((error,), None)
+    if not _is_valid_git_branch_name(remote.default_branch):
+        error = SnapshotError(
+            "invalid-default-branch",
+            "repository.default_branch",
+            "GitHub returned an invalid default branch",
+        )
+        return RepositorySnapshotBuild((error,), None)
     if not isinstance(remote.commit, str) or not remote.commit:
         error = SnapshotError(
             "missing-default-branch-commit",
@@ -461,11 +487,25 @@ def build_repository_snapshot(
         )
         return RepositorySnapshotBuild((error,), None)
 
-    for stack_identity in sorted(set(selected_stacks)):
+    stack_identities = tuple(selected_stacks)
+    for stack_identity in stack_identities:
+        if (
+            not isinstance(stack_identity, str)
+            or not _is_filesystem_encodable(stack_identity)
+            or any(
+                ord(character) < 32 or ord(character) == 127
+                for character in stack_identity
+            )
+        ):
+            error = SnapshotError(
+                "invalid-stack-identity",
+                "stack.identity",
+                "selected stack identity must be stacks/<host>/<stack>",
+            )
+            return RepositorySnapshotBuild((error,), None)
         parts = PurePosixPath(stack_identity).parts
         if (
-            not _is_filesystem_encodable(stack_identity)
-            or len(parts) != 3
+            len(parts) != 3
             or parts[0] != "stacks"
             or any(part in {"", ".", ".."} for part in parts)
             or PurePosixPath(stack_identity).as_posix() != stack_identity
@@ -477,6 +517,7 @@ def build_repository_snapshot(
             )
             return RepositorySnapshotBuild((error,), None)
 
+    selected_stack_identities = tuple(sorted(set(stack_identities)))
     stacks: list[StackInputSnapshot] = []
     supported = (
         "compose.override.yaml",
@@ -485,7 +526,7 @@ def build_repository_snapshot(
         "compose.yml",
         "stack.yaml",
     )
-    for stack_identity in sorted(set(selected_stacks)):
+    for stack_identity in selected_stack_identities:
         current_path = f"{stack_identity}/stack.yaml"
         try:
             candidates = tuple(
