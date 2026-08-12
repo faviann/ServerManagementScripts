@@ -276,6 +276,100 @@ def test_camel_case_credential_keys_are_rejected_as_secret_metadata(tmp_path: Pa
     ]
 
 
+@pytest.mark.parametrize(
+    "header",
+    [
+        "-----BEGIN PRIVATE KEY-----",
+        "-----BEGIN RSA PRIVATE KEY-----",
+        "-----BEGIN OPENSSH PRIVATE KEY-----",
+        "-----BEGIN EC PRIVATE KEY-----",
+        "-----BEGIN ENCRYPTED PRIVATE KEY-----",
+        "-----BEGIN DSA PRIVATE KEY-----",
+        "-----BEGIN PGP PRIVATE KEY BLOCK-----",
+    ],
+)
+def test_private_key_block_headers_in_neutral_fields_are_rejected_without_leaking(
+    tmp_path: Path, header: str
+) -> None:
+    stack = write_valid_stack(tmp_path)
+    metadata = (stack / "stack.yaml").read_text(encoding="utf-8")
+    (stack / "stack.yaml").write_text(
+        metadata + f"notes: {json.dumps(header)}\n",
+        encoding="utf-8",
+    )
+
+    completed = run_validate(tmp_path)
+
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout)["errors"] == [
+        {
+            "code": "secret-metadata",
+            "message": "secret-shaped metadata is forbidden",
+            "path": "stack.yaml.notes",
+        }
+    ]
+    assert header not in completed.stdout
+    assert header not in completed.stderr
+
+
+@pytest.mark.parametrize("field", ["credential", "password", "token"])
+def test_secret_named_fields_are_rejected_without_leaking_their_values(
+    tmp_path: Path, field: str
+) -> None:
+    stack = write_valid_stack(tmp_path)
+    marker = "fixture-value-that-must-stay-private"
+    metadata = (stack / "stack.yaml").read_text(encoding="utf-8")
+    (stack / "stack.yaml").write_text(
+        metadata + f"{field}: {marker}\n",
+        encoding="utf-8",
+    )
+
+    completed = run_validate(tmp_path)
+
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout)["errors"] == [
+        {
+            "code": "secret-metadata",
+            "message": "secret-shaped metadata is forbidden",
+            "path": f"stack.yaml.{field}",
+        }
+    ]
+    assert marker not in completed.stdout
+    assert marker not in completed.stderr
+
+
+@pytest.mark.parametrize(
+    "secret_shape",
+    [
+        "{{ vault_fixture_reference }}",
+        "password=<REPLACE_ME>",
+        "token=<REPLACE_ME>",
+    ],
+)
+def test_secret_shaped_values_are_rejected_without_leaking(
+    tmp_path: Path, secret_shape: str
+) -> None:
+    stack = write_valid_stack(tmp_path)
+    metadata = (stack / "stack.yaml").read_text(encoding="utf-8")
+    (stack / "stack.yaml").write_text(
+        metadata + f"notes: {json.dumps(secret_shape)}\n",
+        encoding="utf-8",
+    )
+
+    completed = run_validate(tmp_path)
+
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout)["errors"] == [
+        {
+            "code": "secret-metadata",
+            "message": "secret-shaped metadata is forbidden",
+            "path": "stack.yaml.notes",
+        }
+    ]
+    assert secret_shape not in completed.stdout
+    assert secret_shape not in completed.stderr
+
+
 def test_missing_update_policy_fails_without_inferring_from_image_tags(tmp_path: Path) -> None:
     stack = write_valid_stack(tmp_path)
     metadata = (stack / "stack.yaml").read_text(encoding="utf-8")
@@ -442,6 +536,56 @@ def test_assisted_procedure_preserves_a_markdown_fragment_on_a_local_runbook(tmp
     }
 
 
+def test_assisted_procedure_rejects_parent_directory_traversal(tmp_path: Path) -> None:
+    stack = write_valid_stack(tmp_path)
+    (stack / "docs").mkdir()
+    (stack / "README.md").write_text("# Updating\n", encoding="utf-8")
+    metadata = (stack / "stack.yaml").read_text(encoding="utf-8")
+    (stack / "stack.yaml").write_text(
+        metadata
+        + "  procedure:\n    mode: assisted\n    runbook: docs/../README.md#updating\n",
+        encoding="utf-8",
+    )
+
+    completed = run_validate(tmp_path)
+
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout)["errors"] == [
+        {
+            "code": "invalid-runbook",
+            "message": "runbook must stay within the selected stack",
+            "path": "stack.yaml.updates.procedure.runbook",
+        }
+    ]
+
+
+def test_assisted_procedure_rejects_a_symlink_escape_to_repository_docs(
+    tmp_path: Path,
+) -> None:
+    stack = write_valid_stack(tmp_path)
+    repository_docs = tmp_path / "docs"
+    repository_docs.mkdir()
+    (repository_docs / "upgrade.md").write_text("# Updating\n", encoding="utf-8")
+    (stack / "linked-docs").symlink_to(repository_docs, target_is_directory=True)
+    metadata = (stack / "stack.yaml").read_text(encoding="utf-8")
+    (stack / "stack.yaml").write_text(
+        metadata
+        + "  procedure:\n    mode: assisted\n    runbook: linked-docs/upgrade.md#updating\n",
+        encoding="utf-8",
+    )
+
+    completed = run_validate(tmp_path)
+
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout)["errors"] == [
+        {
+            "code": "invalid-runbook",
+            "message": "runbook must stay within the selected stack",
+            "path": "stack.yaml.updates.procedure.runbook",
+        }
+    ]
+
+
 def test_assisted_procedure_rejects_a_missing_markdown_fragment_target(
     tmp_path: Path,
 ) -> None:
@@ -532,6 +676,55 @@ def test_malformed_metadata_and_compose_failures_are_structured(tmp_path: Path) 
         "compose-resolution",
         "malformed-metadata",
     }
+
+
+def test_malformed_metadata_diagnostics_do_not_echo_yaml_input(tmp_path: Path) -> None:
+    stack = write_valid_stack(tmp_path)
+    secret_marker = "fixture-value-that-must-not-be-echoed"
+    (stack / "stack.yaml").write_text(
+        f"description: [{secret_marker}\n",
+        encoding="utf-8",
+    )
+
+    completed = run_validate(tmp_path)
+
+    payload = json.loads(completed.stdout)
+    assert completed.returncode == 1
+    assert payload["errors"][0] == {
+        "code": "malformed-metadata",
+        "message": "could not parse stack.yaml at line 2, column 1",
+        "path": "stack.yaml",
+    }
+    assert secret_marker not in completed.stdout
+    assert secret_marker not in completed.stderr
+
+
+def test_recursive_yaml_alias_returns_a_controlled_versioned_failure(tmp_path: Path) -> None:
+    stack = write_valid_stack(tmp_path)
+    metadata = (stack / "stack.yaml").read_text(encoding="utf-8")
+    (stack / "stack.yaml").write_text(
+        metadata + "extension: &recursive [*recursive]\n",
+        encoding="utf-8",
+    )
+
+    completed = run_validate(tmp_path)
+
+    payload = json.loads(completed.stdout)
+    assert completed.returncode == 1
+    assert payload["schema_version"] == 1
+    assert payload["valid"] is False
+    assert payload["result"] is None
+    assert {
+        (error["code"], error["path"], error["message"])
+        for error in payload["errors"]
+    } == {
+        (
+            "malformed-metadata",
+            "stack.yaml.extension[0]",
+            "recursive YAML aliases are not supported",
+        )
+    }
+    assert "Traceback" not in completed.stderr
 
 
 def test_stack_selection_rejects_a_stack_root_symlink_outside_the_repository(tmp_path: Path) -> None:

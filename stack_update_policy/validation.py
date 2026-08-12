@@ -18,7 +18,7 @@ SECRET_KEY = re.compile(
     r"private_?key|secret(?:s)?|token(?:s)?)(_|$)"
 )
 SECRET_VALUE = re.compile(
-    r"(\$ANSIBLE_VAULT|!vault|BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY|"
+    r"(\$ANSIBLE_VAULT|!vault|BEGIN (?:(?:(?:RSA|OPENSSH|EC|DSA|ENCRYPTED) )?PRIVATE KEY|PGP PRIVATE KEY BLOCK)|"
     r"\bvault[_:/.][A-Za-z0-9_.:/-]+|://[^\s/:]+:[^\s/@]+@|"
     r"\b(?:password|passwd|secret|token|api[_-]?key)\s*[:=]\s*\S+|"
     r"\b(?:gh[opusr]|github_pat)_[A-Za-z0-9_]{16,}|\bAKIA[A-Z0-9]{16}\b|"
@@ -110,24 +110,48 @@ def _markdown_targets(document: str) -> set[str]:
     return targets
 
 
-def _find_secrets(value: Any, path: str = "stack.yaml") -> list[str]:
+class _RecursiveYamlAliasError(Exception):
+    def __init__(self, path: str) -> None:
+        self.path = path
+
+
+def _find_secrets(
+    value: Any, path: str = "stack.yaml", active_containers: set[int] | None = None
+) -> list[str]:
     found: list[str] = []
+    if active_containers is None:
+        active_containers = set()
+    if isinstance(value, (dict, list)):
+        identity = id(value)
+        if identity in active_containers:
+            raise _RecursiveYamlAliasError(path)
+        active_containers.add(identity)
     if isinstance(value, dict):
-        for key, child in value.items():
-            child_path = f"{path}.{key}"
-            key_with_word_boundaries = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", str(key))
-            key_with_word_boundaries = re.sub(
-                r"([a-z0-9])([A-Z])", r"\1_\2", key_with_word_boundaries
-            )
-            normalized_key = re.sub(
-                r"[^a-z0-9]+", "_", key_with_word_boundaries.lower()
-            ).strip("_")
-            if SECRET_KEY.search(normalized_key) or "vault" in normalized_key:
-                found.append(child_path)
-            found.extend(_find_secrets(child, child_path))
+        try:
+            for key, child in value.items():
+                child_path = f"{path}.{key}"
+                key_with_word_boundaries = re.sub(
+                    r"(.)([A-Z][a-z]+)", r"\1_\2", str(key)
+                )
+                key_with_word_boundaries = re.sub(
+                    r"([a-z0-9])([A-Z])", r"\1_\2", key_with_word_boundaries
+                )
+                normalized_key = re.sub(
+                    r"[^a-z0-9]+", "_", key_with_word_boundaries.lower()
+                ).strip("_")
+                if SECRET_KEY.search(normalized_key) or "vault" in normalized_key:
+                    found.append(child_path)
+                found.extend(_find_secrets(child, child_path, active_containers))
+        finally:
+            active_containers.remove(id(value))
     elif isinstance(value, list):
-        for index, child in enumerate(value):
-            found.extend(_find_secrets(child, f"{path}[{index}]"))
+        try:
+            for index, child in enumerate(value):
+                found.extend(
+                    _find_secrets(child, f"{path}[{index}]", active_containers)
+                )
+        finally:
+            active_containers.remove(id(value))
     elif isinstance(value, str):
         lowered = value.lower()
         if SECRET_VALUE.search(value) or "{{ vault_" in lowered or "{{vault_" in lowered:
@@ -142,13 +166,36 @@ def _load_metadata(stack_root: Path, errors: list[ValidationError]) -> dict[str,
         return None
     try:
         loaded = yaml.safe_load(manifest.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
-        _error(errors, "malformed-metadata", "stack.yaml", f"could not parse stack.yaml: {exc}")
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, "problem_mark", None)
+        if isinstance(getattr(mark, "line", None), int) and isinstance(
+            getattr(mark, "column", None), int
+        ):
+            message = (
+                f"could not parse stack.yaml at line {mark.line + 1}, "
+                f"column {mark.column + 1}"
+            )
+        else:
+            message = "could not parse stack.yaml"
+        _error(errors, "malformed-metadata", "stack.yaml", message)
+        return None
+    except (OSError, UnicodeError):
+        _error(errors, "malformed-metadata", "stack.yaml", "could not read stack.yaml")
         return None
     if not isinstance(loaded, dict):
         _error(errors, "malformed-metadata", "stack.yaml", "stack.yaml must contain a mapping")
         return None
-    for secret_path in sorted(set(_find_secrets(loaded))):
+    try:
+        secret_paths = _find_secrets(loaded)
+    except _RecursiveYamlAliasError as exc:
+        _error(
+            errors,
+            "malformed-metadata",
+            exc.path,
+            "recursive YAML aliases are not supported",
+        )
+        return None
+    for secret_path in sorted(set(secret_paths)):
         _error(errors, "secret-metadata", secret_path, "secret-shaped metadata is forbidden")
     return loaded
 
@@ -228,7 +275,6 @@ def _resolve_compose(stack_root: Path, errors: list[ValidationError]) -> dict[st
 
 
 def _validate_procedure(
-    repository_root: Path,
     stack_root: Path,
     updates: dict[str, Any],
     errors: list[ValidationError],
@@ -255,13 +301,27 @@ def _validate_procedure(
     ):
         _error(errors, "invalid-runbook", "stack.yaml.updates.procedure.runbook", "runbook fragment is invalid")
         return None
-    candidate = (stack_root / runbook_path).resolve()
-    try:
-        candidate.relative_to(repository_root.resolve())
-    except ValueError:
-        _error(errors, "invalid-runbook", "stack.yaml.updates.procedure.runbook", "runbook must stay within the repository")
+    relative_runbook = Path(runbook_path)
+    if relative_runbook.is_absolute() or ".." in relative_runbook.parts:
+        _error(
+            errors,
+            "invalid-runbook",
+            "stack.yaml.updates.procedure.runbook",
+            "runbook must stay within the selected stack",
+        )
         return None
-    if Path(runbook_path).is_absolute() or not candidate.is_file():
+    candidate = (stack_root / relative_runbook).resolve()
+    try:
+        candidate.relative_to(stack_root.resolve())
+    except ValueError:
+        _error(
+            errors,
+            "invalid-runbook",
+            "stack.yaml.updates.procedure.runbook",
+            "runbook must stay within the selected stack",
+        )
+        return None
+    if not candidate.is_file():
         _error(errors, "invalid-runbook", "stack.yaml.updates.procedure.runbook", "runbook does not resolve to a local file")
         return None
     if fragment_marker:
@@ -282,7 +342,6 @@ def _validate_procedure(
 
 
 def _validate_image_policy(
-    repository_root: Path,
     stack_root: Path,
     metadata: dict[str, Any],
     effective: dict[str, Any] | None,
@@ -325,7 +384,7 @@ def _validate_image_policy(
         _error(errors, "invalid-policy", "stack.yaml.updates.services", "services must be a mapping")
         service_policies = {}
 
-    procedure = _validate_procedure(repository_root, stack_root, updates, errors)
+    procedure = _validate_procedure(stack_root, updates, errors)
     if effective is None:
         return {}, procedure
     compose_services = effective["services"]
@@ -384,7 +443,7 @@ def validate_stack(repository_root: Path, identity: str) -> StackPolicyValidatio
     procedure: dict[str, str] | None = None
     if metadata is not None:
         _validate_minimum_metadata(metadata, name, errors)
-        services, procedure = _validate_image_policy(repository_root, stack_root, metadata, effective, errors)
+        services, procedure = _validate_image_policy(stack_root, metadata, effective, errors)
 
     ordered_errors = tuple(sorted(errors, key=lambda error: (error.path, error.code, error.message)))
     if ordered_errors:
