@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import subprocess
+import tempfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 import yaml
 
@@ -45,8 +47,9 @@ class ValidatedStackPolicy:
     name: str
     metadata: dict[str, Any]
     policy: dict[str, Any]
-    services: dict[str, dict[str, str]]
+    services: dict[str, dict[str, str | None]]
     procedure: dict[str, str] | None
+    vendor: dict[str, str] | None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -57,6 +60,7 @@ class ValidatedStackPolicy:
             "policy": self.policy,
             "procedure": self.procedure,
             "services": self.services,
+            "vendor": self.vendor,
         }
 
 
@@ -455,6 +459,163 @@ def _resolve_compose(stack_root: Path, errors: list[ValidationError]) -> dict[st
     return effective
 
 
+def _canonical_official_repository(value: Any) -> str | None:
+    if not _is_nonempty_string(value):
+        return None
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "github.com"
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+    if not re.fullmatch(r"/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", parsed.path):
+        return None
+    if parsed.path.endswith(".git"):
+        return None
+    return value
+
+
+def _repository_relative_compose_path(value: Any) -> str | None:
+    if (
+        not _is_nonempty_string(value)
+        or "\\" in value
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        return None
+    path = PurePosixPath(value)
+    if (
+        path.is_absolute()
+        or value != path.as_posix()
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        return None
+    return value
+
+
+def _resolve_vendor_baseline(
+    stack_root: Path,
+    repository: str,
+    compose_path: str,
+    track: str,
+    errors: list[ValidationError],
+) -> str | None:
+    git_environment = os.environ.copy()
+    git_environment.update({"GCM_INTERACTIVE": "Never", "GIT_TERMINAL_PROMPT": "0"})
+    try:
+        with tempfile.TemporaryDirectory(prefix="stack-policy-vendor-") as checkout:
+            clone = subprocess.run(
+                [
+                    "git",
+                    "clone",
+                    "--quiet",
+                    "--filter=blob:none",
+                    "--no-checkout",
+                    "--single-branch",
+                    "--branch",
+                    track,
+                    "--",
+                    repository,
+                    checkout,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=git_environment,
+                timeout=60,
+            )
+            if clone.returncode != 0:
+                _error(
+                    errors,
+                    "vendor-resolution",
+                    "stack.yaml.updates.upstream.repository",
+                    "official repository track could not be resolved",
+                )
+                return None
+            history = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    checkout,
+                    "log",
+                    "--format=%H",
+                    "--",
+                    compose_path,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=git_environment,
+                timeout=30,
+            )
+            commits = history.stdout.splitlines()
+            if history.returncode != 0:
+                _error(
+                    errors,
+                    "vendor-resolution",
+                    "stack.yaml.updates.upstream.repository",
+                    "official repository track history could not be resolved",
+                )
+                return None
+            if not commits:
+                _error(
+                    errors,
+                    "vendor-resolution",
+                    "stack.yaml.updates.upstream.compose_path",
+                    "official Compose path does not exist on the selected track",
+                )
+                return None
+            if any(not re.fullmatch(r"[0-9a-f]{40,64}", commit) for commit in commits):
+                _error(
+                    errors,
+                    "vendor-resolution",
+                    "stack.yaml.updates.track",
+                    "official repository track returned invalid history",
+                )
+                return None
+            try:
+                checked_in = (stack_root / "compose.yaml").read_bytes()
+            except OSError:
+                _error(
+                    errors,
+                    "vendor-resolution",
+                    "compose.yaml",
+                    "checked-in vendor base could not be read",
+                )
+                return None
+            for commit in commits:
+                upstream = subprocess.run(
+                    ["git", "-C", checkout, "show", f"{commit}:{compose_path}"],
+                    capture_output=True,
+                    check=False,
+                    env=git_environment,
+                    timeout=30,
+                )
+                if upstream.returncode == 0 and upstream.stdout == checked_in:
+                    return commit
+            _error(
+                errors,
+                "vendor-byte-mismatch",
+                "compose.yaml",
+                "checked-in vendor base does not exactly match the official Compose file on the selected track",
+            )
+            return None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        _error(
+            errors,
+            "vendor-resolution",
+            "stack.yaml.updates.upstream.repository",
+            "official repository track could not be resolved",
+        )
+        return None
+
+
 def _validate_procedure(
     stack_root: Path,
     updates: dict[str, Any],
@@ -547,13 +708,22 @@ def _validate_image_policy(
 ) -> tuple[dict[str, dict[str, str]], dict[str, str] | None]:
     updates = metadata.get("updates")
     if not isinstance(updates, dict):
-        _error(errors, "missing-policy", "stack.yaml.updates", "updates policy is required")
+        _error(
+            errors,
+            "missing-policy",
+            "stack.yaml.updates",
+            "updates policy is required",
+        )
         return {}, None
     if updates.get("mode") != "images":
         _error(errors, "unsupported-mode", "stack.yaml.updates.mode", "strict validation supports only images mode")
     allowed_update_keys = {"mode", "track", "services", "procedure", "low_confidence"}
     unknown = sorted(
-        (key for key in updates if not isinstance(key, str) or key not in allowed_update_keys),
+        (
+            key
+            for key in updates
+            if not isinstance(key, str) or key not in allowed_update_keys
+        ),
         key=str,
     )
     if unknown:
@@ -625,6 +795,190 @@ def _validate_image_policy(
     return resolved, procedure
 
 
+def _validate_vendor_policy(
+    stack_root: Path,
+    metadata: dict[str, Any],
+    effective: dict[str, Any] | None,
+    errors: list[ValidationError],
+) -> tuple[
+    dict[str, dict[str, str | None]],
+    dict[str, str] | None,
+    dict[str, str] | None,
+]:
+    updates = metadata.get("updates")
+    if not isinstance(updates, dict):
+        _error(errors, "missing-policy", "stack.yaml.updates", "updates policy is required")
+        return {}, None, None
+    allowed_update_keys = {
+        "mode",
+        "track",
+        "upstream",
+        "services",
+        "procedure",
+        "low_confidence",
+    }
+    unknown = sorted(
+        (key for key in updates if not isinstance(key, str) or key not in allowed_update_keys),
+        key=str,
+    )
+    if unknown:
+        rendered = ", ".join(
+            "<secret-key>"
+            if isinstance(key, str) and _is_secret_key(key)
+            else key
+            if isinstance(key, str)
+            else "<non-string-key>"
+            for key in unknown
+        )
+        _error(
+            errors,
+            "invalid-policy",
+            "stack.yaml.updates",
+            f"unsupported policy fields: {rendered}",
+        )
+    if "low_confidence" in updates and updates["low_confidence"] != "assisted":
+        _error(
+            errors,
+            "invalid-value",
+            "stack.yaml.updates.low_confidence",
+            "low_confidence must be assisted",
+        )
+
+    track = updates.get("track")
+    if not _is_nonempty_string(track) or any(
+        ord(character) < 32 or ord(character) == 127 for character in track
+    ):
+        _error(
+            errors,
+            "missing-track",
+            "stack.yaml.updates.track",
+            "vendor update track is required and must be a non-empty string",
+        )
+        track = None
+
+    upstream = updates.get("upstream")
+    repository: str | None = None
+    compose_path: str | None = None
+    if not isinstance(upstream, dict) or set(upstream) != {"repository", "compose_path"}:
+        _error(
+            errors,
+            "invalid-vendor-authority",
+            "stack.yaml.updates.upstream",
+            "upstream must contain exactly one repository and compose_path",
+        )
+    else:
+        repository = _canonical_official_repository(upstream.get("repository"))
+        if repository is None:
+            _error(
+                errors,
+                "invalid-vendor-authority",
+                "stack.yaml.updates.upstream.repository",
+                "repository must be one canonical official GitHub repository URL",
+            )
+        compose_path = _repository_relative_compose_path(upstream.get("compose_path"))
+        if compose_path is None:
+            _error(
+                errors,
+                "invalid-vendor-path",
+                "stack.yaml.updates.upstream.compose_path",
+                "compose_path must be a repository-relative path",
+            )
+
+    vendor_base = stack_root / "compose.yaml"
+    vendor_override = stack_root / "compose.override.yaml"
+    if (
+        not vendor_base.is_file()
+        or vendor_base.is_symlink()
+        or (stack_root / "compose.yml").exists()
+    ):
+        _error(
+            errors,
+            "unsupported-vendor-layout",
+            "compose",
+            "vendor base must be a checked-in compose.yaml file",
+        )
+    if (stack_root / "compose.override.yml").exists() or vendor_override.is_symlink():
+        _error(
+            errors,
+            "unsupported-vendor-layout",
+            "compose",
+            "vendor override must use compose.override.yaml",
+        )
+
+    service_policies = updates.get("services", {})
+    if not isinstance(service_policies, dict):
+        _error(
+            errors,
+            "invalid-policy",
+            "stack.yaml.updates.services",
+            "services must be a mapping",
+        )
+        service_policies = {}
+    procedure = _validate_procedure(stack_root, updates, errors)
+    services: dict[str, dict[str, str | None]] = {}
+    if effective is not None:
+        compose_services = effective["services"]
+        for service_name, policy in sorted(
+            service_policies.items(), key=lambda item: str(item[0])
+        ):
+            path = _mapping_child_path("stack.yaml.updates.services", service_name)
+            if service_name not in compose_services:
+                _error(
+                    errors,
+                    "unknown-service",
+                    path,
+                    "policy service is not in effective Compose",
+                )
+                continue
+            if "image" not in compose_services[service_name]:
+                _error(
+                    errors,
+                    "non-image-service",
+                    path,
+                    "tracked service has no effective image",
+                )
+            if not isinstance(policy, dict) or set(policy) != {"track"}:
+                _error(
+                    errors,
+                    "invalid-policy",
+                    path,
+                    "service policy must contain only track",
+                )
+                continue
+            if not _is_nonempty_string(policy.get("track")):
+                _error(
+                    errors,
+                    "invalid-value",
+                    f"{path}.track",
+                    "image update track must be a non-empty string",
+                )
+        for service_name, service in sorted(compose_services.items()):
+            if "image" not in service:
+                continue
+            policy = service_policies.get(service_name)
+            service_track = policy.get("track") if isinstance(policy, dict) else None
+            services[service_name] = {"image": str(service["image"]), "track": service_track}
+
+    commit = None
+    if (
+        repository is not None
+        and compose_path is not None
+        and track is not None
+        and vendor_base.is_file()
+        and not vendor_base.is_symlink()
+    ):
+        commit = _resolve_vendor_baseline(stack_root, repository, compose_path, track, errors)
+    vendor = None
+    if commit is not None and repository is not None and compose_path is not None and track is not None:
+        vendor = {
+            "baseline_commit": commit,
+            "compose_path": compose_path,
+            "repository": repository,
+            "track": track,
+        }
+    return services, procedure, vendor
+
+
 def validate_stack(repository_root: Path, identity: str) -> StackPolicyValidation:
     errors: list[ValidationError] = []
     parts = Path(identity).parts
@@ -675,11 +1029,21 @@ def validate_stack(repository_root: Path, identity: str) -> StackPolicyValidatio
 
     metadata = _load_metadata(stack_root, errors)
     effective = _resolve_compose(stack_root, errors)
-    services: dict[str, dict[str, str]] = {}
+    services: dict[str, dict[str, str | None]] = {}
     procedure: dict[str, str] | None = None
+    vendor: dict[str, str] | None = None
     if metadata is not None:
         _validate_minimum_metadata(metadata, name, errors)
-        services, procedure = _validate_image_policy(stack_root, metadata, effective, errors)
+        updates = metadata.get("updates")
+        mode = updates.get("mode") if isinstance(updates, dict) else None
+        if mode == "vendor":
+            services, procedure, vendor = _validate_vendor_policy(
+                stack_root, metadata, effective, errors
+            )
+        else:
+            services, procedure = _validate_image_policy(
+                stack_root, metadata, effective, errors
+            )
 
     ordered_errors = tuple(sorted(errors, key=lambda error: (error.path, error.code, error.message)))
     if ordered_errors:
@@ -690,8 +1054,10 @@ def validate_stack(repository_root: Path, identity: str) -> StackPolicyValidatio
     }
     updates = metadata["updates"]
     normalized_policy = {
+        "foundational_controlled_migration": metadata["portability"]["tier"]
+        == "foundational-controlled-migration",
         "low_confidence": updates.get("low_confidence"),
-        "mode": "images",
+        "mode": updates["mode"],
         "track": updates.get("track"),
     }
     result = ValidatedStackPolicy(
@@ -702,5 +1068,6 @@ def validate_stack(repository_root: Path, identity: str) -> StackPolicyValidatio
         normalized_policy,
         services,
         procedure,
+        vendor,
     )
     return StackPolicyValidation((), result)

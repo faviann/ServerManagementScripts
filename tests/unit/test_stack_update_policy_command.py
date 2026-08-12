@@ -44,6 +44,65 @@ updates:
     return stack
 
 
+def write_vendor_stack(repository: Path, upstream: Path) -> Path:
+    stack = write_valid_stack(repository)
+    compose = "services:\n  app:\n    image: example/app:1.2\n"
+    (upstream / "docker-compose.yml").parent.mkdir(parents=True, exist_ok=True)
+    (upstream / "docker-compose.yml").write_text(compose, encoding="utf-8")
+    subprocess.run(["git", "init", "-q", "-b", "stable", str(upstream)], check=True)
+    subprocess.run(["git", "-C", str(upstream), "add", "docker-compose.yml"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(upstream), "-c", "user.name=Fixture",
+            "-c", "user.email=fixture@example.invalid", "commit", "-qm", "baseline",
+        ],
+        check=True,
+    )
+    (stack / "compose.yaml").write_text(compose, encoding="utf-8")
+    (stack / "compose.override.yaml").write_text(
+        "services:\n  app:\n    image: example/app:local\n  worker:\n    image: example/worker:2\n",
+        encoding="utf-8",
+    )
+    (stack / "stack.yaml").write_text(
+        f"""\
+schema_version: 1
+kind: stack
+name: example
+description: Vendor application
+portability:
+  tier: foundational-controlled-migration
+  owner: stack
+exposure:
+  traefik: protected
+  homepage_instances: [admin]
+updates:
+  mode: vendor
+  track: stable
+  upstream:
+    repository: https://github.com/example/vendor
+    compose_path: docker-compose.yml
+  low_confidence: assisted
+  services:
+    worker:
+      track: edge
+""",
+        encoding="utf-8",
+    )
+    return stack
+
+
+def vendor_environment(upstream: Path) -> dict[str, str]:
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "url.file://" + str(upstream) + ".insteadOf",
+            "GIT_CONFIG_VALUE_0": "https://github.com/example/vendor",
+        }
+    )
+    return environment
+
+
 def run_validate(
     repository: Path,
     identity: str = "stacks/media/example",
@@ -131,6 +190,7 @@ def test_valid_image_tracked_stack_returns_reusable_versioned_result(tmp_path: P
             },
             "name": "example",
             "policy": {
+                "foundational_controlled_migration": False,
                 "low_confidence": None,
                 "mode": "images",
                 "track": "stable",
@@ -139,6 +199,7 @@ def test_valid_image_tracked_stack_returns_reusable_versioned_result(tmp_path: P
             "services": {
                 "app": {"image": "example/app:1.2", "track": "stable"},
             },
+            "vendor": None,
         },
         "schema_version": 1,
         "valid": True,
@@ -203,6 +264,28 @@ def test_assisted_low_confidence_policy_is_normalized_for_reuse(tmp_path: Path) 
 
     assert completed.returncode == 0
     assert json.loads(completed.stdout)["result"]["policy"]["low_confidence"] == "assisted"
+
+
+def test_foundational_status_is_normalized_without_inspecting_image_names(
+    tmp_path: Path,
+) -> None:
+    stack = write_valid_stack(tmp_path)
+    metadata = (stack / "stack.yaml").read_text(encoding="utf-8")
+    (stack / "stack.yaml").write_text(
+        metadata.replace("tier: portable-app", "tier: foundational-controlled-migration"),
+        encoding="utf-8",
+    )
+    (stack / "compose.yaml").write_text(
+        "services:\n  arbitrary:\n    image: totally-neutral-name:1\n",
+        encoding="utf-8",
+    )
+
+    completed = run_validate(tmp_path)
+
+    assert completed.returncode == 0
+    assert json.loads(completed.stdout)["result"]["policy"][
+        "foundational_controlled_migration"
+    ] is True
 
 
 @pytest.mark.parametrize("value", ["automatic", "true", "null"])
@@ -473,27 +556,256 @@ def test_missing_stack_metadata_returns_a_versioned_cli_failure(tmp_path: Path) 
     }
 
 
-def test_vendor_update_mode_returns_a_versioned_cli_failure(tmp_path: Path) -> None:
-    stack = write_valid_stack(tmp_path)
-    metadata = (stack / "stack.yaml").read_text(encoding="utf-8")
-    (stack / "stack.yaml").write_text(
-        metadata.replace("mode: images", "mode: vendor"), encoding="utf-8"
-    )
+def test_vendor_update_mode_returns_a_reusable_normalized_result(tmp_path: Path) -> None:
+    upstream = tmp_path / "upstream"
+    write_vendor_stack(tmp_path, upstream)
+    commit = subprocess.run(
+        ["git", "-C", str(upstream), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
 
-    completed = run_validate(tmp_path)
+    completed = run_validate(tmp_path, env=vendor_environment(upstream))
 
-    assert completed.returncode == 1
+    assert completed.returncode == 0
     payload = json.loads(completed.stdout)
     assert payload["schema_version"] == 1
-    assert payload["valid"] is False
-    assert payload["result"] is None
-    assert payload["errors"] == [
+    assert payload["valid"] is True
+    assert payload["result"]["policy"] == {
+        "foundational_controlled_migration": True,
+        "low_confidence": "assisted",
+        "mode": "vendor",
+        "track": "stable",
+    }
+    assert payload["result"]["vendor"] == {
+        "baseline_commit": commit,
+        "compose_path": "docker-compose.yml",
+        "repository": "https://github.com/example/vendor",
+        "track": "stable",
+    }
+    assert payload["result"]["services"] == {
+        "app": {"image": "example/app:local", "track": None},
+        "worker": {"image": "example/worker:2", "track": "edge"},
+    }
+
+
+def test_vendor_update_mode_rejects_top_level_upstream_authority(tmp_path: Path) -> None:
+    upstream = tmp_path / "upstream"
+    stack = write_vendor_stack(tmp_path, upstream)
+    metadata = (stack / "stack.yaml").read_text(encoding="utf-8")
+    (stack / "stack.yaml").write_text(
+        metadata.replace(
+            "  upstream:\n"
+            "    repository: https://github.com/example/vendor\n"
+            "    compose_path: docker-compose.yml\n",
+            "upstream:\n"
+            "  repository: https://github.com/example/vendor\n"
+            "  compose_path: docker-compose.yml\n",
+        ),
+        encoding="utf-8",
+    )
+
+    completed = run_validate(tmp_path, env=vendor_environment(upstream))
+
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout)["errors"] == [
         {
-            "code": "unsupported-mode",
-            "message": "strict validation supports only images mode",
-            "path": "stack.yaml.updates.mode",
+            "code": "invalid-vendor-authority",
+            "message": "upstream must contain exactly one repository and compose_path",
+            "path": "stack.yaml.updates.upstream",
         }
     ]
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "code"),
+    [
+        ("https://github.com/example/vendor", "https://github.com/example/vendor.git", "invalid-vendor-authority"),
+        ("compose_path: docker-compose.yml", "compose_path: ../docker-compose.yml", "invalid-vendor-path"),
+        ("  track: stable\n", "  track: ''\n", "missing-track"),
+    ],
+)
+def test_vendor_authority_path_and_track_are_strict(
+    tmp_path: Path, old: str, new: str, code: str
+) -> None:
+    upstream = tmp_path / "upstream"
+    stack = write_vendor_stack(tmp_path, upstream)
+    metadata = (stack / "stack.yaml").read_text(encoding="utf-8")
+    (stack / "stack.yaml").write_text(metadata.replace(old, new), encoding="utf-8")
+
+    completed = run_validate(tmp_path, env=vendor_environment(upstream))
+
+    assert completed.returncode == 1
+    assert code in {error["code"] for error in json.loads(completed.stdout)["errors"]}
+
+
+def test_vendor_base_must_match_the_resolved_commit_exactly(tmp_path: Path) -> None:
+    upstream = tmp_path / "upstream"
+    stack = write_vendor_stack(tmp_path, upstream)
+    (stack / "compose.yaml").write_text(
+        (stack / "compose.yaml").read_text(encoding="utf-8") + "# local edit\n",
+        encoding="utf-8",
+    )
+
+    completed = run_validate(tmp_path, env=vendor_environment(upstream))
+
+    assert completed.returncode == 1
+    assert "vendor-byte-mismatch" in {
+        error["code"] for error in json.loads(completed.stdout)["errors"]
+    }
+
+
+def test_vendor_compose_path_must_exist_on_the_selected_track(tmp_path: Path) -> None:
+    upstream = tmp_path / "upstream"
+    stack = write_vendor_stack(tmp_path, upstream)
+    metadata = (stack / "stack.yaml").read_text(encoding="utf-8")
+    (stack / "stack.yaml").write_text(
+        metadata.replace("compose_path: docker-compose.yml", "compose_path: missing.yml"),
+        encoding="utf-8",
+    )
+
+    completed = run_validate(tmp_path, env=vendor_environment(upstream))
+
+    assert completed.returncode == 1
+    assert {
+        "code": "vendor-resolution",
+        "message": "official Compose path does not exist on the selected track",
+        "path": "stack.yaml.updates.upstream.compose_path",
+    } in json.loads(completed.stdout)["errors"]
+
+
+def test_vendor_base_resolves_to_its_commit_within_the_selected_track(
+    tmp_path: Path,
+) -> None:
+    upstream = tmp_path / "upstream"
+    write_vendor_stack(tmp_path, upstream)
+    baseline = subprocess.run(
+        ["git", "-C", str(upstream), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    (upstream / "docker-compose.yml").write_text(
+        "services:\n  app:\n    image: example/app:next\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "-C", str(upstream), "add", "docker-compose.yml"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(upstream), "-c", "user.name=Fixture",
+            "-c", "user.email=fixture@example.invalid", "commit", "-qm", "next",
+        ],
+        check=True,
+    )
+
+    completed = run_validate(tmp_path, env=vendor_environment(upstream))
+
+    assert completed.returncode == 0
+    assert json.loads(completed.stdout)["result"]["vendor"]["baseline_commit"] == baseline
+
+
+def test_vendor_policy_rejects_unknown_services_and_unsupported_layout(
+    tmp_path: Path,
+) -> None:
+    upstream = tmp_path / "upstream"
+    stack = write_vendor_stack(tmp_path, upstream)
+    (stack / "compose.override.yaml").rename(stack / "compose.override.yml")
+    metadata = (stack / "stack.yaml").read_text(encoding="utf-8")
+    (stack / "stack.yaml").write_text(
+        metadata.replace("    worker:\n      track: edge", "    ghost:\n      track: edge"),
+        encoding="utf-8",
+    )
+
+    completed = run_validate(tmp_path, env=vendor_environment(upstream))
+
+    assert completed.returncode == 1
+    assert {"unknown-service", "unsupported-vendor-layout"}.issubset(
+        {error["code"] for error in json.loads(completed.stdout)["errors"]}
+    )
+
+
+def test_vendor_git_failures_are_structured_and_redact_external_output(
+    tmp_path: Path,
+) -> None:
+    upstream = tmp_path / "upstream"
+    write_vendor_stack(tmp_path, upstream)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    marker = "unsafe-external-repository-output"
+    git = fake_bin / "git"
+    git.write_text(
+        f"#!/bin/sh\nprintf '%s\\n' '{marker}' >&2\nexit 42\n",
+        encoding="utf-8",
+    )
+    git.chmod(0o755)
+    environment = os.environ.copy()
+    environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+
+    completed = run_validate(tmp_path, env=environment)
+
+    assert completed.returncode == 1
+    assert "vendor-resolution" in {
+        error["code"] for error in json.loads(completed.stdout)["errors"]
+    }
+    assert marker not in completed.stdout
+    assert marker not in completed.stderr
+
+
+def test_vendor_malformed_git_results_are_structured_and_redacted(
+    tmp_path: Path,
+) -> None:
+    upstream = tmp_path / "upstream"
+    write_vendor_stack(tmp_path, upstream)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    marker = "malformed-commit-that-must-not-leak"
+    git = fake_bin / "git"
+    git.write_text(
+        f"""#!/bin/sh
+if [ "$1" = clone ]; then
+  for destination do :; done
+  mkdir -p "$destination"
+  exit 0
+fi
+if [ "$3" = log ]; then
+  printf '%s\\n' '{marker}'
+  exit 0
+fi
+exit 42
+""",
+        encoding="utf-8",
+    )
+    git.chmod(0o755)
+    environment = os.environ.copy()
+    environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+
+    completed = run_validate(tmp_path, env=environment)
+
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout)["errors"][-1]["code"] == "vendor-resolution"
+    assert marker not in completed.stdout
+    assert marker not in completed.stderr
+
+
+def test_vendor_validation_does_not_change_the_selected_repository(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    upstream = tmp_path / "upstream"
+    write_vendor_stack(repository, upstream)
+
+    def repository_snapshot() -> dict[str, bytes]:
+        return {
+            path.relative_to(repository).as_posix(): path.read_bytes()
+            for path in sorted(repository.rglob("*"))
+            if path.is_file()
+        }
+
+    before = repository_snapshot()
+
+    completed = run_validate(repository, env=vendor_environment(upstream))
+
+    assert completed.returncode == 0
+    assert repository_snapshot() == before
 
 
 @pytest.mark.parametrize(
