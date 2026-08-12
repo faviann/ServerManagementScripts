@@ -1,0 +1,868 @@
+"""Canonical read-only repository inputs for future image update plans."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import stat
+import subprocess
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+
+import yaml
+
+
+_GITHUB_READ_TIMEOUT_SECONDS = 30
+
+GitHubReader = Callable[[str, str], "GitHubRepositoryState"]
+
+
+class GitHubReadError(Exception):
+    """A safe diagnostic from the controlled GitHub read boundary."""
+
+
+class _RepositoryInputReadError(Exception):
+    def __init__(self, path: str) -> None:
+        self.path = path
+
+
+@dataclass(frozen=True)
+class GitHubRepositoryState:
+    default_branch: str
+    commit: str
+
+
+@dataclass(frozen=True)
+class _CheckedInPathResolution:
+    paths: tuple[str, ...]
+    final_path: str | None
+
+
+@dataclass(frozen=True)
+class SnapshotError:
+    code: str
+    path: str
+    message: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {"code": self.code, "message": self.message, "path": self.path}
+
+
+@dataclass(frozen=True)
+class StackInputSnapshot:
+    identity: str
+    complete: bool
+    fingerprint: str
+    relevant_inputs: tuple[str, ...]
+    changed_inputs: tuple[str, ...]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "changed_inputs": list(self.changed_inputs),
+            "complete": self.complete,
+            "fingerprint": self.fingerprint,
+            "identity": self.identity,
+            "relevant_inputs": list(self.relevant_inputs),
+        }
+
+
+@dataclass(frozen=True)
+class RepositorySnapshot:
+    repository: str
+    default_branch: str
+    commit: str
+    stacks: tuple[StackInputSnapshot, ...]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "commit": self.commit,
+            "default_branch": self.default_branch,
+            "repository": self.repository,
+            "stacks": [stack.as_dict() for stack in self.stacks],
+        }
+
+
+@dataclass(frozen=True)
+class RepositorySnapshotBuild:
+    errors: tuple[SnapshotError, ...]
+    snapshot: RepositorySnapshot | None
+
+    def __post_init__(self) -> None:
+        if bool(self.errors) == bool(self.snapshot):
+            raise ValueError("snapshot build must contain either errors or a snapshot")
+
+    @property
+    def valid(self) -> bool:
+        return not self.errors
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "errors": [error.as_dict() for error in self.errors],
+            "schema_version": 1,
+            "snapshot": self.snapshot.as_dict() if self.snapshot else None,
+            "valid": self.valid,
+        }
+
+
+def _git(repository: Path, *arguments: str, text: bool = True) -> str | bytes:
+    environment = os.environ.copy()
+    environment["GIT_OPTIONAL_LOCKS"] = "0"
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=text,
+        env=environment,
+    )
+    return completed.stdout
+
+
+def read_github_repository(owner: str, name: str) -> GitHubRepositoryState:
+    """Resolve a repository's current default branch and commit using GitHub reads."""
+    query = (
+        "query($owner:String!,$name:String!){"
+        "repository(owner:$owner,name:$name){"
+        "defaultBranchRef{name target{... on Commit{oid}}}}}"
+    )
+    try:
+        repository = subprocess.run(
+            [
+                "gh",
+                "api",
+                "graphql",
+                "-f",
+                f"query={query}",
+                "-F",
+                f"owner={owner}",
+                "-F",
+                f"name={name}",
+            ],
+            check=True,
+            capture_output=True,
+            text=False,
+            timeout=_GITHUB_READ_TIMEOUT_SECONDS,
+        )
+        payload = json.loads(repository.stdout.decode("utf-8"))
+        if not isinstance(payload, dict) or set(payload) != {"data"}:
+            raise GitHubReadError("GitHub repository could not be read")
+        data = payload["data"]
+        if not isinstance(data, dict) or set(data) != {"repository"}:
+            raise GitHubReadError("GitHub repository could not be read")
+        repository_payload = data["repository"]
+        if (
+            not isinstance(repository_payload, dict)
+            or set(repository_payload) != {"defaultBranchRef"}
+        ):
+            raise GitHubReadError("GitHub repository could not be read")
+        branch = repository_payload["defaultBranchRef"]
+        if not isinstance(branch, dict) or set(branch) != {"name", "target"}:
+            raise GitHubReadError("GitHub repository could not be read")
+        target = branch["target"]
+        if not isinstance(target, dict) or set(target) != {"oid"}:
+            raise GitHubReadError("GitHub repository could not be read")
+        default_branch = branch["name"]
+        commit = target["oid"]
+        if not isinstance(default_branch, str) or not isinstance(commit, str):
+            raise GitHubReadError("GitHub repository could not be read")
+        return GitHubRepositoryState(default_branch, commit)
+    except (
+        OSError,
+        subprocess.SubprocessError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise GitHubReadError("GitHub repository could not be read") from exc
+
+
+def _github_identity(origin: str) -> tuple[str, str] | None:
+    match = re.fullmatch(
+        r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)"
+        r"([^/]+)/([^/]+)",
+        origin,
+    )
+    if match is None:
+        return None
+    owner, name = match.groups()
+    if name.endswith(".git"):
+        name = name[:-4]
+    if (
+        len(owner) > 39
+        or re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", owner)
+        is None
+        or len(name) > 100
+        or re.fullmatch(r"[A-Za-z0-9._-]+", name) is None
+        or not any(character != "." for character in name)
+        or name.endswith(".")
+    ):
+        return None
+    return owner, name
+
+
+def _is_filesystem_encodable(path: str) -> bool:
+    if "\0" in path or any(0xD800 <= ord(character) <= 0xDFFF for character in path):
+        return False
+    try:
+        encoded = os.fsencode(path)
+    except UnicodeEncodeError:
+        return False
+    return os.fsdecode(encoded) == path
+
+
+def _is_valid_git_branch_name(branch: str) -> bool:
+    if not _is_filesystem_encodable(branch) or any(
+        ord(character) < 32 or ord(character) == 127 for character in branch
+    ):
+        return False
+    try:
+        completed = subprocess.run(
+            ["git", "check-ref-format", "--branch", branch],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return False
+    return completed.stdout.strip() == branch
+
+
+def _tree_entry(
+    repository: Path, treeish: str, path: str
+) -> tuple[str, str, str] | None:
+    raw = _git(
+        repository,
+        "--literal-pathspecs",
+        "ls-tree",
+        "-z",
+        treeish,
+        "--",
+        path,
+        text=False,
+    )
+    assert isinstance(raw, bytes)
+    entries = [entry for entry in raw.split(b"\0") if entry]
+    if len(entries) != 1:
+        return None
+    metadata, separator, entry_path = entries[0].partition(b"\t")
+    fields = metadata.split()
+    if not separator or entry_path != path.encode() or len(fields) != 3:
+        return None
+    try:
+        return (
+            fields[0].decode("ascii"),
+            fields[1].decode("ascii"),
+            fields[2].decode("ascii"),
+        )
+    except UnicodeDecodeError:
+        return None
+
+
+def _index_has_path(repository: Path, path: str) -> bool:
+    raw = _git(
+        repository,
+        "--literal-pathspecs",
+        "ls-files",
+        "--cached",
+        "-z",
+        "--",
+        path,
+        text=False,
+    )
+    assert isinstance(raw, bytes)
+    encoded_path = path.encode()
+    return any(
+        indexed_path == encoded_path or indexed_path.startswith(encoded_path + b"/")
+        for indexed_path in raw.split(b"\0")
+        if indexed_path
+    )
+
+
+def _has_safe_worktree_parents(repository: Path, path: str) -> bool:
+    """Return whether every directory above a worktree leaf is real and local."""
+    current = repository
+    try:
+        repository_mode = repository.lstat().st_mode
+        if not stat.S_ISDIR(repository_mode):
+            return False
+        for part in PurePosixPath(path).parts[:-1]:
+            current = current / part
+            if not stat.S_ISDIR(current.lstat().st_mode):
+                return False
+    except OSError:
+        return False
+    return True
+
+
+def _fingerprint(repository: Path, paths: Sequence[str]) -> str:
+    digest = hashlib.sha256()
+    for path in paths:
+        try:
+            entry = _tree_entry(repository, "HEAD", path)
+            if entry is None:
+                raise subprocess.CalledProcessError(1, ["git", "ls-tree"])
+            mode, object_type, object_id = entry
+            if object_type == "blob":
+                identity = _git(repository, "show", f"HEAD:{path}", text=False)
+                assert isinstance(identity, bytes)
+            else:
+                identity = object_id.encode()
+            for component in (
+                path.encode(),
+                mode.encode(),
+                object_type.encode(),
+                identity,
+            ):
+                digest.update(len(component).to_bytes(8, "big"))
+                digest.update(component)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise _RepositoryInputReadError(path) from exc
+    return digest.hexdigest()
+
+
+def _blob_differs_from_worktree(
+    repository: Path, path: str, head_mode: str
+) -> bool:
+    checked_in = _git(repository, "show", f"HEAD:{path}", text=False)
+    assert isinstance(checked_in, bytes)
+    if not _has_safe_worktree_parents(repository, path):
+        return True
+    filesystem_path = repository / path
+    if not os.path.lexists(filesystem_path):
+        return True
+    filesystem_mode = filesystem_path.lstat().st_mode
+    if stat.S_ISREG(filesystem_mode):
+        worktree_mode = "100755" if filesystem_mode & 0o111 else "100644"
+        content = filesystem_path.read_bytes()
+    elif stat.S_ISLNK(filesystem_mode):
+        worktree_mode = "120000"
+        content = os.fsencode(os.readlink(filesystem_path))
+    else:
+        return True
+    return worktree_mode != head_mode or content != checked_in
+
+
+def _tree_differs_from_worktree(repository: Path, path: str) -> bool:
+    if not _has_safe_worktree_parents(repository, path):
+        return True
+    root = repository / path
+    try:
+        root_mode = root.lstat().st_mode
+    except OSError:
+        return True
+    if not stat.S_ISDIR(root_mode):
+        return True
+    raw = _git(
+        repository,
+        "--literal-pathspecs",
+        "ls-tree",
+        "-r",
+        "-t",
+        "-z",
+        "HEAD",
+        "--",
+        path,
+        text=False,
+    )
+    assert isinstance(raw, bytes)
+    expected_paths: set[str] = set()
+    gitlink_paths: set[str] = set()
+    descendant_prefix = f"{path}/"
+    for raw_entry in (entry for entry in raw.split(b"\0") if entry):
+        metadata, separator, raw_path = raw_entry.partition(b"\t")
+        fields = metadata.split()
+        if not separator or len(fields) != 3:
+            return True
+        entry_path = os.fsdecode(raw_path)
+        if not entry_path.startswith(descendant_prefix):
+            continue
+        mode, object_type, object_id = (field.decode("ascii") for field in fields)
+        expected_paths.add(entry_path)
+        filesystem_path = repository / entry_path
+        if object_type == "tree":
+            if not _has_safe_worktree_parents(repository, entry_path):
+                return True
+            try:
+                filesystem_mode = filesystem_path.lstat().st_mode
+            except OSError:
+                return True
+            if not stat.S_ISDIR(filesystem_mode):
+                return True
+        elif object_type == "blob":
+            if _blob_differs_from_worktree(repository, entry_path, mode):
+                return True
+        elif mode == "160000" and object_type == "commit":
+            gitlink_paths.add(entry_path)
+            if _gitlink_differs_from_worktree(repository, entry_path, object_id):
+                return True
+        else:
+            return True
+    actual_paths: set[str] = set()
+    for directory, child_directories, filenames in os.walk(root):
+        directory_path = Path(directory)
+        for name in child_directories:
+            child_path = (directory_path / name).relative_to(repository).as_posix()
+            actual_paths.add(child_path)
+        for name in filenames:
+            child_path = (directory_path / name).relative_to(repository).as_posix()
+            actual_paths.add(child_path)
+        child_directories[:] = [
+            name
+            for name in child_directories
+            if (directory_path / name).relative_to(repository).as_posix()
+            not in gitlink_paths
+        ]
+    return actual_paths != expected_paths
+
+
+def _gitlink_differs_from_worktree(
+    repository: Path, path: str, head_object_id: str
+) -> bool:
+    if not _has_safe_worktree_parents(repository, path):
+        return True
+    filesystem_path = repository / path
+    try:
+        filesystem_mode = filesystem_path.lstat().st_mode
+    except OSError:
+        return True
+    if not stat.S_ISDIR(filesystem_mode):
+        return True
+    top_level = Path(
+        str(_git(filesystem_path, "rev-parse", "--show-toplevel")).strip()
+    ).resolve()
+    if top_level != filesystem_path.resolve():
+        return True
+    worktree_commit = str(
+        _git(filesystem_path, "rev-parse", "--verify", "HEAD^{commit}")
+    ).strip()
+    if worktree_commit != head_object_id:
+        return True
+    nested_status = str(
+        _git(
+            filesystem_path,
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        )
+    )
+    return bool(nested_status)
+
+
+def _working_tree_differs_from_head(repository: Path, path: str) -> bool:
+    entry = _tree_entry(repository, "HEAD", path)
+    if entry is None:
+        return True
+    head_mode, head_type, head_object_id = entry
+    if head_type == "blob":
+        return _blob_differs_from_worktree(repository, path, head_mode)
+    if head_type == "tree":
+        return _tree_differs_from_worktree(repository, path)
+    if head_mode == "160000" and head_type == "commit":
+        return _gitlink_differs_from_worktree(repository, path, head_object_id)
+    return not _has_safe_worktree_parents(repository, path) or not os.path.lexists(
+        repository / path
+    )
+
+
+def _index_differs_from_head(repository: Path, path: str) -> bool:
+    try:
+        _git(
+            repository,
+            "--literal-pathspecs",
+            "diff-index",
+            "--cached",
+            "--quiet",
+            "HEAD",
+            "--",
+            path,
+        )
+        return False
+    except subprocess.CalledProcessError as exc:
+        if exc.returncode == 1:
+            return True
+        raise
+
+
+def _resolve_checked_in_path(
+    repository: Path, stack_identity: str, lexical_path: str
+) -> _CheckedInPathResolution:
+    """Return checked-in local symlinks and the final object for one stack input."""
+    stack_parts = PurePosixPath(stack_identity).parts
+    lexical_parts = PurePosixPath(lexical_path).parts
+    current = list(stack_parts)
+    remaining = list(lexical_parts[len(stack_parts) :])
+    relevant: list[str] = []
+    visited_links: set[str] = set()
+    requires_directory = lexical_path.endswith("/")
+
+    while remaining:
+        component = remaining.pop(0)
+        if component in {"", "."}:
+            continue
+        if component == "..":
+            if len(current) == len(stack_parts):
+                return _CheckedInPathResolution(
+                    tuple(dict.fromkeys(relevant)), None
+                )
+            crossed_path = PurePosixPath(*current).as_posix()
+            crossed_entry = _tree_entry(repository, "HEAD", crossed_path)
+            if crossed_entry is None or crossed_entry[1] != "tree":
+                relevant.append(crossed_path)
+                return _CheckedInPathResolution(
+                    tuple(dict.fromkeys(relevant)), None
+                )
+            current.pop()
+            continue
+        candidate = PurePosixPath(*current, component).as_posix()
+        entry = _tree_entry(repository, "HEAD", candidate)
+        if entry is not None and entry[0] == "120000" and entry[1] == "blob":
+            relevant.append(candidate)
+            if candidate in visited_links:
+                return _CheckedInPathResolution(tuple(dict.fromkeys(relevant)), None)
+            visited_links.add(candidate)
+            try:
+                raw_target = _git(repository, "show", f"HEAD:{candidate}", text=False)
+                assert isinstance(raw_target, bytes)
+                target = raw_target.decode("utf-8")
+                target_path = PurePosixPath(target)
+            except (UnicodeDecodeError, ValueError, subprocess.CalledProcessError):
+                return _CheckedInPathResolution(tuple(dict.fromkeys(relevant)), None)
+            if (
+                not target
+                or not _is_filesystem_encodable(target)
+                or target_path.is_absolute()
+            ):
+                return _CheckedInPathResolution(tuple(dict.fromkeys(relevant)), None)
+            if target.endswith("/") and not remaining:
+                requires_directory = True
+            replacement = [*current[len(stack_parts) :], *target.split("/")]
+            current = list(stack_parts)
+            remaining = [*replacement, *remaining]
+            continue
+        if entry is None:
+            final_path = (
+                candidate
+                if ".." in remaining
+                else PurePosixPath(candidate, *remaining).as_posix()
+            )
+            relevant.append(final_path)
+            return _CheckedInPathResolution(
+                tuple(dict.fromkeys(relevant)), None
+            )
+        current.append(component)
+        if not remaining:
+            relevant.append(candidate)
+            if requires_directory and entry[1] != "tree":
+                return _CheckedInPathResolution(
+                    tuple(dict.fromkeys(relevant)), None
+                )
+        elif entry[1] != "tree":
+            relevant.append(candidate)
+            relevant.append(PurePosixPath(candidate, *remaining).as_posix())
+            return _CheckedInPathResolution(tuple(dict.fromkeys(relevant)), None)
+
+    final_path = PurePosixPath(*current).as_posix()
+    relevant.append(final_path)
+    return _CheckedInPathResolution(tuple(dict.fromkeys(relevant)), final_path)
+
+
+def _checked_in_runbook(
+    repository: Path,
+    stack_identity: str,
+    manifest: _CheckedInPathResolution,
+) -> tuple[tuple[str, ...], bool]:
+    manifest_path = manifest.final_path
+    if manifest_path is None:
+        return (), False
+    entry = _tree_entry(repository, "HEAD", manifest_path)
+    if entry is None or entry[1] != "blob":
+        return (), True
+    try:
+        content = _git(repository, "show", f"HEAD:{manifest_path}", text=False)
+        assert isinstance(content, bytes)
+        metadata = yaml.safe_load(content.decode("utf-8"))
+    except (UnicodeDecodeError, RecursionError, yaml.YAMLError):
+        return (), True
+    if not isinstance(metadata, dict):
+        return (), True
+    updates = metadata.get("updates")
+    procedure = updates.get("procedure") if isinstance(updates, dict) else None
+    if not isinstance(procedure, dict) or procedure.get("mode") != "assisted":
+        return (), True
+    runbook = procedure.get("runbook")
+    if not isinstance(runbook, str):
+        return (), True
+    raw_runbook_path = runbook.partition("#")[0]
+    if not _is_filesystem_encodable(raw_runbook_path) or any(
+        ord(character) < 32 or ord(character) == 127
+        for character in raw_runbook_path
+    ):
+        return (), True
+    try:
+        runbook_path = PurePosixPath(raw_runbook_path)
+    except ValueError:
+        return (), True
+    if runbook_path.is_absolute() or not runbook_path.parts or ".." in runbook_path.parts:
+        return (), True
+    lexical_path = (PurePosixPath(stack_identity) / runbook_path).as_posix()
+    resolution = _resolve_checked_in_path(repository, stack_identity, lexical_path)
+    return resolution.paths, resolution.final_path is not None
+
+
+def build_repository_snapshot(
+    repository_root: Path,
+    selected_stacks: Sequence[str],
+    *,
+    github_reader: GitHubReader = read_github_repository,
+) -> RepositorySnapshotBuild:
+    try:
+        resolved_root = repository_root.resolve(strict=True)
+        top_level = Path(
+            str(_git(resolved_root, "rev-parse", "--show-toplevel")).strip()
+        ).resolve()
+    except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError):
+        error = SnapshotError(
+            "invalid-repository",
+            "repository",
+            "repository root is not a readable Git worktree",
+        )
+        return RepositorySnapshotBuild((error,), None)
+    if top_level != resolved_root:
+        error = SnapshotError(
+            "invalid-repository",
+            "repository",
+            "repository root must be the Git worktree root",
+        )
+        return RepositorySnapshotBuild((error,), None)
+    try:
+        raw_origins = _git(
+            resolved_root,
+            "config",
+            "--null",
+            "--get-all",
+            "remote.origin.url",
+            text=False,
+        )
+        assert isinstance(raw_origins, bytes)
+    except subprocess.CalledProcessError:
+        error = SnapshotError(
+            "missing-origin", "repository.origin", "origin remote is required"
+        )
+        return RepositorySnapshotBuild((error,), None)
+    encoded_origins = raw_origins.split(b"\0")
+    if not raw_origins.endswith(b"\0"):
+        encoded_origins = []
+    else:
+        encoded_origins.pop()
+    if len(encoded_origins) != 1 or not encoded_origins[0]:
+        error = SnapshotError(
+            "invalid-origin",
+            "repository.origin",
+            "origin must have exactly one nonempty URL",
+        )
+        return RepositorySnapshotBuild((error,), None)
+    origin = os.fsdecode(encoded_origins[0])
+    identity = _github_identity(origin)
+    if identity is None:
+        error = SnapshotError(
+            "invalid-origin",
+            "repository.origin",
+            "origin is not a GitHub repository",
+        )
+        return RepositorySnapshotBuild((error,), None)
+    owner, name = identity
+    try:
+        remote = github_reader(owner, name)
+    except GitHubReadError as exc:
+        error = SnapshotError("github-read-failed", "repository.github", str(exc))
+        return RepositorySnapshotBuild((error,), None)
+    if not isinstance(remote, GitHubRepositoryState):
+        error = SnapshotError(
+            "invalid-github-response",
+            "repository.github",
+            "GitHub reader returned an invalid repository state",
+        )
+        return RepositorySnapshotBuild((error,), None)
+    if not isinstance(remote.default_branch, str) or not remote.default_branch:
+        error = SnapshotError(
+            "missing-default-branch",
+            "repository.default_branch",
+            "GitHub did not resolve a default branch",
+        )
+        return RepositorySnapshotBuild((error,), None)
+    if not _is_valid_git_branch_name(remote.default_branch):
+        error = SnapshotError(
+            "invalid-default-branch",
+            "repository.default_branch",
+            "GitHub returned an invalid default branch",
+        )
+        return RepositorySnapshotBuild((error,), None)
+    if not isinstance(remote.commit, str) or not remote.commit:
+        error = SnapshotError(
+            "missing-default-branch-commit",
+            "repository.commit",
+            "GitHub did not resolve the default-branch commit",
+        )
+        return RepositorySnapshotBuild((error,), None)
+    if re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", remote.commit) is None:
+        error = SnapshotError(
+            "invalid-default-branch-commit",
+            "repository.commit",
+            "GitHub returned an invalid default-branch commit",
+        )
+        return RepositorySnapshotBuild((error,), None)
+    try:
+        commit = str(_git(resolved_root, "rev-parse", "HEAD")).strip()
+    except subprocess.CalledProcessError:
+        error = SnapshotError(
+            "missing-local-commit",
+            "repository.head",
+            "local HEAD does not resolve to a commit",
+        )
+        return RepositorySnapshotBuild((error,), None)
+    if commit != remote.commit:
+        error = SnapshotError(
+            "unauthorized-head",
+            "repository.head",
+            "HEAD is not the remote default-branch commit",
+        )
+        return RepositorySnapshotBuild((error,), None)
+
+    stack_identities = tuple(selected_stacks)
+    for stack_identity in stack_identities:
+        if (
+            not isinstance(stack_identity, str)
+            or not _is_filesystem_encodable(stack_identity)
+            or any(
+                ord(character) < 32 or ord(character) == 127
+                for character in stack_identity
+            )
+        ):
+            error = SnapshotError(
+                "invalid-stack-identity",
+                "stack.identity",
+                "selected stack identity must be stacks/<host>/<stack>",
+            )
+            return RepositorySnapshotBuild((error,), None)
+        parts = PurePosixPath(stack_identity).parts
+        if (
+            len(parts) != 3
+            or parts[0] != "stacks"
+            or any(part in {"", ".", ".."} for part in parts)
+            or PurePosixPath(stack_identity).as_posix() != stack_identity
+        ):
+            error = SnapshotError(
+                "invalid-stack-identity",
+                "stack.identity",
+                "selected stack identity must be stacks/<host>/<stack>",
+            )
+            return RepositorySnapshotBuild((error,), None)
+
+    selected_stack_identities = tuple(sorted(set(stack_identities)))
+    stacks: list[StackInputSnapshot] = []
+    supported = (
+        "compose.override.yaml",
+        "compose.override.yml",
+        "compose.yaml",
+        "compose.yml",
+        "stack.yaml",
+    )
+    for stack_identity in selected_stack_identities:
+        current_path = f"{stack_identity}/stack.yaml"
+        try:
+            canonical_paths = tuple(
+                f"{stack_identity}/{filename}" for filename in supported
+            )
+            candidates = canonical_paths
+            resolutions_complete = True
+            resolutions: dict[str, _CheckedInPathResolution] = {}
+            resolution_inputs: set[str] = set()
+            for path in canonical_paths:
+                entry = _tree_entry(resolved_root, "HEAD", path)
+                if entry is not None and entry[0] == "120000" and entry[1] == "blob":
+                    resolution = _resolve_checked_in_path(
+                        resolved_root, stack_identity, path
+                    )
+                    resolutions[path] = resolution
+                    candidates += resolution.paths
+                    resolution_inputs.update(resolution.paths)
+                    resolutions_complete = (
+                        resolutions_complete and resolution.final_path is not None
+                    )
+                else:
+                    resolutions[path] = _CheckedInPathResolution((path,), path)
+            manifest_path = f"{stack_identity}/stack.yaml"
+            runbook_inputs, runbook_resolution_complete = _checked_in_runbook(
+                resolved_root, stack_identity, resolutions[manifest_path]
+            )
+            resolutions_complete = (
+                resolutions_complete and runbook_resolution_complete
+            )
+            candidates += runbook_inputs
+            candidates = tuple(sorted(set(candidates)))
+            checked_in: dict[str, bool] = {}
+            indexed: dict[str, bool] = {}
+            for path in candidates:
+                current_path = path
+                checked_in[path] = (
+                    _tree_entry(resolved_root, "HEAD", path) is not None
+                )
+                indexed[path] = _index_has_path(resolved_root, path)
+            paths = tuple(
+                sorted(
+                    path
+                    for path in candidates
+                    if checked_in[path]
+                    or indexed[path]
+                    or path in resolution_inputs
+                    or path in runbook_inputs
+                    or (
+                        _has_safe_worktree_parents(resolved_root, path)
+                        and os.path.lexists(resolved_root / path)
+                    )
+                )
+            )
+            if not paths:
+                error = SnapshotError(
+                    "missing-stack-inputs",
+                    stack_identity,
+                    "selected stack has no checked-in or locally added relevant inputs",
+                )
+                return RepositorySnapshotBuild((error,), None)
+            changed_paths: list[str] = []
+            for path in paths:
+                current_path = path
+                if _index_differs_from_head(
+                    resolved_root, path
+                ) or _working_tree_differs_from_head(resolved_root, path):
+                    changed_paths.append(path)
+            changed = tuple(changed_paths)
+            checked_in_paths = tuple(path for path in paths if checked_in[path])
+            fingerprint = _fingerprint(resolved_root, checked_in_paths)
+            stacks.append(
+                StackInputSnapshot(
+                    stack_identity,
+                    not changed and resolutions_complete,
+                    fingerprint,
+                    paths,
+                    changed,
+                )
+            )
+        except _RepositoryInputReadError as exc:
+            current_path = exc.path
+        except (OSError, subprocess.CalledProcessError):
+            pass
+        else:
+            continue
+        error = SnapshotError(
+            "repository-input-read-failed",
+            current_path,
+            "repository input could not be read",
+        )
+        return RepositorySnapshotBuild((error,), None)
+    snapshot = RepositorySnapshot(
+        f"{owner}/{name}", remote.default_branch, remote.commit, tuple(stacks)
+    )
+    return RepositorySnapshotBuild((), snapshot)
