@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import subprocess
 from dataclasses import dataclass
@@ -19,7 +20,7 @@ SECRET_KEY = re.compile(
 )
 SECRET_VALUE = re.compile(
     r"(\$ANSIBLE_VAULT|!vault|BEGIN (?:(?:(?:RSA|OPENSSH|EC|DSA|ENCRYPTED) )?PRIVATE KEY|PGP PRIVATE KEY BLOCK)|"
-    r"\bvault[_:/.][A-Za-z0-9_.:/-]+|://[^\s/:]+:[^\s/@]+@|"
+    r"\bvault[-_:/.][A-Za-z0-9_.:/-]+|://[^\s/:]+:[^\s/@]+@|"
     r"\b(?:password|passwd|secret|token|api[_-]?key)\s*[:=]\s*\S+|"
     r"\b(?:gh[opusr]|github_pat)_[A-Za-z0-9_]{16,}|\bAKIA[A-Z0-9]{16}\b|"
     r"\bBearer\s+[A-Za-z0-9._~-]{12,}|\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.)",
@@ -115,6 +116,66 @@ class _RecursiveYamlAliasError(Exception):
         self.path = path
 
 
+def _validate_json_metadata(
+    value: Any,
+    errors: list[ValidationError],
+    path: str = "stack.yaml",
+    active_containers: set[int] | None = None,
+) -> None:
+    if active_containers is None:
+        active_containers = set()
+    if isinstance(value, (dict, list)):
+        identity = id(value)
+        if identity in active_containers:
+            raise _RecursiveYamlAliasError(path)
+        active_containers.add(identity)
+    if isinstance(value, dict):
+        try:
+            for key, child in value.items():
+                if not isinstance(key, str):
+                    _error(
+                        errors,
+                        "invalid-metadata",
+                        path,
+                        "metadata mapping keys must be strings",
+                    )
+                    continue
+                _validate_json_metadata(
+                    child,
+                    errors,
+                    f"{path}.{key}",
+                    active_containers,
+                )
+        finally:
+            active_containers.remove(id(value))
+    elif isinstance(value, list):
+        try:
+            for index, child in enumerate(value):
+                _validate_json_metadata(
+                    child,
+                    errors,
+                    f"{path}[{index}]",
+                    active_containers,
+                )
+        finally:
+            active_containers.remove(id(value))
+    elif type(value) is float:
+        if not math.isfinite(value):
+            _error(
+                errors,
+                "invalid-metadata",
+                path,
+                "metadata value must be JSON-compatible",
+            )
+    elif value is not None and type(value) not in {bool, int, str}:
+        _error(
+            errors,
+            "invalid-metadata",
+            path,
+            "metadata value must be JSON-compatible",
+        )
+
+
 def _find_secrets(
     value: Any, path: str = "stack.yaml", active_containers: set[int] | None = None
 ) -> list[str]:
@@ -129,9 +190,16 @@ def _find_secrets(
     if isinstance(value, dict):
         try:
             for key, child in value.items():
-                child_path = f"{path}.{key}"
+                child_path = (
+                    f"{path}.{key}"
+                    if isinstance(key, str)
+                    else f"{path}[<non-string-key>]"
+                )
+                if not isinstance(key, str):
+                    found.extend(_find_secrets(child, child_path, active_containers))
+                    continue
                 key_with_word_boundaries = re.sub(
-                    r"(.)([A-Z][a-z]+)", r"\1_\2", str(key)
+                    r"(.)([A-Z][a-z]+)", r"\1_\2", key
                 )
                 key_with_word_boundaries = re.sub(
                     r"([a-z0-9])([A-Z])", r"\1_\2", key_with_word_boundaries
@@ -184,6 +252,16 @@ def _load_metadata(stack_root: Path, errors: list[ValidationError]) -> dict[str,
         return None
     if not isinstance(loaded, dict):
         _error(errors, "malformed-metadata", "stack.yaml", "stack.yaml must contain a mapping")
+        return None
+    try:
+        _validate_json_metadata(loaded, errors)
+    except _RecursiveYamlAliasError as exc:
+        _error(
+            errors,
+            "malformed-metadata",
+            exc.path,
+            "recursive YAML aliases are not supported",
+        )
         return None
     try:
         secret_paths = _find_secrets(loaded)

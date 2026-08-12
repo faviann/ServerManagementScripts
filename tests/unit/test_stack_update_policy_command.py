@@ -491,6 +491,7 @@ updates:
     assert payload["valid"] is False
     assert {error["code"] for error in payload["errors"]} == {
         "folder-name-mismatch",
+        "invalid-metadata",
         "invalid-policy",
     }
     assert "Traceback" not in completed.stderr
@@ -725,6 +726,102 @@ def test_recursive_yaml_alias_returns_a_controlled_versioned_failure(tmp_path: P
         )
     }
     assert "Traceback" not in completed.stderr
+
+
+def test_date_valued_optional_exposure_metadata_returns_a_versioned_failure(
+    tmp_path: Path,
+) -> None:
+    stack = write_valid_stack(tmp_path)
+    metadata = (stack / "stack.yaml").read_text(encoding="utf-8")
+    (stack / "stack.yaml").write_text(
+        metadata.replace(
+            "  homepage_instances: [admin]\n",
+            "  homepage_instances: [admin]\n  homepage_group: 2026-08-12\n",
+        ),
+        encoding="utf-8",
+    )
+
+    completed = run_validate(tmp_path)
+
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout)["errors"] == [
+        {
+            "code": "invalid-metadata",
+            "message": "metadata value must be JSON-compatible",
+            "path": "stack.yaml.exposure.homepage_group",
+        }
+    ]
+    assert "Traceback" not in completed.stderr
+
+
+def test_non_json_yaml_metadata_types_are_aggregated_as_versioned_failures(
+    tmp_path: Path,
+) -> None:
+    stack = write_valid_stack(tmp_path)
+    metadata = (stack / "stack.yaml").read_text(encoding="utf-8")
+    (stack / "stack.yaml").write_text(
+        metadata
+        + """\
+extension:
+  binary: !!binary Zml4dHVyZQ==
+  choices: !!set {one: null, two: null}
+  keyed: {7: value}
+  non_finite: .inf
+""",
+        encoding="utf-8",
+    )
+
+    completed = run_validate(tmp_path)
+
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout)["errors"] == [
+        {
+            "code": "invalid-metadata",
+            "message": "metadata value must be JSON-compatible",
+            "path": "stack.yaml.extension.binary",
+        },
+        {
+            "code": "invalid-metadata",
+            "message": "metadata value must be JSON-compatible",
+            "path": "stack.yaml.extension.choices",
+        },
+        {
+            "code": "invalid-metadata",
+            "message": "metadata mapping keys must be strings",
+            "path": "stack.yaml.extension.keyed",
+        },
+        {
+            "code": "invalid-metadata",
+            "message": "metadata value must be JSON-compatible",
+            "path": "stack.yaml.extension.non_finite",
+        },
+    ]
+    assert "Traceback" not in completed.stderr
+
+
+def test_hyphenated_vault_pass_path_in_neutral_metadata_is_rejected_without_leaking(
+    tmp_path: Path,
+) -> None:
+    stack = write_valid_stack(tmp_path)
+    vault_reference = "~/.ansible/vault-pass"
+    metadata = (stack / "stack.yaml").read_text(encoding="utf-8")
+    (stack / "stack.yaml").write_text(
+        metadata + f"notes: {json.dumps(vault_reference)}\n",
+        encoding="utf-8",
+    )
+
+    completed = run_validate(tmp_path)
+
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout)["errors"] == [
+        {
+            "code": "secret-metadata",
+            "message": "secret-shaped metadata is forbidden",
+            "path": "stack.yaml.notes",
+        }
+    ]
+    assert vault_reference not in completed.stdout
+    assert vault_reference not in completed.stderr
 
 
 def test_stack_selection_rejects_a_stack_root_symlink_outside_the_repository(tmp_path: Path) -> None:
