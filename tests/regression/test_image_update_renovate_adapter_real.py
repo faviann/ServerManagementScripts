@@ -35,7 +35,7 @@ def test_contract_fixtures_cross_the_real_pinned_renovate_boundary() -> None:
     result = json.loads(completed.stdout)
     assert result["provenance"]["renovate_version"] == "44.5.0"
     assert [(item["stack"], item["observation_count"]) for item in result["stacks"]] == [
-        ("exact-with-major", 1),
+        ("major-line-with-major", 1),
         ("floating-multiarch", 1),
         ("coordinated", 2),
         ("isolated-failure", 1),
@@ -47,10 +47,11 @@ def test_contract_fixtures_cross_the_real_pinned_renovate_boundary() -> None:
     vendor = next(item for item in result["observations"] if item["identity"]["stack"] == "vendor-baseline")
     assert vendor["candidate"]["effective_reference"] == "ghcr.io/immich-app/immich-server:v2.7.5"
     assert vendor["candidate"]["proposed_exact_reference"] == "ghcr.io/immich-app/immich-server:v2.7.5"
+    assert vendor["candidate"]["update_type"] in {"minor", "patch"}
     assert vendor["visible_major_alternatives"]
-    exact = next(item for item in result["observations"] if item["identity"]["stack"] == "exact-with-major")
-    assert exact["candidate"]["update_type"] in {"minor", "patch"}
-    assert exact["candidate"]["effective_reference"] == exact["candidate"]["proposed_exact_reference"]
-    assert "@" not in exact["candidate"]["proposed_exact_reference"]
-    assert exact["candidate"]["digest"].startswith("sha256:")
-    assert exact["visible_major_alternatives"]
+    major_line = next(item for item in result["observations"] if item["identity"]["stack"] == "major-line-with-major")
+    assert major_line["candidate"]["update_type"] in {"minor", "patch"}
+    assert major_line["candidate"]["effective_reference"] == major_line["candidate"]["proposed_exact_reference"]
+    assert "@" not in major_line["candidate"]["proposed_exact_reference"]
+    assert major_line["candidate"]["digest"].startswith("sha256:")
+    assert major_line["visible_major_alternatives"]

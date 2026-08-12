@@ -3,7 +3,7 @@
   "stacks": [
     {
       "host": "fixture",
-      "stack": "exact-with-major",
+      "stack": "major-line-with-major",
       "tracking_mode": "image",
       "services": [{
         "service": "app",
