@@ -451,6 +451,7 @@ def _resolve_checked_in_path(
     remaining = list(lexical_parts[len(stack_parts) :])
     relevant: list[str] = []
     visited_links: set[str] = set()
+    requires_directory = lexical_path.endswith("/")
 
     while remaining:
         component = remaining.pop(0)
@@ -488,6 +489,8 @@ def _resolve_checked_in_path(
                     replacement.append(part)
             if tuple(replacement[: len(stack_parts)]) != stack_parts:
                 return _CheckedInPathResolution(tuple(dict.fromkeys(relevant)), None)
+            if target.endswith("/") and not remaining:
+                requires_directory = True
             current = list(stack_parts)
             remaining = [*replacement[len(stack_parts) :], *remaining]
             continue
@@ -500,9 +503,14 @@ def _resolve_checked_in_path(
         current.append(component)
         if not remaining:
             relevant.append(candidate)
+            if requires_directory and entry[1] != "tree":
+                return _CheckedInPathResolution(
+                    tuple(dict.fromkeys(relevant)), None
+                )
         elif entry[1] != "tree":
             relevant.append(candidate)
-            return _CheckedInPathResolution(tuple(dict.fromkeys(relevant)), candidate)
+            relevant.append(PurePosixPath(candidate, *remaining).as_posix())
+            return _CheckedInPathResolution(tuple(dict.fromkeys(relevant)), None)
 
     final_path = relevant[-1] if relevant else lexical_path
     return _CheckedInPathResolution(tuple(dict.fromkeys(relevant)), final_path)

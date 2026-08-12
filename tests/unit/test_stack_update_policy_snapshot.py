@@ -1088,6 +1088,69 @@ def test_checked_in_canonical_symlink_with_missing_target_is_incomplete_and_boun
     assert at_head().fingerprint != original.fingerprint
 
 
+@pytest.mark.parametrize("input_kind", ["compose", "policy", "runbook"])
+@pytest.mark.parametrize(
+    ("link_target", "terminal_suffix"),
+    [
+        ("resolved-input.yaml/impossible-child", "/impossible-child"),
+        ("resolved-input.yaml/", ""),
+    ],
+)
+def test_checked_in_input_symlink_cannot_traverse_through_a_file(
+    tmp_path: Path,
+    input_kind: str,
+    link_target: str,
+    terminal_suffix: str,
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    stack = repository / "stacks/media/example"
+    leaf = stack / "resolved-input.yaml"
+    leaf.write_text("updates: {}\n", encoding="utf-8")
+    if input_kind == "compose":
+        link = stack / "compose.yaml"
+    elif input_kind == "policy":
+        link = stack / "stack.yaml"
+    else:
+        link = stack / "guide.yaml"
+        (stack / "stack.yaml").write_text(
+            """\
+updates:
+  mode: images
+  track: stable
+  procedure:
+    mode: assisted
+    runbook: guide.yaml
+""",
+            encoding="utf-8",
+        )
+    link.unlink(missing_ok=True)
+    link.symlink_to(link_target)
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", f"add impossible {input_kind} link")
+    commit = git(repository, "rev-parse", "HEAD")
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+
+    assert result.errors == ()
+    assert result.snapshot is not None
+    snapshot = result.snapshot.stacks[0]
+    link_path = link.relative_to(repository).as_posix()
+    leaf_path = leaf.relative_to(repository).as_posix()
+    assert snapshot.complete is False
+    assert link_path in snapshot.relevant_inputs
+    assert leaf_path in snapshot.relevant_inputs
+    if terminal_suffix:
+        terminal_path = f"{leaf_path}{terminal_suffix}"
+        assert terminal_path in snapshot.relevant_inputs
+        assert terminal_path in snapshot.changed_inputs
+    else:
+        assert snapshot.changed_inputs == ()
+
+
 def test_checked_in_symlinked_policy_is_parsed_from_its_resolved_target(
     tmp_path: Path,
 ) -> None:
