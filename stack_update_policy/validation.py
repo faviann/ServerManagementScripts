@@ -413,7 +413,7 @@ def _validate_procedure(
             "runbook does not resolve to a local file",
         )
         return None
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         _error(
             errors,
             "invalid-runbook",

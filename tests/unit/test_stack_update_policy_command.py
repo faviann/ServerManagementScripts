@@ -639,6 +639,39 @@ def test_assisted_procedure_symlink_loop_returns_a_versioned_cli_failure(
     assert "Traceback" not in completed.stderr
 
 
+def test_assisted_procedure_nul_path_returns_a_versioned_cli_failure(
+    tmp_path: Path,
+) -> None:
+    stack = write_valid_stack(tmp_path)
+    metadata = (stack / "stack.yaml").read_text(encoding="utf-8")
+    (stack / "stack.yaml").write_text(
+        metadata
+        + "  procedure:\n"
+        + "    mode: assisted\n"
+        + '    runbook: "bad\\0path"\n',
+        encoding="utf-8",
+    )
+
+    completed = run_validate(tmp_path)
+
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout) == {
+        "command": "validate",
+        "errors": [
+            {
+                "code": "invalid-runbook",
+                "message": "runbook path could not be resolved",
+                "path": "stack.yaml.updates.procedure.runbook",
+            }
+        ],
+        "result": None,
+        "schema_version": 1,
+        "valid": False,
+    }
+    assert "bad" not in completed.stderr
+    assert "Traceback" not in completed.stderr
+
+
 def test_assisted_procedure_rejects_a_missing_markdown_fragment_target(
     tmp_path: Path,
 ) -> None:
