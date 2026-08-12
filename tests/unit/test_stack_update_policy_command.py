@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 import os
@@ -522,6 +523,50 @@ updates:
     assert "Traceback" not in completed.stderr
 
 
+def test_non_string_update_keys_are_redacted_from_cli_diagnostics(tmp_path: Path) -> None:
+    stack = write_valid_stack(tmp_path)
+    marker = "fixture-binary-update-key-that-must-not-be-echoed"
+    encoded_marker = base64.b64encode(marker.encode()).decode()
+    (stack / "stack.yaml").write_text(
+        f"""\
+schema_version: 1
+kind: stack
+name: example
+description: Example application
+portability:
+  tier: portable-app
+  owner: stack
+exposure:
+  traefik: protected
+  homepage_instances: [admin]
+updates:
+  mode: images
+  track: stable
+  7: malformed
+  !!binary {encoded_marker}: malformed
+""",
+        encoding="utf-8",
+    )
+
+    completed = run_validate(tmp_path)
+
+    assert completed.returncode == 1
+    invalid_policy = next(
+        error
+        for error in json.loads(completed.stdout)["errors"]
+        if error["code"] == "invalid-policy"
+    )
+    assert invalid_policy == {
+        "code": "invalid-policy",
+        "message": (
+            "unsupported policy fields: <non-string-key>, <non-string-key>"
+        ),
+        "path": "stack.yaml.updates",
+    }
+    assert marker not in completed.stdout
+    assert marker not in completed.stderr
+
+
 def test_assisted_procedure_requires_a_resolvable_stack_local_runbook(tmp_path: Path) -> None:
     stack = write_valid_stack(tmp_path)
     metadata = (stack / "stack.yaml").read_text(encoding="utf-8")
@@ -559,6 +604,48 @@ def test_assisted_procedure_preserves_a_markdown_fragment_on_a_local_runbook(tmp
     assert json.loads(completed.stdout)["result"]["procedure"] == {
         "mode": "assisted",
         "runbook": "README.md#updating",
+    }
+
+
+def test_assisted_procedure_resolves_a_setext_heading_fragment(tmp_path: Path) -> None:
+    stack = write_valid_stack(tmp_path)
+    metadata = (stack / "stack.yaml").read_text(encoding="utf-8")
+    (stack / "stack.yaml").write_text(
+        metadata + "  procedure:\n    mode: assisted\n    runbook: README.md#updating\n",
+        encoding="utf-8",
+    )
+    (stack / "README.md").write_text(
+        "Example\n=======\n\nUpdating\n--------\n",
+        encoding="utf-8",
+    )
+
+    completed = run_validate(tmp_path)
+
+    assert completed.returncode == 0
+    assert json.loads(completed.stdout)["result"]["procedure"] == {
+        "mode": "assisted",
+        "runbook": "README.md#updating",
+    }
+
+
+def test_assisted_procedure_resolves_a_duplicate_heading_suffix(tmp_path: Path) -> None:
+    stack = write_valid_stack(tmp_path)
+    metadata = (stack / "stack.yaml").read_text(encoding="utf-8")
+    (stack / "stack.yaml").write_text(
+        metadata + "  procedure:\n    mode: assisted\n    runbook: README.md#updating-1\n",
+        encoding="utf-8",
+    )
+    (stack / "README.md").write_text(
+        "# Updating\n\nFirst.\n\n## Updating\n\nSecond.\n",
+        encoding="utf-8",
+    )
+
+    completed = run_validate(tmp_path)
+
+    assert completed.returncode == 0
+    assert json.loads(completed.stdout)["result"]["procedure"] == {
+        "mode": "assisted",
+        "runbook": "README.md#updating-1",
     }
 
 
@@ -715,6 +802,58 @@ def test_assisted_procedure_resolves_an_explicit_markdown_anchor(tmp_path: Path)
     }
 
 
+def test_assisted_procedure_rejects_an_anchor_inside_an_html_comment(
+    tmp_path: Path,
+) -> None:
+    stack = write_valid_stack(tmp_path)
+    metadata = (stack / "stack.yaml").read_text(encoding="utf-8")
+    (stack / "stack.yaml").write_text(
+        metadata
+        + "  procedure:\n"
+        + "    mode: assisted\n"
+        + "    runbook: README.md#upgrade-notes\n",
+        encoding="utf-8",
+    )
+    (stack / "README.md").write_text(
+        "<!--\n<a id=\"upgrade-notes\"></a>\n-->\n",
+        encoding="utf-8",
+    )
+
+    completed = run_validate(tmp_path)
+
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout)["errors"] == [
+        {
+            "code": "invalid-runbook",
+            "message": "runbook fragment does not resolve to a Markdown target",
+            "path": "stack.yaml.updates.procedure.runbook",
+        }
+    ]
+
+
+def test_assisted_procedure_ignores_comment_markup_inside_a_fenced_block(
+    tmp_path: Path,
+) -> None:
+    stack = write_valid_stack(tmp_path)
+    metadata = (stack / "stack.yaml").read_text(encoding="utf-8")
+    (stack / "stack.yaml").write_text(
+        metadata + "  procedure:\n    mode: assisted\n    runbook: README.md#updating\n",
+        encoding="utf-8",
+    )
+    (stack / "README.md").write_text(
+        "```markdown\n<!--\n## Not a target\n```\n\n## Updating\n",
+        encoding="utf-8",
+    )
+
+    completed = run_validate(tmp_path)
+
+    assert completed.returncode == 0
+    assert json.loads(completed.stdout)["result"]["procedure"] == {
+        "mode": "assisted",
+        "runbook": "README.md#updating",
+    }
+
+
 def test_assisted_procedure_rejects_an_empty_markdown_fragment(tmp_path: Path) -> None:
     stack = write_valid_stack(tmp_path)
     metadata = (stack / "stack.yaml").read_text(encoding="utf-8")
@@ -762,6 +901,34 @@ def test_malformed_metadata_and_compose_failures_are_structured(tmp_path: Path) 
         "compose-resolution",
         "malformed-metadata",
     }
+
+
+def test_compose_failure_diagnostics_do_not_echo_docker_stderr(tmp_path: Path) -> None:
+    stack = write_valid_stack(tmp_path)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    marker = "fixture-compose-stderr-that-must-not-be-echoed"
+    docker = fake_bin / "docker"
+    docker.write_text(
+        f"#!/bin/sh\nprintf '%s\\n' '{marker}' >&2\nexit 1\n",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    environment = os.environ.copy()
+    environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+
+    completed = run_validate(tmp_path, env=environment)
+
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout)["errors"] == [
+        {
+            "code": "compose-resolution",
+            "message": "Docker Compose could not resolve the stack definition",
+            "path": "compose",
+        }
+    ]
+    assert marker not in completed.stdout
+    assert marker not in completed.stderr
 
 
 def test_malformed_metadata_diagnostics_do_not_echo_yaml_input(tmp_path: Path) -> None:

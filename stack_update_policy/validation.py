@@ -111,25 +111,74 @@ def _mapping_child_path(
 
 def _markdown_targets(document: str) -> set[str]:
     targets: set[str] = set()
-    in_fence = False
+    heading_counts: dict[str, int] = {}
+    fence: tuple[str, int] | None = None
+    in_comment = False
+    previous_line: str | None = None
+
+    def heading_slug(title: str) -> str:
+        title = re.sub(r"<[^>]+>", "", title).strip().lower()
+        slug = re.sub(r"[^\w\- ]", "", title, flags=re.UNICODE)
+        return re.sub(r"\s+", "-", slug)
+
+    def add_heading(title: str) -> None:
+        slug = heading_slug(title)
+        duplicate_number = heading_counts.get(slug, 0)
+        targets.add(f"{slug}-{duplicate_number}" if duplicate_number else slug)
+        heading_counts[slug] = duplicate_number + 1
+
     for line in document.splitlines():
-        stripped = line.lstrip()
-        if stripped.startswith(("```", "~~~")):
-            in_fence = not in_fence
+        if fence is not None:
+            closing_fence = re.match(r"^ {0,3}([`~]+)\s*$", line)
+            if (
+                closing_fence
+                and closing_fence.group(1)[0] == fence[0]
+                and len(closing_fence.group(1)) >= fence[1]
+            ):
+                fence = None
             continue
-        if in_fence:
+        visible: list[str] = []
+        cursor = 0
+        while cursor < len(line):
+            if in_comment:
+                comment_end = line.find("-->", cursor)
+                if comment_end == -1:
+                    cursor = len(line)
+                else:
+                    in_comment = False
+                    cursor = comment_end + 3
+                continue
+            comment_start = line.find("<!--", cursor)
+            if comment_start == -1:
+                visible.append(line[cursor:])
+                break
+            visible.append(line[cursor:comment_start])
+            in_comment = True
+            cursor = comment_start + 4
+        line = "".join(visible)
+        opening_fence = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        if opening_fence:
+            marker = opening_fence.group(1)
+            fence = (marker[0], len(marker))
+            previous_line = None
+            continue
+        setext = re.match(r"^ {0,3}(?:=+|-+)\s*$", line)
+        if setext and previous_line is not None:
+            add_heading(previous_line)
+            previous_line = None
             continue
         heading = re.match(r"^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$", line)
         if heading:
-            title = re.sub(r"<[^>]+>", "", heading.group(1)).strip().lower()
-            slug = re.sub(r"[^\w\- ]", "", title, flags=re.UNICODE)
-            targets.add(re.sub(r"\s+", "-", slug))
+            add_heading(heading.group(1))
+            previous_line = None
         for anchor in re.finditer(
             r"<a\s+[^>]*(?:id|name)\s*=\s*(['\"])([^'\"]+)\1[^>]*>",
             line,
             flags=re.IGNORECASE,
         ):
             targets.add(anchor.group(2))
+        if not heading:
+            previous_line = line.strip() or None
     return targets
 
 
@@ -353,8 +402,12 @@ def _resolve_compose(stack_root: Path, errors: list[ValidationError]) -> dict[st
         _error(errors, "compose-resolution", "compose", f"could not run Docker Compose: {exc}")
         return None
     if completed.returncode != 0:
-        diagnostic = completed.stderr.strip().splitlines()[-1] if completed.stderr.strip() else "Docker Compose failed"
-        _error(errors, "compose-resolution", "compose", diagnostic)
+        _error(
+            errors,
+            "compose-resolution",
+            "compose",
+            "Docker Compose could not resolve the stack definition",
+        )
         return None
     try:
         effective = json.loads(completed.stdout)
@@ -475,7 +528,7 @@ def _validate_image_policy(
                 if isinstance(key, str) and _is_secret_key(key)
                 else key
                 if isinstance(key, str)
-                else repr(key)
+                else "<non-string-key>"
             )
             for key in unknown
         )
