@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -157,22 +158,71 @@ def _github_identity(origin: str) -> tuple[str, str] | None:
 def _fingerprint(repository: Path, paths: Sequence[str]) -> str:
     digest = hashlib.sha256()
     for path in paths:
+        tree_entry = str(_git(repository, "ls-tree", "HEAD", "--", path))
+        metadata = tree_entry.partition("\t")[0].split()
+        if len(metadata) != 3:
+            raise subprocess.CalledProcessError(1, ["git", "ls-tree"])
+        mode, object_type, _object_id = metadata
         content = _git(repository, "show", f"HEAD:{path}", text=False)
         assert isinstance(content, bytes)
-        encoded_path = path.encode()
-        digest.update(len(encoded_path).to_bytes(8, "big"))
-        digest.update(encoded_path)
-        digest.update(len(content).to_bytes(8, "big"))
-        digest.update(content)
+        for component in (path.encode(), mode.encode(), object_type.encode(), content):
+            digest.update(len(component).to_bytes(8, "big"))
+            digest.update(component)
     return digest.hexdigest()
 
 
 def _working_tree_differs_from_head(repository: Path, path: str) -> bool:
     try:
+        tree_entry = str(_git(repository, "ls-tree", "HEAD", "--", path)).split()
+        if len(tree_entry) < 3:
+            return True
+        head_mode, head_type = tree_entry[:2]
         checked_in = _git(repository, "show", f"HEAD:{path}", text=False)
         assert isinstance(checked_in, bytes)
-        return (repository / path).read_bytes() != checked_in
+        filesystem_path = repository / path
+        filesystem_mode = filesystem_path.lstat().st_mode
+        if stat.S_ISREG(filesystem_mode):
+            worktree_mode = "100755" if filesystem_mode & 0o111 else "100644"
+            content = filesystem_path.read_bytes()
+        elif stat.S_ISLNK(filesystem_mode):
+            worktree_mode = "120000"
+            content = os.fsencode(os.readlink(filesystem_path))
+        else:
+            return True
+        return (
+            head_type != "blob"
+            or worktree_mode != head_mode
+            or content != checked_in
+        )
     except (OSError, subprocess.CalledProcessError):
+        return True
+
+
+def _index_differs_from_head(repository: Path, path: str) -> bool:
+    try:
+        tree_entry = str(_git(repository, "ls-tree", "HEAD", "--", path))
+        head_metadata = tree_entry.partition("\t")[0].split()
+        if len(head_metadata) != 3:
+            return True
+        head_mode, _head_type, head_object_id = head_metadata
+        raw_entries = _git(
+            repository, "ls-files", "--stage", "-z", "--", path, text=False
+        )
+        assert isinstance(raw_entries, bytes)
+        entries = [entry for entry in raw_entries.split(b"\0") if entry]
+        if len(entries) != 1:
+            return True
+        metadata, separator, indexed_path = entries[0].partition(b"\t")
+        fields = metadata.decode().split()
+        return (
+            not separator
+            or indexed_path != path.encode()
+            or len(fields) != 3
+            or fields[0] != head_mode
+            or fields[1] != head_object_id
+            or fields[2] != "0"
+        )
+    except (OSError, UnicodeDecodeError, subprocess.CalledProcessError):
         return True
 
 
@@ -326,6 +376,17 @@ def build_repository_snapshot(
                 )
             ).splitlines()
         )
+        indexed = set(
+            str(
+                _git(
+                    resolved_root,
+                    "ls-files",
+                    "--cached",
+                    "--",
+                    stack_identity,
+                )
+            ).splitlines()
+        )
         candidates = tuple(f"{stack_identity}/{filename}" for filename in supported)
         runbook = _checked_in_runbook(resolved_root, stack_identity)
         if runbook is not None:
@@ -334,7 +395,9 @@ def build_repository_snapshot(
             sorted(
                 path
                 for path in candidates
-                if path in tracked or (resolved_root / path).exists()
+                if path in tracked
+                or path in indexed
+                or os.path.lexists(resolved_root / path)
             )
         )
         if not paths:
@@ -347,7 +410,8 @@ def build_repository_snapshot(
         changed = tuple(
             path
             for path in paths
-            if _working_tree_differs_from_head(resolved_root, path)
+            if _index_differs_from_head(resolved_root, path)
+            or _working_tree_differs_from_head(resolved_root, path)
         )
         checked_in_paths = tuple(path for path in paths if path in tracked)
         stacks.append(

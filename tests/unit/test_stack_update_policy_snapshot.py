@@ -175,6 +175,176 @@ def test_changed_relevant_input_makes_only_its_stack_incomplete(
     assert second_snapshot.changed_inputs == ()
 
 
+def test_mode_only_worktree_change_makes_stack_incomplete(tmp_path: Path) -> None:
+    repository, commit = create_repository(tmp_path)
+    compose_path = "stacks/media/example/compose.yaml"
+    compose = repository / compose_path
+    compose.chmod(compose.stat().st_mode | 0o111)
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+
+    assert result.snapshot is not None
+    stack = result.snapshot.stacks[0]
+    assert stack.complete is False
+    assert stack.changed_inputs == (compose_path,)
+
+
+def test_committed_mode_only_change_changes_stack_fingerprint(tmp_path: Path) -> None:
+    repository, commit = create_repository(tmp_path)
+    compose = repository / "stacks/media/example/compose.yaml"
+    original = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+    compose.chmod(compose.stat().st_mode | 0o111)
+    git(repository, "add", "stacks/media/example/compose.yaml")
+    git(repository, "commit", "-m", "make compose executable")
+    mode_commit = git(repository, "rev-parse", "HEAD")
+
+    changed = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", mode_commit),
+    )
+
+    assert original.snapshot is not None
+    assert changed.snapshot is not None
+    assert (
+        original.snapshot.stacks[0].fingerprint
+        != changed.snapshot.stacks[0].fingerprint
+    )
+
+
+def test_committed_type_only_change_changes_fingerprint_and_is_clean(
+    tmp_path: Path,
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    compose_path = "stacks/media/example/compose.yaml"
+    compose = repository / compose_path
+    compose.write_bytes(b"compose-source.yaml")
+    git(repository, "add", compose_path)
+    git(repository, "commit", "-m", "use same bytes for regular compose input")
+    regular_commit = git(repository, "rev-parse", "HEAD")
+    regular = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState(
+            "main", regular_commit
+        ),
+    )
+    compose.unlink()
+    compose.symlink_to("compose-source.yaml")
+    git(repository, "add", compose_path)
+    git(repository, "commit", "-m", "change compose input to symlink")
+    symlink_commit = git(repository, "rev-parse", "HEAD")
+
+    symlink = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState(
+            "main", symlink_commit
+        ),
+    )
+
+    assert regular.snapshot is not None
+    assert symlink.snapshot is not None
+    assert symlink.snapshot.stacks[0].complete is True
+    assert (
+        regular.snapshot.stacks[0].fingerprint
+        != symlink.snapshot.stacks[0].fingerprint
+    )
+
+
+@pytest.mark.parametrize(
+    "relevant_path",
+    [
+        "stacks/media/example/compose.yaml",
+        "stacks/media/example/stack.yaml",
+        "stacks/media/example/docs/upgrade.md",
+    ],
+)
+def test_index_only_content_change_makes_stack_incomplete_without_mutating_index(
+    tmp_path: Path, relevant_path: str
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    stack = repository / "stacks/media/example"
+    (stack / "stack.yaml").write_text(
+        """\
+updates:
+  mode: images
+  track: stable
+  procedure:
+    mode: assisted
+    runbook: docs/upgrade.md
+""",
+        encoding="utf-8",
+    )
+    (stack / "docs").mkdir()
+    (stack / "docs/upgrade.md").write_text("# Upgrade\n", encoding="utf-8")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "add assisted runbook")
+    commit = git(repository, "rev-parse", "HEAD")
+    relevant = repository / relevant_path
+    head_content = relevant.read_bytes()
+    relevant.write_bytes(b"staged content\n")
+    git(repository, "add", relevant_path)
+    relevant.write_bytes(head_content)
+    before_status = git(repository, "status", "--porcelain=v1", "--", relevant_path)
+    before_index = git(repository, "ls-files", "--stage", "-v", "--", relevant_path)
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+
+    assert before_status.startswith("MM ")
+    assert result.snapshot is not None
+    snapshot = result.snapshot.stacks[0]
+    assert snapshot.complete is False
+    assert snapshot.changed_inputs == (relevant_path,)
+    assert (
+        git(repository, "status", "--porcelain=v1", "--", relevant_path)
+        == before_status
+    )
+    assert (
+        git(repository, "ls-files", "--stage", "-v", "--", relevant_path)
+        == before_index
+    )
+
+
+def test_index_only_added_compose_input_is_relevant_and_incomplete(
+    tmp_path: Path,
+) -> None:
+    repository, commit = create_repository(tmp_path)
+    override_path = "stacks/media/example/compose.override.yaml"
+    override = repository / override_path
+    override.write_text(
+        "services:\n  worker:\n    image: example/worker:1\n", encoding="utf-8"
+    )
+    git(repository, "add", override_path)
+    override.unlink()
+    before_index = git(repository, "ls-files", "--stage", "--", override_path)
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+
+    assert result.snapshot is not None
+    snapshot = result.snapshot.stacks[0]
+    assert override_path in snapshot.relevant_inputs
+    assert override_path in snapshot.changed_inputs
+    assert snapshot.complete is False
+    assert git(repository, "ls-files", "--stage", "--", override_path) == before_index
+
+
 def test_checked_in_policy_selects_runbook_relevance_despite_dirty_policy(
     tmp_path: Path,
 ) -> None:
