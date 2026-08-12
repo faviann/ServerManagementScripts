@@ -6,6 +6,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 import yaml
 
@@ -85,6 +86,30 @@ def _is_nonempty_string(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def _markdown_targets(document: str) -> set[str]:
+    targets: set[str] = set()
+    in_fence = False
+    for line in document.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith(("```", "~~~")):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        heading = re.match(r"^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$", line)
+        if heading:
+            title = re.sub(r"<[^>]+>", "", heading.group(1)).strip().lower()
+            slug = re.sub(r"[^\w\- ]", "", title, flags=re.UNICODE)
+            targets.add(re.sub(r"\s+", "-", slug))
+        for anchor in re.finditer(
+            r"<a\s+[^>]*(?:id|name)\s*=\s*(['\"])([^'\"]+)\1[^>]*>",
+            line,
+            flags=re.IGNORECASE,
+        ):
+            targets.add(anchor.group(2))
+    return targets
+
+
 def _find_secrets(value: Any, path: str = "stack.yaml") -> list[str]:
     found: list[str] = []
     if isinstance(value, dict):
@@ -139,9 +164,14 @@ def _validate_minimum_metadata(metadata: dict[str, Any], folder_name: str, error
     }
     for key, expected_type in required.items():
         value = metadata.get(key)
-        if not isinstance(value, expected_type) or expected_type is str and not value.strip():
+        has_expected_type = (
+            type(value) is int
+            if expected_type is int
+            else isinstance(value, expected_type)
+        )
+        if not has_expected_type or expected_type is str and not value.strip():
             _error(errors, "invalid-metadata", f"stack.yaml.{key}", f"{key} is required and must be {expected_type.__name__}")
-    if metadata.get("schema_version") != 1:
+    if type(metadata.get("schema_version")) is not int or metadata.get("schema_version") != 1:
         _error(errors, "invalid-value", "stack.yaml.schema_version", "only schema_version 1 is supported")
     if metadata.get("kind") != "stack":
         _error(errors, "invalid-value", "stack.yaml.kind", "kind must be stack")
@@ -234,6 +264,20 @@ def _validate_procedure(
     if Path(runbook_path).is_absolute() or not candidate.is_file():
         _error(errors, "invalid-runbook", "stack.yaml.updates.procedure.runbook", "runbook does not resolve to a local file")
         return None
+    if fragment_marker:
+        try:
+            document = candidate.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            _error(errors, "invalid-runbook", "stack.yaml.updates.procedure.runbook", "runbook is not readable Markdown")
+            return None
+        if unquote(fragment) not in _markdown_targets(document):
+            _error(
+                errors,
+                "invalid-runbook",
+                "stack.yaml.updates.procedure.runbook",
+                "runbook fragment does not resolve to a Markdown target",
+            )
+            return None
     return {"mode": "assisted", "runbook": runbook}
 
 
