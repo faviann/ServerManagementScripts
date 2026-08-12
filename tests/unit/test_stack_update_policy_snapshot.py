@@ -767,6 +767,44 @@ updates:
     assert git(repository, "ls-files", "--stage", "--", policy_path) == before_index
 
 
+def test_checked_in_policy_with_surrogate_runbook_has_snapshot_without_runbook(
+    tmp_path: Path,
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    policy_path = "stacks/media/example/stack.yaml"
+    (repository / policy_path).write_text(
+        """\
+updates:
+  mode: images
+  track: stable
+  procedure:
+    mode: assisted
+    runbook: "\\uD800"
+""",
+        encoding="utf-8",
+    )
+    git(repository, "add", policy_path)
+    git(repository, "commit", "-m", "add unrepresentable assisted runbook")
+    commit = git(repository, "rev-parse", "HEAD")
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+
+    assert result.errors == ()
+    assert result.snapshot is not None
+    snapshot = result.snapshot.stacks[0]
+    assert snapshot.complete is True
+    assert snapshot.changed_inputs == ()
+    assert snapshot.relevant_inputs == (
+        "stacks/media/example/compose.yaml",
+        policy_path,
+    )
+    assert len(snapshot.fingerprint) == 64
+
+
 def test_locally_added_runbook_named_by_checked_in_policy_is_relevant(
     tmp_path: Path,
 ) -> None:
@@ -1003,3 +1041,79 @@ def test_non_repo_managed_stack_selection_fails_structurally(
 
     assert result.snapshot is None
     assert [error.code for error in result.errors] == [code]
+
+
+@pytest.mark.parametrize(
+    "selected", ["stacks/host/bad\0name", "stacks/host/bad\ud800name"]
+)
+def test_unrepresentable_selected_stack_identity_fails_structurally(
+    tmp_path: Path, selected: str
+) -> None:
+    repository, commit = create_repository(tmp_path)
+
+    result = build_repository_snapshot(
+        repository,
+        [selected],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+
+    assert result.snapshot is None
+    assert [error.as_dict() for error in result.errors] == [
+        {
+            "code": "invalid-stack-identity",
+            "message": "selected stack identity must be stacks/<host>/<stack>",
+            "path": "stack.identity",
+        }
+    ]
+
+
+def test_missing_checked_in_blob_fails_snapshot_without_partial_result(
+    tmp_path: Path,
+) -> None:
+    repository, commit = create_repository(tmp_path)
+    policy_path = "stacks/media/example/stack.yaml"
+    object_id = git(repository, "rev-parse", f"HEAD:{policy_path}")
+    object_path = repository / ".git/objects" / object_id[:2] / object_id[2:]
+    object_path.unlink()
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+
+    assert result.snapshot is None
+    assert [error.as_dict() for error in result.errors] == [
+        {
+            "code": "repository-input-read-failed",
+            "message": "repository input could not be read",
+            "path": policy_path,
+        }
+    ]
+
+
+def test_staged_input_with_unreadable_checked_in_blob_fails_without_partial_snapshot(
+    tmp_path: Path,
+) -> None:
+    repository, commit = create_repository(tmp_path)
+    compose_path = "stacks/media/example/compose.yaml"
+    object_id = git(repository, "rev-parse", f"HEAD:{compose_path}")
+    (repository / compose_path).write_text("services: {}\n", encoding="utf-8")
+    git(repository, "add", compose_path)
+    object_path = repository / ".git/objects" / object_id[:2] / object_id[2:]
+    object_path.unlink()
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+
+    assert result.snapshot is None
+    assert [error.as_dict() for error in result.errors] == [
+        {
+            "code": "repository-input-read-failed",
+            "message": "repository input could not be read",
+            "path": compose_path,
+        }
+    ]

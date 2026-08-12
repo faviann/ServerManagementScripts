@@ -23,6 +23,11 @@ class GitHubReadError(Exception):
     """A safe diagnostic from the controlled GitHub read boundary."""
 
 
+class _RepositoryInputReadError(Exception):
+    def __init__(self, path: str) -> None:
+        self.path = path
+
+
 @dataclass(frozen=True)
 class GitHubRepositoryState:
     default_branch: str
@@ -155,6 +160,16 @@ def _github_identity(origin: str) -> tuple[str, str] | None:
     return (match.group(1), match.group(2)) if match else None
 
 
+def _is_filesystem_encodable(path: str) -> bool:
+    if "\0" in path or any(0xD800 <= ord(character) <= 0xDFFF for character in path):
+        return False
+    try:
+        encoded = os.fsencode(path)
+    except UnicodeEncodeError:
+        return False
+    return os.fsdecode(encoded) == path
+
+
 def _tree_entry(
     repository: Path, treeish: str, path: str
 ) -> tuple[str, str, str] | None:
@@ -191,18 +206,26 @@ def _index_has_path(repository: Path, path: str) -> bool:
 def _fingerprint(repository: Path, paths: Sequence[str]) -> str:
     digest = hashlib.sha256()
     for path in paths:
-        entry = _tree_entry(repository, "HEAD", path)
-        if entry is None:
-            raise subprocess.CalledProcessError(1, ["git", "ls-tree"])
-        mode, object_type, object_id = entry
-        if object_type == "blob":
-            identity = _git(repository, "show", f"HEAD:{path}", text=False)
-            assert isinstance(identity, bytes)
-        else:
-            identity = object_id.encode()
-        for component in (path.encode(), mode.encode(), object_type.encode(), identity):
-            digest.update(len(component).to_bytes(8, "big"))
-            digest.update(component)
+        try:
+            entry = _tree_entry(repository, "HEAD", path)
+            if entry is None:
+                raise subprocess.CalledProcessError(1, ["git", "ls-tree"])
+            mode, object_type, object_id = entry
+            if object_type == "blob":
+                identity = _git(repository, "show", f"HEAD:{path}", text=False)
+                assert isinstance(identity, bytes)
+            else:
+                identity = object_id.encode()
+            for component in (
+                path.encode(),
+                mode.encode(),
+                object_type.encode(),
+                identity,
+            ):
+                digest.update(len(component).to_bytes(8, "big"))
+                digest.update(component)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise _RepositoryInputReadError(path) from exc
     return digest.hexdigest()
 
 
@@ -212,6 +235,8 @@ def _blob_differs_from_worktree(
     checked_in = _git(repository, "show", f"HEAD:{path}", text=False)
     assert isinstance(checked_in, bytes)
     filesystem_path = repository / path
+    if not os.path.lexists(filesystem_path):
+        return True
     filesystem_mode = filesystem_path.lstat().st_mode
     if stat.S_ISREG(filesystem_mode):
         worktree_mode = "100755" if filesystem_mode & 0o111 else "100644"
@@ -287,39 +312,39 @@ def _gitlink_differs_from_worktree(
 
 
 def _working_tree_differs_from_head(repository: Path, path: str) -> bool:
-    try:
-        entry = _tree_entry(repository, "HEAD", path)
-        if entry is None:
-            return True
-        head_mode, head_type, head_object_id = entry
-        if head_type == "blob":
-            return _blob_differs_from_worktree(repository, path, head_mode)
-        if head_type == "tree":
-            return _tree_differs_from_worktree(repository, path)
-        if head_mode == "160000" and head_type == "commit":
-            return _gitlink_differs_from_worktree(
-                repository, path, head_object_id
-            )
-        return not os.path.lexists(repository / path)
-    except (OSError, subprocess.CalledProcessError):
+    entry = _tree_entry(repository, "HEAD", path)
+    if entry is None:
         return True
+    head_mode, head_type, head_object_id = entry
+    if head_type == "blob":
+        return _blob_differs_from_worktree(repository, path, head_mode)
+    if head_type == "tree":
+        return _tree_differs_from_worktree(repository, path)
+    if head_mode == "160000" and head_type == "commit":
+        return _gitlink_differs_from_worktree(repository, path, head_object_id)
+    return not os.path.lexists(repository / path)
 
 
 def _index_differs_from_head(repository: Path, path: str) -> bool:
     try:
         _git(repository, "diff-index", "--cached", "--quiet", "HEAD", "--", path)
         return False
-    except (OSError, subprocess.CalledProcessError):
-        return True
+    except subprocess.CalledProcessError as exc:
+        if exc.returncode == 1:
+            return True
+        raise
 
 
 def _checked_in_runbook(repository: Path, stack_identity: str) -> str | None:
     manifest_path = f"{stack_identity}/stack.yaml"
+    entry = _tree_entry(repository, "HEAD", manifest_path)
+    if entry is None or entry[1] != "blob":
+        return None
     try:
         content = _git(repository, "show", f"HEAD:{manifest_path}", text=False)
         assert isinstance(content, bytes)
         metadata = yaml.safe_load(content.decode("utf-8"))
-    except (UnicodeDecodeError, subprocess.CalledProcessError, yaml.YAMLError):
+    except (UnicodeDecodeError, yaml.YAMLError):
         return None
     if not isinstance(metadata, dict):
         return None
@@ -331,11 +356,14 @@ def _checked_in_runbook(repository: Path, stack_identity: str) -> str | None:
     if not isinstance(runbook, str):
         return None
     raw_runbook_path = runbook.partition("#")[0]
+    if not _is_filesystem_encodable(raw_runbook_path) or any(
+        ord(character) < 32 or ord(character) == 127
+        for character in raw_runbook_path
+    ):
+        return None
     try:
         runbook_path = PurePosixPath(raw_runbook_path)
     except ValueError:
-        return None
-    if "\0" in raw_runbook_path:
         return None
     if runbook_path.is_absolute() or not runbook_path.parts or ".." in runbook_path.parts:
         return None
@@ -436,7 +464,8 @@ def build_repository_snapshot(
     for stack_identity in sorted(set(selected_stacks)):
         parts = PurePosixPath(stack_identity).parts
         if (
-            len(parts) != 3
+            not _is_filesystem_encodable(stack_identity)
+            or len(parts) != 3
             or parts[0] != "stacks"
             or any(part in {"", ".", ".."} for part in parts)
             or PurePosixPath(stack_identity).as_posix() != stack_identity
@@ -457,50 +486,70 @@ def build_repository_snapshot(
         "stack.yaml",
     )
     for stack_identity in sorted(set(selected_stacks)):
-        candidates = tuple(f"{stack_identity}/{filename}" for filename in supported)
-        runbook = _checked_in_runbook(resolved_root, stack_identity)
-        if runbook is not None:
-            candidates += (runbook,)
-        candidates = tuple(sorted(set(candidates)))
-        checked_in = {
-            path: _tree_entry(resolved_root, "HEAD", path) is not None
-            for path in candidates
-        }
-        indexed = {
-            path: _index_has_path(resolved_root, path) for path in candidates
-        }
-        paths = tuple(
-            sorted(
-                path
-                for path in candidates
-                if checked_in[path]
-                or indexed[path]
-                or os.path.lexists(resolved_root / path)
+        current_path = f"{stack_identity}/stack.yaml"
+        try:
+            candidates = tuple(
+                f"{stack_identity}/{filename}" for filename in supported
             )
-        )
-        if not paths:
-            error = SnapshotError(
-                "missing-stack-inputs",
-                stack_identity,
-                "selected stack has no checked-in or locally added relevant inputs",
+            runbook = _checked_in_runbook(resolved_root, stack_identity)
+            if runbook is not None:
+                candidates += (runbook,)
+            candidates = tuple(sorted(set(candidates)))
+            checked_in: dict[str, bool] = {}
+            indexed: dict[str, bool] = {}
+            for path in candidates:
+                current_path = path
+                checked_in[path] = (
+                    _tree_entry(resolved_root, "HEAD", path) is not None
+                )
+                indexed[path] = _index_has_path(resolved_root, path)
+            paths = tuple(
+                sorted(
+                    path
+                    for path in candidates
+                    if checked_in[path]
+                    or indexed[path]
+                    or os.path.lexists(resolved_root / path)
+                )
             )
-            return RepositorySnapshotBuild((error,), None)
-        changed = tuple(
-            path
-            for path in paths
-            if _index_differs_from_head(resolved_root, path)
-            or _working_tree_differs_from_head(resolved_root, path)
-        )
-        checked_in_paths = tuple(path for path in paths if checked_in[path])
-        stacks.append(
-            StackInputSnapshot(
-                stack_identity,
-                not changed,
-                _fingerprint(resolved_root, checked_in_paths),
-                paths,
-                changed,
+            if not paths:
+                error = SnapshotError(
+                    "missing-stack-inputs",
+                    stack_identity,
+                    "selected stack has no checked-in or locally added relevant inputs",
+                )
+                return RepositorySnapshotBuild((error,), None)
+            changed_paths: list[str] = []
+            for path in paths:
+                current_path = path
+                if _index_differs_from_head(
+                    resolved_root, path
+                ) or _working_tree_differs_from_head(resolved_root, path):
+                    changed_paths.append(path)
+            changed = tuple(changed_paths)
+            checked_in_paths = tuple(path for path in paths if checked_in[path])
+            fingerprint = _fingerprint(resolved_root, checked_in_paths)
+            stacks.append(
+                StackInputSnapshot(
+                    stack_identity,
+                    not changed,
+                    fingerprint,
+                    paths,
+                    changed,
+                )
             )
+        except _RepositoryInputReadError as exc:
+            current_path = exc.path
+        except (OSError, subprocess.CalledProcessError):
+            pass
+        else:
+            continue
+        error = SnapshotError(
+            "repository-input-read-failed",
+            current_path,
+            "repository input could not be read",
         )
+        return RepositorySnapshotBuild((error,), None)
     snapshot = RepositorySnapshot(
         f"{owner}/{name}", remote.default_branch, remote.commit, tuple(stacks)
     )
