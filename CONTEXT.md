@@ -8,6 +8,10 @@ This context describes how the repository plans and applies changes to the manag
 An operator-selected version or release line used to discover eligible updates for one effective Compose image. An image-tracked stack can declare a shared default and service-specific exceptions, but every image-bearing service must have an intentional effective image update track.
 _Avoid_: Channel, version inferred from the current tag
 
+**Repository input snapshot**:
+A read-only, schema-versioned record that authorizes the clone's current `HEAD` only when it equals GitHub's current default-branch commit, then fingerprints the checked-in policy, supported Compose inputs, and checked-in-policy-assisted runbook relevant to each operator-selected repo-managed stack. Unrelated worktree changes remain usable; changed relevant inputs make only their stack incomplete.
+_Avoid_: Image update plan, deployed-state snapshot, validation result
+
 **Targeted LXC set**:
 The managed LXCs selected for a lifecycle run. Safety checks and the pre-action planning barrier apply to this set, not automatically to every LXC in inventory.
 _Avoid_: Fleet, all LXCs

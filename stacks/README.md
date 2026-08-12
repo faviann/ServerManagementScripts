@@ -149,6 +149,31 @@ uv run --locked python -B -m stack_update_policy validate \
 
 The command writes schema-versioned JSON to standard output, diagnostics to standard error, and exits nonzero for an invalid contract. Its normalized result is the shared validation model for later planning and Create Stack integration; consumers should not reparse policy rules independently.
 
+### Repository Input Snapshot API
+
+`build_repository_snapshot` is the canonical read-only Python API for creating a repository input snapshot for caller-selected repo-managed stacks:
+
+```python
+from pathlib import Path
+
+from stack_update_policy import build_repository_snapshot
+
+build = build_repository_snapshot(
+    Path.cwd(),
+    ["stacks/servarr/notifiarr"],
+)
+```
+
+The API infers the GitHub `owner/repository` identity only from `origin`, reads GitHub for the current default branch and its commit, and rejects the snapshot unless local `HEAD` is exactly that commit. It does not require a clean worktree. For each selected stack it fingerprints the checked-in `stack.yaml`, checked-in supported Compose base and override names, and any repository-local assisted runbook named by the checked-in policy. Locally added or deleted supported Compose names are also relevant. A changed relevant input marks only that stack incomplete; unrelated changes do not affect completeness or fingerprints.
+
+The result is immutable and exposes `as_dict()` for stable schema-versioned consumption. It does not select stacks, validate policy, inspect containers or deployments, invoke Renovate, write GitHub state, or modify the repository. Tests replace only the GitHub read boundary; Git and filesystem behavior use real temporary repositories.
+
+Run the credential-free contract tests with the locked environment:
+
+```bash
+uv run --locked pytest -q tests/unit/test_stack_update_policy_snapshot.py
+```
+
 ## Build a Stack
 
 1. Create `stacks/<host>/<stack>/compose.yaml`.
