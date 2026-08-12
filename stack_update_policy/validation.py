@@ -1,0 +1,367 @@
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+PORTABILITY_TIERS = {"portable-app", "host-bound-app", "foundational-controlled-migration"}
+TRAEFIK_EXPOSURES = {"none", "protected", "public"}
+SECRET_KEY = re.compile(
+    r"(^|_)(?:api_?key|access_?key|credential(?:s)?|password(?:s)?|passwd|"
+    r"private_?key|secret(?:s)?|token(?:s)?)(_|$)"
+)
+SECRET_VALUE = re.compile(
+    r"(\$ANSIBLE_VAULT|!vault|BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY|"
+    r"\bvault[_:/.][A-Za-z0-9_.:/-]+|://[^\s/:]+:[^\s/@]+@|"
+    r"\b(?:password|passwd|secret|token|api[_-]?key)\s*[:=]\s*\S+|"
+    r"\b(?:gh[opusr]|github_pat)_[A-Za-z0-9_]{16,}|\bAKIA[A-Z0-9]{16}\b|"
+    r"\bBearer\s+[A-Za-z0-9._~-]{12,}|\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.)",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class ValidationError:
+    code: str
+    path: str
+    message: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {"code": self.code, "message": self.message, "path": self.path}
+
+
+@dataclass(frozen=True)
+class ValidatedStackPolicy:
+    identity: str
+    host: str
+    name: str
+    metadata: dict[str, Any]
+    policy: dict[str, Any]
+    services: dict[str, dict[str, str]]
+    procedure: dict[str, str] | None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "host": self.host,
+            "identity": self.identity,
+            "metadata": self.metadata,
+            "name": self.name,
+            "policy": self.policy,
+            "procedure": self.procedure,
+            "services": self.services,
+        }
+
+
+@dataclass(frozen=True)
+class StackPolicyValidation:
+    errors: tuple[ValidationError, ...]
+    result: ValidatedStackPolicy | None
+
+    @property
+    def valid(self) -> bool:
+        return not self.errors
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "command": "validate",
+            "errors": [error.as_dict() for error in self.errors],
+            "result": self.result.as_dict() if self.result else None,
+            "schema_version": 1,
+            "valid": self.valid,
+        }
+
+
+def _error(errors: list[ValidationError], code: str, path: str, message: str) -> None:
+    errors.append(ValidationError(code, path, message))
+
+
+def _is_nonempty_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _find_secrets(value: Any, path: str = "stack.yaml") -> list[str]:
+    found: list[str] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_path = f"{path}.{key}"
+            key_with_word_boundaries = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", str(key))
+            key_with_word_boundaries = re.sub(
+                r"([a-z0-9])([A-Z])", r"\1_\2", key_with_word_boundaries
+            )
+            normalized_key = re.sub(
+                r"[^a-z0-9]+", "_", key_with_word_boundaries.lower()
+            ).strip("_")
+            if SECRET_KEY.search(normalized_key) or "vault" in normalized_key:
+                found.append(child_path)
+            found.extend(_find_secrets(child, child_path))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            found.extend(_find_secrets(child, f"{path}[{index}]"))
+    elif isinstance(value, str):
+        lowered = value.lower()
+        if SECRET_VALUE.search(value) or "{{ vault_" in lowered or "{{vault_" in lowered:
+            found.append(path)
+    return found
+
+
+def _load_metadata(stack_root: Path, errors: list[ValidationError]) -> dict[str, Any] | None:
+    manifest = stack_root / "stack.yaml"
+    if not manifest.is_file():
+        _error(errors, "missing-metadata", "stack.yaml", "stack.yaml is required")
+        return None
+    try:
+        loaded = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        _error(errors, "malformed-metadata", "stack.yaml", f"could not parse stack.yaml: {exc}")
+        return None
+    if not isinstance(loaded, dict):
+        _error(errors, "malformed-metadata", "stack.yaml", "stack.yaml must contain a mapping")
+        return None
+    for secret_path in sorted(set(_find_secrets(loaded))):
+        _error(errors, "secret-metadata", secret_path, "secret-shaped metadata is forbidden")
+    return loaded
+
+
+def _validate_minimum_metadata(metadata: dict[str, Any], folder_name: str, errors: list[ValidationError]) -> None:
+    required = {
+        "schema_version": int,
+        "kind": str,
+        "name": str,
+        "description": str,
+        "portability": dict,
+        "exposure": dict,
+    }
+    for key, expected_type in required.items():
+        value = metadata.get(key)
+        if not isinstance(value, expected_type) or expected_type is str and not value.strip():
+            _error(errors, "invalid-metadata", f"stack.yaml.{key}", f"{key} is required and must be {expected_type.__name__}")
+    if metadata.get("schema_version") != 1:
+        _error(errors, "invalid-value", "stack.yaml.schema_version", "only schema_version 1 is supported")
+    if metadata.get("kind") != "stack":
+        _error(errors, "invalid-value", "stack.yaml.kind", "kind must be stack")
+    if isinstance(metadata.get("name"), str) and metadata["name"] != folder_name:
+        _error(errors, "folder-name-mismatch", "stack.yaml.name", "name must match the stack folder")
+
+    portability = metadata.get("portability")
+    if isinstance(portability, dict):
+        if portability.get("tier") not in PORTABILITY_TIERS:
+            _error(errors, "invalid-value", "stack.yaml.portability.tier", "unsupported portability tier")
+        if portability.get("owner") != "stack":
+            _error(errors, "invalid-value", "stack.yaml.portability.owner", "owner must be stack")
+
+    exposure = metadata.get("exposure")
+    if isinstance(exposure, dict):
+        if exposure.get("traefik") not in TRAEFIK_EXPOSURES:
+            _error(errors, "invalid-value", "stack.yaml.exposure.traefik", "unsupported Traefik exposure")
+        homepage = exposure.get("homepage_instances")
+        if not isinstance(homepage, list) or not all(_is_nonempty_string(item) for item in homepage):
+            _error(errors, "invalid-metadata", "stack.yaml.exposure.homepage_instances", "homepage_instances must be a list of names")
+
+
+def _resolve_compose(stack_root: Path, errors: list[ValidationError]) -> dict[str, Any] | None:
+    base_files = [path for path in (stack_root / "compose.yaml", stack_root / "compose.yml") if path.is_file()]
+    override_files = [path for path in (stack_root / "compose.override.yaml", stack_root / "compose.override.yml") if path.is_file()]
+    if len(base_files) != 1:
+        _error(errors, "compose-resolution", "compose", "exactly one compose.yaml or compose.yml is required")
+        return None
+    if len(override_files) > 1:
+        _error(errors, "compose-resolution", "compose", "at most one supported Compose override is allowed")
+        return None
+    command = ["docker", "compose"]
+    for path in base_files + override_files:
+        command.extend(("-f", str(path)))
+    command.extend(("config", "--format", "json", "--no-interpolate", "--no-env-resolution"))
+    try:
+        completed = subprocess.run(command, cwd=stack_root, text=True, capture_output=True, check=False)
+    except OSError as exc:
+        _error(errors, "compose-resolution", "compose", f"could not run Docker Compose: {exc}")
+        return None
+    if completed.returncode != 0:
+        diagnostic = completed.stderr.strip().splitlines()[-1] if completed.stderr.strip() else "Docker Compose failed"
+        _error(errors, "compose-resolution", "compose", diagnostic)
+        return None
+    try:
+        effective = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        _error(errors, "compose-resolution", "compose", "Docker Compose returned invalid JSON")
+        return None
+    if not isinstance(effective.get("services"), dict):
+        _error(errors, "compose-resolution", "compose.services", "effective Compose services are missing")
+        return None
+    return effective
+
+
+def _validate_procedure(
+    repository_root: Path,
+    stack_root: Path,
+    updates: dict[str, Any],
+    errors: list[ValidationError],
+) -> dict[str, str] | None:
+    procedure = updates.get("procedure")
+    if procedure is None:
+        return None
+    if not isinstance(procedure, dict) or set(procedure) != {"mode", "runbook"}:
+        _error(errors, "invalid-procedure", "stack.yaml.updates.procedure", "procedure must contain only mode and runbook")
+        return None
+    if procedure.get("mode") != "assisted":
+        _error(errors, "invalid-procedure", "stack.yaml.updates.procedure.mode", "only assisted procedures are supported")
+    runbook = procedure.get("runbook")
+    if not _is_nonempty_string(runbook):
+        _error(errors, "invalid-runbook", "stack.yaml.updates.procedure.runbook", "runbook must be a local path")
+        return None
+    runbook_path, fragment_marker, fragment = runbook.partition("#")
+    if fragment_marker and not fragment:
+        _error(errors, "invalid-runbook", "stack.yaml.updates.procedure.runbook", "runbook fragment must not be empty")
+        return None
+    if fragment_marker and (
+        any(character.isspace() or character == "#" for character in fragment)
+        or re.search(r"%(?![0-9A-Fa-f]{2})", fragment)
+    ):
+        _error(errors, "invalid-runbook", "stack.yaml.updates.procedure.runbook", "runbook fragment is invalid")
+        return None
+    candidate = (stack_root / runbook_path).resolve()
+    try:
+        candidate.relative_to(repository_root.resolve())
+    except ValueError:
+        _error(errors, "invalid-runbook", "stack.yaml.updates.procedure.runbook", "runbook must stay within the repository")
+        return None
+    if Path(runbook_path).is_absolute() or not candidate.is_file():
+        _error(errors, "invalid-runbook", "stack.yaml.updates.procedure.runbook", "runbook does not resolve to a local file")
+        return None
+    return {"mode": "assisted", "runbook": runbook}
+
+
+def _validate_image_policy(
+    repository_root: Path,
+    stack_root: Path,
+    metadata: dict[str, Any],
+    effective: dict[str, Any] | None,
+    errors: list[ValidationError],
+) -> tuple[dict[str, dict[str, str]], dict[str, str] | None]:
+    updates = metadata.get("updates")
+    if not isinstance(updates, dict):
+        _error(errors, "missing-policy", "stack.yaml.updates", "updates policy is required")
+        return {}, None
+    if updates.get("mode") != "images":
+        _error(errors, "unsupported-mode", "stack.yaml.updates.mode", "strict validation supports only images mode")
+    allowed_update_keys = {"mode", "track", "services", "procedure", "low_confidence"}
+    unknown = sorted(
+        (key for key in updates if not isinstance(key, str) or key not in allowed_update_keys),
+        key=str,
+    )
+    if unknown:
+        rendered_unknown = ", ".join(
+            key if isinstance(key, str) else repr(key) for key in unknown
+        )
+        _error(
+            errors,
+            "invalid-policy",
+            "stack.yaml.updates",
+            f"unsupported policy fields: {rendered_unknown}",
+        )
+    if "low_confidence" in updates and updates["low_confidence"] != "assisted":
+        _error(
+            errors,
+            "invalid-value",
+            "stack.yaml.updates.low_confidence",
+            "low_confidence must be assisted",
+        )
+    default_track = updates.get("track")
+    if default_track is not None and not _is_nonempty_string(default_track):
+        _error(errors, "invalid-value", "stack.yaml.updates.track", "image update track must be a non-empty string")
+        default_track = None
+    service_policies = updates.get("services", {})
+    if not isinstance(service_policies, dict):
+        _error(errors, "invalid-policy", "stack.yaml.updates.services", "services must be a mapping")
+        service_policies = {}
+
+    procedure = _validate_procedure(repository_root, stack_root, updates, errors)
+    if effective is None:
+        return {}, procedure
+    compose_services = effective["services"]
+    for service_name, policy in sorted(service_policies.items(), key=lambda item: str(item[0])):
+        path = f"stack.yaml.updates.services.{service_name}"
+        if service_name not in compose_services:
+            _error(errors, "unknown-service", path, "policy service is not in effective Compose")
+            continue
+        if "image" not in compose_services[service_name]:
+            _error(errors, "non-image-service", path, "tracked service has no effective image")
+        if not isinstance(policy, dict) or set(policy) != {"track"}:
+            _error(errors, "invalid-policy", path, "service policy must contain only track")
+            continue
+        if not _is_nonempty_string(policy.get("track")):
+            _error(errors, "invalid-value", f"{path}.track", "image update track must be a non-empty string")
+
+    resolved: dict[str, dict[str, str]] = {}
+    for service_name, service in sorted(compose_services.items()):
+        if "image" not in service:
+            continue
+        policy = service_policies.get(service_name)
+        service_track = policy.get("track") if isinstance(policy, dict) else None
+        track = service_track or default_track
+        if not _is_nonempty_string(track):
+            _error(errors, "missing-track", f"stack.yaml.updates.services.{service_name}", "image-bearing service has no effective image update track")
+            continue
+        resolved[service_name] = {"image": str(service["image"]), "track": track}
+    return resolved, procedure
+
+
+def validate_stack(repository_root: Path, identity: str) -> StackPolicyValidation:
+    errors: list[ValidationError] = []
+    parts = Path(identity).parts
+    if len(parts) != 3 or parts[0] != "stacks" or any(part in {"", ".", ".."} for part in parts):
+        error = ValidationError("invalid-identity", "identity", "expected stacks/<host>/<stack>")
+        return StackPolicyValidation((error,), None)
+    host, name = parts[1:]
+    resolved_repository_root = repository_root.resolve()
+    stack_root = (resolved_repository_root / identity).resolve()
+    try:
+        stack_root.relative_to(resolved_repository_root)
+    except ValueError:
+        error = ValidationError(
+            "invalid-identity",
+            "identity",
+            "selected stack directory must stay within the repository",
+        )
+        return StackPolicyValidation((error,), None)
+    if not stack_root.is_dir():
+        error = ValidationError("missing-stack", "identity", "selected stack directory does not exist")
+        return StackPolicyValidation((error,), None)
+
+    metadata = _load_metadata(stack_root, errors)
+    effective = _resolve_compose(stack_root, errors)
+    services: dict[str, dict[str, str]] = {}
+    procedure: dict[str, str] | None = None
+    if metadata is not None:
+        _validate_minimum_metadata(metadata, name, errors)
+        services, procedure = _validate_image_policy(repository_root, stack_root, metadata, effective, errors)
+
+    ordered_errors = tuple(sorted(errors, key=lambda error: (error.path, error.code, error.message)))
+    if ordered_errors:
+        return StackPolicyValidation(ordered_errors, None)
+    normalized_metadata = {
+        key: metadata[key]
+        for key in ("schema_version", "kind", "name", "description", "portability", "exposure")
+    }
+    updates = metadata["updates"]
+    normalized_policy = {
+        "low_confidence": updates.get("low_confidence"),
+        "mode": "images",
+        "track": updates.get("track"),
+    }
+    result = ValidatedStackPolicy(
+        identity,
+        host,
+        name,
+        normalized_metadata,
+        normalized_policy,
+        services,
+        procedure,
+    )
+    return StackPolicyValidation((), result)
