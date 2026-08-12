@@ -260,6 +260,85 @@ def test_committed_type_only_change_changes_fingerprint_and_is_clean(
     )
 
 
+def test_committed_compose_tree_changes_fingerprint_and_is_clean(
+    tmp_path: Path,
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    compose_path = "stacks/media/example/compose.yaml"
+    compose = repository / compose_path
+    compose.unlink()
+    git(repository, "add", compose_path)
+    git(repository, "commit", "-m", "remove compose input")
+    without_compose_commit = git(repository, "rev-parse", "HEAD")
+    without_compose = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState(
+            "main", without_compose_commit
+        ),
+    )
+    compose.mkdir()
+    (compose / "fragment.yaml").write_text("services: {}\n", encoding="utf-8")
+    git(repository, "add", compose_path)
+    git(repository, "commit", "-m", "use a tree at the compose input path")
+    tree_commit = git(repository, "rev-parse", "HEAD")
+
+    tree = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", tree_commit),
+    )
+
+    assert without_compose.snapshot is not None
+    assert tree.snapshot is not None
+    tree_stack = tree.snapshot.stacks[0]
+    assert compose_path in tree_stack.relevant_inputs
+    assert tree_stack.complete is True
+    assert tree_stack.changed_inputs == ()
+    assert (
+        tree_stack.fingerprint
+        != without_compose.snapshot.stacks[0].fingerprint
+    )
+
+
+@pytest.mark.parametrize("deviation", ["worktree-content", "index-content", "type"])
+def test_local_compose_tree_deviation_makes_stack_incomplete(
+    tmp_path: Path, deviation: str
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    compose_path = "stacks/media/example/compose.yaml"
+    compose = repository / compose_path
+    compose.unlink()
+    compose.mkdir()
+    fragment = compose / "fragment.yaml"
+    fragment.write_text("services: {}\n", encoding="utf-8")
+    git(repository, "add", compose_path)
+    git(repository, "commit", "-m", "use a tree at the compose input path")
+    commit = git(repository, "rev-parse", "HEAD")
+
+    if deviation == "worktree-content":
+        fragment.write_text("services:\n  changed: {}\n", encoding="utf-8")
+    elif deviation == "index-content":
+        fragment.write_text("services:\n  staged: {}\n", encoding="utf-8")
+        git(repository, "add", compose_path)
+        fragment.write_text("services: {}\n", encoding="utf-8")
+    else:
+        fragment.unlink()
+        compose.rmdir()
+        compose.write_text("services: {}\n", encoding="utf-8")
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+
+    assert result.snapshot is not None
+    tree_stack = result.snapshot.stacks[0]
+    assert tree_stack.complete is False
+    assert tree_stack.changed_inputs == (compose_path,)
+
+
 @pytest.mark.parametrize(
     "relevant_path",
     [
