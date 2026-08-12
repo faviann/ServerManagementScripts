@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://faviann.vms/schemas/image-update-renovate-adapter/scan-request-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "stacks"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "stacks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["host", "stack", "tracking_mode", "services"],
+        "properties": {
+          "host": {"$ref": "#/$defs/identity"},
+          "stack": {"$ref": "#/$defs/identity"},
+          "tracking_mode": {"enum": ["image", "vendor"]},
+          "vendor": {"type": "object"},
+          "services": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["service", "image", "current_effective_reference", "current_digest", "track"],
+              "properties": {
+                "service": {"$ref": "#/$defs/identity"},
+                "image": {"type": "string", "minLength": 1},
+                "current_effective_reference": {"type": "string", "minLength": 1},
+                "candidate_effective_reference": {"type": "string", "minLength": 1},
+                "current_digest": {"$ref": "#/$defs/digest"},
+                "track": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["kind", "value"],
+                  "properties": {
+                    "kind": {"enum": ["floating-tag", "exact-version", "major-line"]},
+                    "value": {
+                      "oneOf": [
+                        {"type": "string", "minLength": 1},
+                        {"type": "integer"}
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "identity": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}

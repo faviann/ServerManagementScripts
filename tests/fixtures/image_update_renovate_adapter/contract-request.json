@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "stacks": [
+    {
+      "host": "fixture",
+      "stack": "exact-with-major",
+      "tracking_mode": "image",
+      "services": [{
+        "service": "app",
+        "image": "node",
+        "current_effective_reference": "node:20.0.0",
+        "current_digest": "sha256:942fa0013e9adfbde06ad07433bdb0a67cc2ac0d5a3db38f12a9c8f710b41f1c",
+        "track": {"kind": "major-line", "value": 20}
+      }]
+    },
+    {
+      "host": "fixture",
+      "stack": "floating-multiarch",
+      "tracking_mode": "image",
+      "services": [{
+        "service": "app",
+        "image": "alpine",
+        "current_effective_reference": "alpine:3.20",
+        "current_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "track": {"kind": "floating-tag", "value": "3.20"}
+      }]
+    },
+    {
+      "host": "fixture",
+      "stack": "coordinated",
+      "tracking_mode": "image",
+      "services": [
+        {
+          "service": "app",
+          "image": "rommapp/romm",
+          "current_effective_reference": "rommapp/romm:4.8.1",
+          "current_digest": "sha256:2b7a1714b287f69b081ad2a63bb8c2fa673666a17b2f21322b580b0cd51cb266",
+          "track": {"kind": "major-line", "value": 4}
+        },
+        {
+          "service": "database",
+          "image": "mariadb",
+          "current_effective_reference": "mariadb:11.4",
+          "current_digest": "sha256:a794d9eb009e20de605858a11f32f63b4075cbd197c650436f0e3b457e4caed7",
+          "track": {"kind": "major-line", "value": 11}
+        }
+      ]
+    },
+    {
+      "host": "fixture",
+      "stack": "isolated-failure",
+      "tracking_mode": "image",
+      "services": [{
+        "service": "app",
+        "image": "missing.invalid/never/exists",
+        "current_effective_reference": "missing.invalid/never/exists:1.0.0",
+        "current_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "track": {"kind": "major-line", "value": 1}
+      }]
+    },
+    {
+      "host": "fixture",
+      "stack": "vendor-baseline",
+      "tracking_mode": "vendor",
+      "vendor": {
+        "repository": "https://github.com/immich-app/immich",
+        "current_commit": "fixture-current",
+        "candidate_commit": "fixture-candidate"
+      },
+      "services": [{
+        "service": "server",
+        "image": "ghcr.io/immich-app/immich-server",
+        "current_effective_reference": "ghcr.io/immich-app/immich-server:v2.5.0",
+        "candidate_effective_reference": "ghcr.io/immich-app/immich-server:v2.7.5",
+        "current_digest": "sha256:6c011eaa315b871f3207d68f97205d92b3e600104466a75b01eb2c3868e72ca1",
+        "track": {"kind": "exact-version", "value": "v2.7.5"}
+      }]
+    }
+  ]
+}

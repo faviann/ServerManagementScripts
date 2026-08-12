@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://faviann.vms/schemas/image-update-renovate-adapter/candidate-observations-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "provenance", "stacks", "observations"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["adapter_version", "renovate_version", "request_fingerprint", "scan_time", "scope"],
+      "properties": {
+        "adapter_version": {"const": "1.0.0"},
+        "renovate_version": {"const": "44.5.0"},
+        "request_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "scan_time": {"type": "string"},
+        "scope": {"type": "array", "items": {"$ref": "#/$defs/stackIdentity"}}
+      }
+    },
+    "stacks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["host", "stack", "scan_status", "observation_count"],
+        "properties": {
+          "host": {"$ref": "#/$defs/identity"},
+          "stack": {"$ref": "#/$defs/identity"},
+          "scan_status": {"enum": ["complete", "incomplete"]},
+          "observation_count": {"type": "integer", "minimum": 1}
+        }
+      }
+    },
+    "observations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["identity", "tracking_mode", "status", "current", "candidate", "visible_major_alternatives", "upstream_links", "limitations", "vendor"],
+        "properties": {
+          "identity": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["host", "stack", "service"],
+            "properties": {"host": {"type": "string"}, "stack": {"type": "string"}, "service": {"type": "string"}}
+          },
+          "tracking_mode": {"enum": ["image", "vendor"]},
+          "status": {"enum": ["candidate", "no-update", "lookup-failed"]},
+          "current": {"$ref": "#/$defs/effectiveReference"},
+          "candidate": {
+            "oneOf": [
+              {"type": "null"},
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["effective_reference", "digest", "update_type", "proposed_exact_reference"],
+                "properties": {
+                  "effective_reference": {"type": "string", "minLength": 1},
+                  "digest": {"$ref": "#/$defs/digest"},
+                  "update_type": {"enum": ["digest", "patch", "minor", "major"]},
+                  "proposed_exact_reference": {"type": "string", "pattern": "@sha256:[0-9a-f]{64}$"}
+                }
+              }
+            ]
+          },
+          "visible_major_alternatives": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["effective_reference", "version", "digest"],
+              "properties": {
+                "effective_reference": {"type": "string", "pattern": "@sha256:[0-9a-f]{64}$"},
+                "version": {"type": "string", "minLength": 1},
+                "digest": {"$ref": "#/$defs/digest"}
+              }
+            }
+          },
+          "upstream_links": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["source", "homepage"],
+            "properties": {"source": {"type": ["string", "null"]}, "homepage": {"type": ["string", "null"]}}
+          },
+          "limitations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "message"],
+              "properties": {"kind": {"const": "dependency-lookup-warning"}, "message": {"type": "string"}}
+            }
+          },
+          "vendor": {"type": ["object", "null"]}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "identity": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "stackIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "stack"],
+      "properties": {"host": {"$ref": "#/$defs/identity"}, "stack": {"$ref": "#/$defs/identity"}}
+    },
+    "effectiveReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["effective_reference", "digest"],
+      "properties": {"effective_reference": {"type": "string", "minLength": 1}, "digest": {"$ref": "#/$defs/digest"}}
+    }
+  }
+}
