@@ -61,10 +61,24 @@ Once the post-rebuild validation below passes, delete the `.pre-persist` copies.
 
 The `0700` mode in `workstation_persistent_home_links` applies to the mount point and the target directory only. It is never applied recursively — file modes inside, including the `0600` env file, are left exactly as they are.
 
-Now deploy:
+Now deploy. Run this from another machine, not from the workstation itself:
 
 ```bash
 uv run --locked ansible-playbook site.yml --limit workstation
+```
+
+Two reasons. `proxmox_skip_self` defaults to true, so a run launched on the workstation skips the workstation and reports success without doing anything — the mounts never appear. And the migration above stops herdr, which kills its panes; a control session living in one of those panes dies mid-run.
+
+If you must run it on the workstation, disable the guard explicitly and drive it from a terminal outside herdr:
+
+```bash
+uv run --locked ansible-playbook site.yml -e proxmox_skip_self=false --limit workstation
+```
+
+Afterwards, confirm the mounts are actually live rather than trusting the play recap — an unmounted bind mount is an empty directory, not an error:
+
+```bash
+findmnt ~/.config/herdr ~/.local/state/collie
 ```
 
 ## What Is Deliberately Not Persisted
