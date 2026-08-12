@@ -143,10 +143,10 @@ def read_github_repository(owner: str, name: str) -> GitHubRepositoryState:
             ],
             check=True,
             capture_output=True,
-            text=True,
+            text=False,
             timeout=_GITHUB_READ_TIMEOUT_SECONDS,
         )
-        payload = json.loads(repository.stdout)
+        payload = json.loads(repository.stdout.decode("utf-8"))
         if not isinstance(payload, dict) or set(payload) != {"data"}:
             raise GitHubReadError("GitHub repository could not be read")
         data = payload["data"]
@@ -169,7 +169,12 @@ def read_github_repository(owner: str, name: str) -> GitHubRepositoryState:
         if not isinstance(default_branch, str) or not isinstance(commit, str):
             raise GitHubReadError("GitHub repository could not be read")
         return GitHubRepositoryState(default_branch, commit)
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+    except (
+        OSError,
+        subprocess.SubprocessError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ) as exc:
         raise GitHubReadError("GitHub repository could not be read") from exc
 
 

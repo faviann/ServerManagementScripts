@@ -248,6 +248,30 @@ sys.stdout.write(os.environ["FAKE_GH_PAYLOAD"])
     assert request_log.read_text(encoding="utf-8").splitlines() == ["called"]
 
 
+def test_github_reader_fails_safe_for_non_utf8_stdout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_gh = fake_bin / "gh"
+    fake_gh.write_text(
+        """#!/usr/bin/env python3
+import os
+
+os.write(1, b"\\xffunsafe stdout")
+""",
+        encoding="utf-8",
+    )
+    fake_gh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+
+    with pytest.raises(GitHubReadError) as raised:
+        read_github_repository("example", "homelab")
+
+    assert str(raised.value) == "GitHub repository could not be read"
+    assert "unsafe" not in str(raised.value)
+
+
 def test_github_reader_times_out_safely_and_terminates_gh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2390,6 +2414,37 @@ def test_github_read_failure_is_structured(tmp_path: Path) -> None:
             "repository.github",
             "GitHub repository could not be read",
         )
+    ]
+
+
+def test_non_utf8_github_process_failure_is_structured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_gh = fake_bin / "gh"
+    fake_gh.write_text(
+        """#!/usr/bin/env python3
+import os
+
+os.write(2, b"\\xffunsafe stderr")
+raise SystemExit(1)
+""",
+        encoding="utf-8",
+    )
+    fake_gh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+
+    result = build_repository_snapshot(repository, ["stacks/media/example"])
+
+    assert result.snapshot is None
+    assert [error.as_dict() for error in result.errors] == [
+        {
+            "code": "github-read-failed",
+            "message": "GitHub repository could not be read",
+            "path": "repository.github",
+        }
     ]
 
 
