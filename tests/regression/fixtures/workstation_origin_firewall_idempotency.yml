@@ -1,0 +1,33 @@
+---
+- name: Test workstation origin firewall idempotency
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: >-
+      {{ playbook_dir }}/workstation_origin_firewall_assets/python-module-wrapper
+    workstation_origin_firewall_enabled: true
+    workstation_origin_firewall_protected_ports:
+      - 4001
+      - 9119
+      - 18789
+      - 8788
+    workstation_origin_firewall_allowed_hosts:
+      - portal
+    workstation_origin_firewall_nft_dir: "{{ temp_root }}/etc/nftables.d"
+    workstation_origin_firewall_nft_path: "{{ workstation_origin_firewall_nft_dir }}/custom-origin.nft"
+    workstation_origin_firewall_service_path: >-
+      {{ temp_root }}/etc/systemd/system/custom-origin-firewall.service
+  tasks:
+    - name: Ensure temporary systemd directory exists
+      ansible.builtin.file:
+        path: "{{ workstation_origin_firewall_service_path | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Include focused workstation origin firewall tasks
+      ansible.builtin.include_role:
+        name: config/lxc_workstation_baseline
+        tasks_from: origin_firewall

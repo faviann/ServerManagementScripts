@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 import yaml
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -36,19 +37,18 @@ class WorkstationBaselineRoleTests(unittest.TestCase):
         self.assertEqual(defaults["workstation_uid"], "{{ docker_uid }}")
         self.assertEqual(defaults["workstation_gid"], "{{ docker_gid }}")
         self.assertEqual(defaults["workstation_home"], "/home/{{ workstation_username }}")
-        self.assertFalse(defaults["workstation_aoe_proxy_firewall_enabled"])
-        self.assertEqual(defaults["workstation_aoe_proxy_firewall_port"], 4001)
-        self.assertEqual(defaults["workstation_aoe_proxy_firewall_allowed_hosts"], [])
-        self.assertEqual(defaults["workstation_aoe_proxy_firewall_nft_dir"], "/etc/nftables.d")
+        self.assertFalse(defaults["workstation_origin_firewall_enabled"])
+        self.assertEqual(defaults["workstation_origin_firewall_protected_ports"], [])
+        self.assertEqual(defaults["workstation_origin_firewall_allowed_hosts"], [])
+        self.assertEqual(defaults["workstation_origin_firewall_nft_dir"], "/etc/nftables.d")
         self.assertEqual(
-            defaults["workstation_aoe_proxy_firewall_nft_path"],
-            "{{ workstation_aoe_proxy_firewall_nft_dir }}/workstation-aoe-proxy.nft",
+            defaults["workstation_origin_firewall_nft_path"],
+            "{{ workstation_origin_firewall_nft_dir }}/workstation-origin-firewall.nft",
         )
         self.assertEqual(
-            defaults["workstation_aoe_proxy_firewall_service_path"],
-            "/etc/systemd/system/workstation-aoe-proxy-firewall.service",
+            defaults["workstation_origin_firewall_service_path"],
+            "/etc/systemd/system/workstation-origin-firewall.service",
         )
-        self.assertEqual(defaults["workstation_openclaw_gateway_port"], 18789)
         self.assertFalse(defaults["workstation_persistent_home_enabled"])
         self.assertEqual(defaults["workstation_persistent_home_root"], "/ephemeral/workstation/home")
         self.assertEqual(defaults["workstation_persistent_home_mount_state"], "mounted")
@@ -230,8 +230,9 @@ class WorkstationBaselineRoleTests(unittest.TestCase):
         workstation_vars = load_yaml(REPO_ROOT / "inventory/host_vars/workstation.yml")
 
         self.assertTrue(workstation_vars["workstation_enabled"])
-        self.assertTrue(workstation_vars["workstation_aoe_proxy_firewall_enabled"])
-        self.assertEqual(workstation_vars["workstation_aoe_proxy_firewall_allowed_hosts"], ["portal"])
+        self.assertTrue(workstation_vars["workstation_origin_firewall_enabled"])
+        self.assertEqual(workstation_vars["workstation_origin_firewall_protected_ports"], [4001, 9119, 18789, 8788])
+        self.assertEqual(workstation_vars["workstation_origin_firewall_allowed_hosts"], ["portal"])
         self.assertTrue(workstation_vars["workstation_persistent_home_enabled"])
         self.assertNotIn("workstation_agent_state_enabled", workstation_vars)
 
@@ -239,15 +240,14 @@ class WorkstationBaselineRoleTests(unittest.TestCase):
         specs = load_yaml(REPO_ROOT / "playbooks/roles/config/lxc_workstation_baseline/meta/argument_specs.yml")
         options = specs["argument_specs"]["main"]["options"]
 
-        self.assertEqual(options["workstation_aoe_proxy_firewall_enabled"]["type"], "bool")
-        self.assertFalse(options["workstation_aoe_proxy_firewall_enabled"]["required"])
-        self.assertEqual(options["workstation_aoe_proxy_firewall_port"]["type"], "int")
-        self.assertFalse(options["workstation_aoe_proxy_firewall_port"]["required"])
-        self.assertEqual(options["workstation_aoe_proxy_firewall_allowed_hosts"]["type"], "list")
-        self.assertEqual(options["workstation_aoe_proxy_firewall_allowed_hosts"]["elements"], "str")
-        self.assertFalse(options["workstation_aoe_proxy_firewall_allowed_hosts"]["required"])
-        self.assertEqual(options["workstation_openclaw_gateway_port"]["type"], "int")
-        self.assertFalse(options["workstation_openclaw_gateway_port"]["required"])
+        self.assertEqual(options["workstation_origin_firewall_enabled"]["type"], "bool")
+        self.assertFalse(options["workstation_origin_firewall_enabled"]["required"])
+        self.assertEqual(options["workstation_origin_firewall_protected_ports"]["type"], "list")
+        self.assertEqual(options["workstation_origin_firewall_protected_ports"]["elements"], "int")
+        self.assertFalse(options["workstation_origin_firewall_protected_ports"]["required"])
+        self.assertEqual(options["workstation_origin_firewall_allowed_hosts"]["type"], "list")
+        self.assertEqual(options["workstation_origin_firewall_allowed_hosts"]["elements"], "str")
+        self.assertFalse(options["workstation_origin_firewall_allowed_hosts"]["required"])
         self.assertEqual(options["workstation_persistent_home_enabled"]["type"], "bool")
         self.assertFalse(options["workstation_persistent_home_enabled"]["required"])
         self.assertEqual(options["workstation_persistent_home_root"]["type"], "str")
@@ -295,7 +295,8 @@ class WorkstationBaselineRoleTests(unittest.TestCase):
         tasks = load_yaml(REPO_ROOT / "playbooks/roles/config/lxc_workstation_baseline/tasks/main.yml")
         task_names = [t.get("name") for t in tasks]
         self.assertIn("Install workstation baseline packages", task_names)
-        self.assertIn("Configure AoE LAN proxy firewall", task_names)
+        self.assertIn("Configure workstation origin firewall", task_names)
+        self.assertNotIn("Configure AoE LAN proxy firewall", task_names)
         self.assertIn("Configure workstation persistent home mounts", task_names)
         self.assertIn("Configure GitHub SSH keys", task_names)
         self.assertIn("Install chezmoi", task_names, "missing chezmoi install task")
@@ -326,7 +327,8 @@ class WorkstationBaselineRoleTests(unittest.TestCase):
         )
 
         rendered_tasks = yaml.safe_dump(tasks, sort_keys=True)
-        self.assertIn("aoe_proxy_firewall.yml", rendered_tasks)
+        self.assertIn("origin_firewall.yml", rendered_tasks)
+        self.assertNotIn("aoe_proxy_firewall.yml", rendered_tasks)
         self.assertIn("bitwarden_cli.yml", rendered_tasks)
         self.assertIn("nix.yml", rendered_tasks)
         self.assertIn("loginctl", rendered_tasks)
@@ -394,20 +396,33 @@ class WorkstationBaselineRoleTests(unittest.TestCase):
             REPO_ROOT / "playbooks/roles/config/lxc_workstation_baseline/tasks/persistent_home.yml"
         )
         firewall_tasks = load_yaml(
-            REPO_ROOT / "playbooks/roles/config/lxc_workstation_baseline/tasks/aoe_proxy_firewall.yml"
+            REPO_ROOT / "playbooks/roles/config/lxc_workstation_baseline/tasks/origin_firewall.yml"
         )
         persistent_home_task_names = [t.get("name") for t in persistent_home_tasks]
         firewall_task_names = [t.get("name") for t in firewall_tasks]
-        self.assertIn("Assert AoE LAN proxy firewall inputs are valid", firewall_task_names)
-        self.assertIn("Resolve AoE LAN proxy firewall allowlist address", firewall_task_names)
-        self.assertIn("Assert AoE LAN proxy firewall host resolution succeeded", firewall_task_names)
-        self.assertIn("Install AoE LAN proxy firewall package", firewall_task_names)
-        self.assertIn("Deploy AoE LAN proxy firewall rules", firewall_task_names)
-        self.assertIn("Deploy AoE LAN proxy firewall service", firewall_task_names)
-        self.assertIn("Enable AoE LAN proxy firewall service", firewall_task_names)
-        self.assertIn("Flush AoE LAN proxy firewall handlers", firewall_task_names)
-        self.assertIn("Stop AoE LAN proxy firewall service when disabled", firewall_task_names)
-        self.assertIn("Remove AoE LAN proxy firewall rules when disabled", firewall_task_names)
+        self.assertIn("Assert workstation origin firewall inputs are valid", firewall_task_names)
+        self.assertIn("Resolve workstation origin firewall allowlist address", firewall_task_names)
+        self.assertIn("Assert workstation origin firewall host resolution succeeded", firewall_task_names)
+        self.assertIn("Install workstation origin firewall package", firewall_task_names)
+        self.assertIn("Deploy workstation origin firewall rules", firewall_task_names)
+        self.assertIn("Deploy workstation origin firewall service", firewall_task_names)
+        self.assertIn("Enable workstation origin firewall service", firewall_task_names)
+        self.assertIn("Flush workstation origin firewall handlers", firewall_task_names)
+        self.assertIn("Stop legacy AoE LAN proxy firewall service", firewall_task_names)
+        self.assertIn("Remove legacy AoE LAN proxy firewall table", firewall_task_names)
+        self.assertIn("Remove legacy AoE LAN proxy firewall rules", firewall_task_names)
+        replacement_activation_and_legacy_cleanup = [
+            "Enable workstation origin firewall service",
+            "Flush workstation origin firewall handlers",
+            "Stop legacy AoE LAN proxy firewall service",
+            "Remove legacy AoE LAN proxy firewall table",
+            "Remove legacy AoE LAN proxy firewall rules",
+        ]
+        self.assertEqual(
+            [firewall_task_names.index(name) for name in replacement_activation_and_legacy_cleanup],
+            sorted(firewall_task_names.index(name) for name in replacement_activation_and_legacy_cleanup),
+            msg="replacement firewall activation must complete before ordered legacy AoE cleanup",
+        )
         self.assertIn("Validate workstation persistent home mounts", persistent_home_task_names)
         self.assertIn("Ensure workstation persistent home targets exist", persistent_home_task_names)
         self.assertIn("Inspect workstation persistent home paths", persistent_home_task_names)
@@ -446,20 +461,21 @@ class WorkstationBaselineRoleTests(unittest.TestCase):
         for expected_fragment in (
             "getent",
             "ahostsv4",
-            "workstation_aoe_proxy_firewall_allowed_hosts",
-            "workstation_aoe_proxy_firewall_nft_path",
-            "workstation_aoe_proxy_firewall_service_path",
+            "workstation_origin_firewall_protected_ports",
+            "workstation_origin_firewall_allowed_hosts",
+            "workstation_origin_firewall_nft_path",
+            "workstation_origin_firewall_service_path",
             "workstation-aoe-proxy-firewall.service",
             "daemon_reload: true",
             "state: absent",
             "delegate_to: localhost",
             "check_mode: false",
             "failed_when: false",
-            "notify: Restart AoE LAN proxy firewall",
+            "notify: Restart workstation origin firewall",
             "could not resolve any IPv4 address for",
-            "requires exactly one allowed inventory",
-            "workstation_aoe_proxy_firewall_allowed_endpoint",
-            "workstation_aoe_proxy_firewall_allowed_host",
+            "exactly one allowed inventory",
+            "workstation_origin_firewall_allowed_endpoint",
+            "workstation_origin_firewall_allowed_host",
         ):
             self.assertIn(expected_fragment, rendered_firewall_tasks)
 
@@ -470,32 +486,79 @@ class WorkstationBaselineRoleTests(unittest.TestCase):
         self.assertIn("state: started", rendered_firewall_tasks)
         self.assertNotIn("state: restarted", rendered_firewall_tasks)
 
-        firewall_template = (
-            REPO_ROOT / "playbooks/roles/config/lxc_workstation_baseline/templates/workstation-aoe-proxy.nft.j2"
-        ).read_text(encoding="utf-8")
-        self.assertIn('iifname "lo" tcp dport {{ workstation_aoe_proxy_firewall_port }} accept', firewall_template)
-        self.assertIn('@allowed_ipv4', firewall_template)
-        self.assertIn('tcp dport {{ workstation_aoe_proxy_firewall_port }} drop', firewall_template)
-        self.assertIn('iifname "lo" tcp dport {{ workstation_openclaw_gateway_port }} accept', firewall_template)
-        self.assertIn('tcp dport {{ workstation_openclaw_gateway_port }} ip saddr @allowed_ipv4 accept', firewall_template)
-        self.assertIn('tcp dport {{ workstation_openclaw_gateway_port }} drop', firewall_template)
+        template_dir = REPO_ROOT / "playbooks/roles/config/lxc_workstation_baseline/templates"
+        environment = Environment(
+            loader=FileSystemLoader(template_dir),
+            undefined=StrictUndefined,
+            autoescape=False,
+            keep_trailing_newline=True,
+        )
+        rendered_firewall = environment.get_template("workstation-origin-firewall.nft.j2").render(
+            workstation_origin_firewall_protected_ports=[4001, 9119, 18789, 8788],
+            workstation_origin_firewall_allowed_ipv4=["192.0.2.10", "192.0.2.11"],
+        )
+        self.assertIn("elements = { 4001, 9119, 18789, 8788 }", rendered_firewall)
+        self.assertIn("elements = { 192.0.2.10, 192.0.2.11 }", rendered_firewall)
+        self.assertIn('iifname "lo" tcp dport @protected_tcp_ports accept', rendered_firewall)
+        self.assertIn('ip saddr @allowed_ipv4 tcp dport @protected_tcp_ports accept', rendered_firewall)
+        self.assertIn('tcp dport @protected_tcp_ports drop', rendered_firewall)
+        loopback_accept_position = rendered_firewall.index(
+            'iifname "lo" tcp dport @protected_tcp_ports accept'
+        )
+        allowed_ipv4_accept_position = rendered_firewall.index(
+            'ip saddr @allowed_ipv4 tcp dport @protected_tcp_ports accept'
+        )
+        protected_port_drop_position = rendered_firewall.index('tcp dport @protected_tcp_ports drop')
+        self.assertLess(loopback_accept_position, allowed_ipv4_accept_position)
+        self.assertLess(allowed_ipv4_accept_position, protected_port_drop_position)
+        for unprotected_port in (80, 443, 22):
+            self.assertNotIn(str(unprotected_port), rendered_firewall)
 
-        firewall_service_template = (
-            REPO_ROOT
-            / "playbooks/roles/config/lxc_workstation_baseline/templates/workstation-aoe-proxy-firewall.service.j2"
-        ).read_text(encoding="utf-8")
-        self.assertIn('ExecStart=/usr/sbin/nft -f /etc/nftables.d/workstation-aoe-proxy.nft', firewall_service_template)
-        self.assertIn('ExecStop=/usr/sbin/nft delete table inet workstation_aoe_proxy', firewall_service_template)
-        self.assertIn('RemainAfterExit=yes', firewall_service_template)
+        rendered_firewall_service = environment.get_template(
+            "workstation-origin-firewall.service.j2"
+        ).render(workstation_origin_firewall_nft_path="/tmp/firewall/custom-origin.nft")
+        self.assertIn(
+            "ExecStart=/usr/sbin/nft -f /tmp/firewall/custom-origin.nft",
+            rendered_firewall_service,
+        )
+        self.assertIn(
+            "ExecStop=/usr/sbin/nft delete table inet workstation_origin",
+            rendered_firewall_service,
+        )
+        self.assertIn("RemainAfterExit=yes", rendered_firewall_service)
+
+        enabled_service_task = next(
+            task
+            for task in firewall_tasks
+            if task.get("name") == "Enable workstation origin firewall service"
+        )
+        self.assertEqual(
+            enabled_service_task["ansible.builtin.systemd"]["name"],
+            "{{ workstation_origin_firewall_service_path | basename }}",
+        )
+        disabled_service_task = next(
+            task
+            for task in firewall_tasks
+            if task.get("name") == "Stop workstation origin firewall service when disabled"
+        )
+        self.assertEqual(
+            disabled_service_task["ansible.builtin.systemd"]["name"],
+            "{{ workstation_origin_firewall_service_path | basename }}",
+        )
 
         firewall_handlers = load_yaml(
             REPO_ROOT / "playbooks/roles/config/lxc_workstation_baseline/handlers/main.yml"
         )
         self.assertEqual(len(firewall_handlers), 1)
-        self.assertEqual(firewall_handlers[0]["name"], "Restart AoE LAN proxy firewall")
-        rendered_firewall_handlers = yaml.safe_dump(firewall_handlers, sort_keys=True)
-        self.assertIn("workstation-aoe-proxy-firewall.service", rendered_firewall_handlers)
-        self.assertIn("state: restarted", rendered_firewall_handlers)
+        self.assertEqual(firewall_handlers[0]["name"], "Restart workstation origin firewall")
+        self.assertEqual(
+            firewall_handlers[0]["ansible.builtin.systemd"]["name"],
+            "{{ workstation_origin_firewall_service_path | basename }}",
+        )
+        self.assertEqual(
+            firewall_handlers[0]["ansible.builtin.systemd"]["state"],
+            "restarted",
+        )
 
     def test_workstation_bootstrap_deploy_wrapper_removed(self) -> None:
         self.assertFalse((REPO_ROOT / "scripts/workstation-bootstrap-deploy.sh").exists())

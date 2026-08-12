@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression test for AoE firewall allowlist host resolution behavior."""
+"""Regression test for workstation origin firewall host resolution behavior."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PLAYBOOK = REPO_ROOT / "tests" / "regression" / "fixtures" / "workstation_aoe_firewall_resolution_failure.yml"
+PLAYBOOK = REPO_ROOT / "tests" / "regression" / "fixtures" / "workstation_origin_firewall_resolution_failure.yml"
 ANSIBLE_PLAYBOOK = "uv run --locked ansible-playbook".split()
 
 
@@ -25,8 +25,8 @@ def run_playbook(playbook: Path, temp_root: str) -> subprocess.CompletedProcess[
     )
 
 
-def test_workstation_aoe_firewall_fails_when_allowed_host_has_no_ipv4_resolution() -> None:
-    with tempfile.TemporaryDirectory(prefix="workstation-aoe-firewall-resolution-failure-") as temp_root:
+def test_workstation_origin_firewall_fails_when_allowed_host_has_no_ipv4_resolution() -> None:
+    with tempfile.TemporaryDirectory(prefix="workstation-origin-firewall-resolution-failure-") as temp_root:
         result = run_playbook(PLAYBOOK, temp_root)
 
     output = f"{result.stdout}\n{result.stderr}"
