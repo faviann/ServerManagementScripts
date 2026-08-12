@@ -461,6 +461,7 @@ def build_repository_snapshot(
         runbook = _checked_in_runbook(resolved_root, stack_identity)
         if runbook is not None:
             candidates += (runbook,)
+        candidates = tuple(sorted(set(candidates)))
         checked_in = {
             path: _tree_entry(resolved_root, "HEAD", path) is not None
             for path in candidates

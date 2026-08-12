@@ -121,6 +121,52 @@ def test_clean_default_branch_checkout_has_publishable_stack_snapshot(
     }
 
 
+def test_assisted_runbook_alias_of_compose_is_snapshotted_once(
+    tmp_path: Path,
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    stack = repository / "stacks/media/example"
+    (stack / "stack.yaml").write_text(
+        """\
+updates:
+  mode: images
+  track: stable
+  procedure:
+    mode: assisted
+    runbook: compose.yaml
+""",
+        encoding="utf-8",
+    )
+    git(repository, "add", "stacks/media/example/stack.yaml")
+    git(repository, "commit", "-m", "add aliased assisted runbook")
+    commit = git(repository, "rev-parse", "HEAD")
+    reader = lambda owner, name: GitHubRepositoryState("main", commit)
+
+    clean = build_repository_snapshot(
+        repository, ["stacks/media/example"], github_reader=reader
+    )
+    (stack / "compose.yaml").write_text("locally changed\n", encoding="utf-8")
+    dirty = build_repository_snapshot(
+        repository, ["stacks/media/example"], github_reader=reader
+    )
+
+    assert clean.snapshot is not None
+    assert dirty.snapshot is not None
+    clean_stack = clean.snapshot.stacks[0]
+    dirty_stack = dirty.snapshot.stacks[0]
+    assert clean_stack.relevant_inputs == (
+        "stacks/media/example/compose.yaml",
+        "stacks/media/example/stack.yaml",
+    )
+    assert clean_stack.changed_inputs == ()
+    assert dirty_stack.relevant_inputs == clean_stack.relevant_inputs
+    assert dirty_stack.changed_inputs == ("stacks/media/example/compose.yaml",)
+    assert clean_stack.fingerprint == dirty_stack.fingerprint
+    assert clean_stack.fingerprint == (
+        "4fe45a5f169794327bfdd37680f800f2ab5978ab790318d711c0eefc160af581"
+    )
+
+
 def test_checkout_not_at_remote_default_branch_commit_fails_before_stack_discovery(
     tmp_path: Path,
 ) -> None:
