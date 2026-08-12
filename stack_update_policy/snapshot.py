@@ -238,6 +238,22 @@ def _index_has_path(repository: Path, path: str) -> bool:
     )
 
 
+def _has_safe_worktree_parents(repository: Path, path: str) -> bool:
+    """Return whether every directory above a worktree leaf is real and local."""
+    current = repository
+    try:
+        repository_mode = repository.lstat().st_mode
+        if not stat.S_ISDIR(repository_mode):
+            return False
+        for part in PurePosixPath(path).parts[:-1]:
+            current = current / part
+            if not stat.S_ISDIR(current.lstat().st_mode):
+                return False
+    except OSError:
+        return False
+    return True
+
+
 def _fingerprint(repository: Path, paths: Sequence[str]) -> str:
     digest = hashlib.sha256()
     for path in paths:
@@ -269,6 +285,8 @@ def _blob_differs_from_worktree(
 ) -> bool:
     checked_in = _git(repository, "show", f"HEAD:{path}", text=False)
     assert isinstance(checked_in, bytes)
+    if not _has_safe_worktree_parents(repository, path):
+        return True
     filesystem_path = repository / path
     if not os.path.lexists(filesystem_path):
         return True
@@ -285,8 +303,14 @@ def _blob_differs_from_worktree(
 
 
 def _tree_differs_from_worktree(repository: Path, path: str) -> bool:
+    if not _has_safe_worktree_parents(repository, path):
+        return True
     root = repository / path
-    if not root.is_dir() or root.is_symlink():
+    try:
+        root_mode = root.lstat().st_mode
+    except OSError:
+        return True
+    if not stat.S_ISDIR(root_mode):
         return True
     raw = _git(
         repository, "ls-tree", "-r", "-t", "-z", "HEAD", "--", path, text=False
@@ -307,7 +331,13 @@ def _tree_differs_from_worktree(repository: Path, path: str) -> bool:
         expected_paths.add(entry_path)
         filesystem_path = repository / entry_path
         if object_type == "tree":
-            if not filesystem_path.is_dir() or filesystem_path.is_symlink():
+            if not _has_safe_worktree_parents(repository, entry_path):
+                return True
+            try:
+                filesystem_mode = filesystem_path.lstat().st_mode
+            except OSError:
+                return True
+            if not stat.S_ISDIR(filesystem_mode):
                 return True
         elif object_type == "blob":
             if _blob_differs_from_worktree(repository, entry_path, mode):
@@ -339,8 +369,14 @@ def _tree_differs_from_worktree(repository: Path, path: str) -> bool:
 def _gitlink_differs_from_worktree(
     repository: Path, path: str, head_object_id: str
 ) -> bool:
+    if not _has_safe_worktree_parents(repository, path):
+        return True
     filesystem_path = repository / path
-    if not filesystem_path.is_dir() or filesystem_path.is_symlink():
+    try:
+        filesystem_mode = filesystem_path.lstat().st_mode
+    except OSError:
+        return True
+    if not stat.S_ISDIR(filesystem_mode):
         return True
     top_level = Path(
         str(_git(filesystem_path, "rev-parse", "--show-toplevel")).strip()
@@ -374,7 +410,9 @@ def _working_tree_differs_from_head(repository: Path, path: str) -> bool:
         return _tree_differs_from_worktree(repository, path)
     if head_mode == "160000" and head_type == "commit":
         return _gitlink_differs_from_worktree(repository, path, head_object_id)
-    return not os.path.lexists(repository / path)
+    return not _has_safe_worktree_parents(repository, path) or not os.path.lexists(
+        repository / path
+    )
 
 
 def _index_differs_from_head(repository: Path, path: str) -> bool:
@@ -448,14 +486,33 @@ def build_repository_snapshot(
         )
         return RepositorySnapshotBuild((error,), None)
     try:
-        origin = str(
-            _git(resolved_root, "config", "--get", "remote.origin.url")
-        ).rstrip("\r\n")
+        raw_origins = _git(
+            resolved_root,
+            "config",
+            "--null",
+            "--get-all",
+            "remote.origin.url",
+            text=False,
+        )
+        assert isinstance(raw_origins, bytes)
     except subprocess.CalledProcessError:
         error = SnapshotError(
             "missing-origin", "repository.origin", "origin remote is required"
         )
         return RepositorySnapshotBuild((error,), None)
+    encoded_origins = raw_origins.split(b"\0")
+    if not raw_origins.endswith(b"\0"):
+        encoded_origins = []
+    else:
+        encoded_origins.pop()
+    if len(encoded_origins) != 1 or not encoded_origins[0]:
+        error = SnapshotError(
+            "invalid-origin",
+            "repository.origin",
+            "origin must have exactly one nonempty URL",
+        )
+        return RepositorySnapshotBuild((error,), None)
+    origin = os.fsdecode(encoded_origins[0])
     identity = _github_identity(origin)
     if identity is None:
         error = SnapshotError(
@@ -585,7 +642,10 @@ def build_repository_snapshot(
                     for path in candidates
                     if checked_in[path]
                     or indexed[path]
-                    or os.path.lexists(resolved_root / path)
+                    or (
+                        _has_safe_worktree_parents(resolved_root, path)
+                        and os.path.lexists(resolved_root / path)
+                    )
                 )
             )
             if not paths:

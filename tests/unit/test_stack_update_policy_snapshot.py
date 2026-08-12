@@ -754,6 +754,83 @@ updates:
     assert snapshot.complete is False
 
 
+def test_symlinked_runbook_parent_outside_repository_makes_stack_incomplete(
+    tmp_path: Path,
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    stack = repository / "stacks/media/example"
+    policy_path = "stacks/media/example/stack.yaml"
+    runbook_path = "stacks/media/example/docs/upgrade.md"
+    (stack / "stack.yaml").write_text(
+        """\
+updates:
+  mode: images
+  track: stable
+  procedure:
+    mode: assisted
+    runbook: docs/upgrade.md
+""",
+        encoding="utf-8",
+    )
+    (stack / "docs").mkdir()
+    checked_in_runbook = stack / "docs/upgrade.md"
+    checked_in_runbook.write_text("# Upgrade\n", encoding="utf-8")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "add assisted runbook")
+    commit = git(repository, "rev-parse", "HEAD")
+
+    external_docs = tmp_path / "external-docs"
+    external_docs.mkdir()
+    (external_docs / "upgrade.md").write_bytes(checked_in_runbook.read_bytes())
+    checked_in_runbook.unlink()
+    (stack / "docs").rmdir()
+    (stack / "docs").symlink_to(external_docs, target_is_directory=True)
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+
+    assert result.errors == ()
+    assert result.snapshot is not None
+    snapshot = result.snapshot.stacks[0]
+    assert snapshot.relevant_inputs == (
+        "stacks/media/example/compose.yaml",
+        runbook_path,
+        policy_path,
+    )
+    assert snapshot.changed_inputs == (runbook_path,)
+    assert snapshot.complete is False
+
+
+def test_symlinked_stack_directory_outside_repository_makes_stack_incomplete(
+    tmp_path: Path,
+) -> None:
+    repository, commit = create_repository(tmp_path)
+    stack_identity = "stacks/media/example"
+    stack = repository / stack_identity
+    external_stack = tmp_path / "external-stack"
+    stack.rename(external_stack)
+    stack.symlink_to(external_stack, target_is_directory=True)
+
+    result = build_repository_snapshot(
+        repository,
+        [stack_identity],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+
+    assert result.errors == ()
+    assert result.snapshot is not None
+    snapshot = result.snapshot.stacks[0]
+    assert snapshot.relevant_inputs == (
+        "stacks/media/example/compose.yaml",
+        "stacks/media/example/stack.yaml",
+    )
+    assert snapshot.changed_inputs == snapshot.relevant_inputs
+    assert snapshot.complete is False
+
+
 def test_binary_checked_in_policy_has_deterministic_snapshot_without_runbook(
     tmp_path: Path,
 ) -> None:
@@ -1073,6 +1150,60 @@ def test_endpoint_unsafe_github_origin_fails_before_reader(
 ) -> None:
     repository, _ = create_repository(tmp_path)
     git(repository, "remote", "set-url", "origin", origin)
+
+    def unexpected_reader(owner: str, name: str) -> GitHubRepositoryState:
+        raise AssertionError(f"reader called for {owner}/{name}")
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=unexpected_reader,
+    )
+
+    assert result.snapshot is None
+    assert [(error.code, error.path) for error in result.errors] == [
+        ("invalid-origin", "repository.origin")
+    ]
+
+
+@pytest.mark.parametrize("line_ending", ["\n", "\r"])
+def test_origin_line_ending_is_preserved_and_rejected_before_reader(
+    tmp_path: Path, line_ending: str
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    git(
+        repository,
+        "config",
+        "remote.origin.url",
+        f"https://github.com/example/homelab.git{line_ending}",
+    )
+
+    def unexpected_reader(owner: str, name: str) -> GitHubRepositoryState:
+        raise AssertionError(f"reader called for {owner}/{name}")
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=unexpected_reader,
+    )
+
+    assert result.snapshot is None
+    assert [(error.code, error.path) for error in result.errors] == [
+        ("invalid-origin", "repository.origin")
+    ]
+
+
+def test_multiple_origin_urls_are_ambiguous_and_fail_before_reader(
+    tmp_path: Path,
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    git(
+        repository,
+        "config",
+        "--add",
+        "remote.origin.url",
+        "git@github.com:other/homelab.git",
+    )
 
     def unexpected_reader(owner: str, name: str) -> GitHubRepositoryState:
         raise AssertionError(f"reader called for {owner}/{name}")
