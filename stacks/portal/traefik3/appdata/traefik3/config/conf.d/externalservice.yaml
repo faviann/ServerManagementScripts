@@ -37,6 +37,24 @@ http:
       middlewares:
         - local-ip-restriction
 
+    collie-auth-recovery:
+      rule: "Host(`collie.admin.faviann.com`) && PathPrefix(`/auth/`)"
+      entryPoints: websecure
+      service: authentik
+      priority: 1002
+      middlewares:
+        - local-ip-restriction
+        - collie-auth-recovery
+
+    collie:
+      rule: "Host(`collie.admin.faviann.com`)"
+      entryPoints: websecure
+      service: collie-workstation
+      priority: 1000
+      middlewares:
+        - local-ip-restriction
+        - protected-edge-auth@file
+
     authentik-outpost-ai:
       rule: "Host(`ai.local.faviann.com`) && PathPrefix(`/outpost.goauthentik.io`)"
       entryPoints: websecure
@@ -136,6 +154,10 @@ http:
       loadBalancer:
         servers:
           - url: "http://workstation.faviann.vms:9119"
+    collie-workstation:
+      loadBalancer:
+        servers:
+          - url: "http://workstation.faviann.vms:8788"
     openclaw-dashboard:
       loadBalancer:
         servers:
@@ -157,6 +179,11 @@ http:
       headers:
         customRequestHeaders:
           X-OpenClaw-Scopes: "operator.read,operator.write,operator.admin"
+    collie-auth-recovery:
+      redirectRegex:
+        regex: "^https://collie\\.admin\\.faviann\\.com/auth/.*$"
+        replacement: "https://collie.admin.faviann.com/outpost.goauthentik.io/start?rd=https%3A%2F%2Fcollie.admin.faviann.com%2F"
+        permanent: false
     local-ip-restriction:
       IPAllowList:
         sourceRange:

@@ -117,7 +117,7 @@ Rules:
 - `stack.yaml` is not copied to `/conf/docker/stacks`.
 - During deployment, stack sync parses `stack.yaml` only as
   `lxc_stack_sync_manifest_plan.stack_metadata`; repository policy validation
-  independently reads it to validate and normalize the image update policy.
+  independently reads it to validate and normalize the stack update policy.
 - `stack.yaml` must not contain secrets, vault references, API tokens, passwords, private keys, or credentials.
 - Neither use loads `stack.yaml` into Ansible variable scope: it does not define
   Ansible variables or override host vars.
@@ -138,7 +138,37 @@ updates:
     runbook: docs/upgrade.md
 ```
 
-The runbook path is relative to the stack directory and must resolve to a repository file. Per-service assistance and permanent service exclusions are unsupported. A missing `stack.yaml`, missing `updates`, unsupported mode (including `vendor` in this validator), unknown service, missing image update track, or secret-shaped metadata is a strict validation failure.
+The runbook path is relative to the stack directory and must resolve to a repository file. Per-service assistance and permanent service exclusions are unsupported. A missing `stack.yaml`, missing `updates`, unknown service, missing image update track, or secret-shaped metadata is a strict validation failure.
+
+### Vendor Update Policy
+
+A vendor-tracked stack preserves an official upstream Compose file byte for byte
+as `compose.yaml`, with its local behavior isolated in the optional
+`compose.override.yaml` layer:
+
+```yaml
+updates:
+  mode: vendor
+  track: stable
+  upstream:
+    repository: https://github.com/goauthentik/authentik
+    compose_path: docker-compose.yml
+  services:
+    independently-released-helper:
+      track: stable
+```
+
+`updates.upstream.repository` must be one canonical
+`https://github.com/<owner>/<repository>` URL,
+`updates.upstream.compose_path` must stay relative to that repository, and
+`updates.track` selects the maintained vendor line. The validator resolves that track to a commit and
+requires the configured path at that commit to exactly match `compose.yaml`.
+Unlisted services move with the vendor baseline; only independently tracked
+images belong in `updates.services`. Vendor bases named `compose.yml`, local
+overrides named `compose.override.yml`, direct edits to the vendor base, and
+layouts requiring assisted restructuring fail strict validation. Such a stack
+should use image mode until its upstream base and local override can follow the
+vendor contract.
 
 Validate exactly one repo-managed stack without changing repository or deployed state:
 
@@ -147,7 +177,7 @@ uv run --locked python -B -m stack_update_policy validate \
   --repository-root . stacks/<host>/<stack>
 ```
 
-The command writes schema-versioned JSON to standard output, diagnostics to standard error, and exits nonzero for an invalid contract. Its normalized result is the shared validation model for later planning and Create Stack integration; consumers should not reparse policy rules independently.
+The command writes schema-versioned JSON to standard output, diagnostics to standard error, and exits nonzero for an invalid contract. Its normalized result is the shared validation model for later planning and Create Stack integration. It exposes the effective image-bearing services and image tracks, vendor authority and resolved baseline when applicable, vendor track, assisted procedure, explicit low-confidence policy, and foundational controlled-migration status. Consumers should not reparse raw metadata or infer service risk from image names.
 
 ### Repository Input Snapshot API
 
