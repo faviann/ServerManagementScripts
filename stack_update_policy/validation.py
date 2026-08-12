@@ -412,11 +412,40 @@ def _resolve_compose(stack_root: Path, errors: list[ValidationError]) -> dict[st
     try:
         effective = json.loads(completed.stdout)
     except json.JSONDecodeError:
-        _error(errors, "compose-resolution", "compose", "Docker Compose returned invalid JSON")
+        _error(
+            errors,
+            "compose-resolution",
+            "compose",
+            "Docker Compose returned an invalid stack definition",
+        )
+        return None
+    if not isinstance(effective, dict):
+        _error(
+            errors,
+            "compose-resolution",
+            "compose",
+            "Docker Compose returned an invalid stack definition",
+        )
         return None
     if not isinstance(effective.get("services"), dict):
-        _error(errors, "compose-resolution", "compose.services", "effective Compose services are missing")
+        _error(
+            errors,
+            "compose-resolution",
+            "compose",
+            "Docker Compose returned an invalid stack definition",
+        )
         return None
+    for service in effective["services"].values():
+        if not isinstance(service, dict) or (
+            "image" in service and not _is_nonempty_string(service["image"])
+        ):
+            _error(
+                errors,
+                "compose-resolution",
+                "compose",
+                "Docker Compose returned an invalid stack definition",
+            )
+            return None
     return effective
 
 
@@ -579,7 +608,12 @@ def _validate_image_policy(
         service_track = policy.get("track") if isinstance(policy, dict) else None
         track = service_track or default_track
         if not _is_nonempty_string(track):
-            _error(errors, "missing-track", f"stack.yaml.updates.services.{service_name}", "image-bearing service has no effective image update track")
+            _error(
+                errors,
+                "missing-track",
+                _mapping_child_path("stack.yaml.updates.services", service_name),
+                "image-bearing service has no effective image update track",
+            )
             continue
         resolved[service_name] = {"image": str(service["image"]), "track": track}
     return resolved, procedure

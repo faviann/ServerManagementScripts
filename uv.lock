@@ -816,6 +816,7 @@ dependencies = [
     { name = "ansible" },
     { name = "ansible-lint" },
     { name = "proxmoxer" },
+    { name = "pyyaml" },
     { name = "requests" },
     { name = "yamllint" },
 ]
@@ -830,6 +831,7 @@ requires-dist = [
     { name = "ansible", specifier = ">=13.5.0" },
     { name = "ansible-lint", specifier = ">=24.0.0" },
     { name = "proxmoxer", specifier = ">=2.0" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "requests", specifier = ">=1.1" },
     { name = "yamllint", specifier = ">=1.32.0" },
 ]

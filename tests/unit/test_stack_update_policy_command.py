@@ -50,6 +50,7 @@ def run_validate(
     return subprocess.run(
         [
             sys.executable,
+            "-B",
             "-m",
             "stack_update_policy",
             "validate",
@@ -63,6 +64,23 @@ def run_validate(
         check=False,
         env=env,
     )
+
+
+def run_validate_with_compose_json(
+    repository: Path, tmp_path: Path, compose_json: str
+) -> subprocess.CompletedProcess[str]:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker = fake_bin / "docker"
+    docker.write_text(
+        "#!/bin/sh\nprintf '%s\\n' \"$COMPOSE_JSON\"\n",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    environment = os.environ.copy()
+    environment["COMPOSE_JSON"] = compose_json
+    environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+    return run_validate(repository, env=environment)
 
 
 def test_valid_image_tracked_stack_returns_reusable_versioned_result(tmp_path: Path) -> None:
@@ -931,6 +949,95 @@ def test_compose_failure_diagnostics_do_not_echo_docker_stderr(tmp_path: Path) -
     assert marker not in completed.stderr
 
 
+@pytest.mark.parametrize("compose_json", ["[]", "null"])
+def test_non_mapping_compose_json_returns_a_structured_resolution_failure(
+    tmp_path: Path, compose_json: str
+) -> None:
+    write_valid_stack(tmp_path)
+
+    completed = run_validate_with_compose_json(tmp_path, tmp_path, compose_json)
+
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout)["errors"] == [
+        {
+            "code": "compose-resolution",
+            "message": "Docker Compose returned an invalid stack definition",
+            "path": "compose",
+        }
+    ]
+    assert "Traceback" not in completed.stderr
+
+
+@pytest.mark.parametrize(
+    "service",
+    [None, [], "example/app:1.2", 7],
+)
+def test_non_mapping_compose_service_returns_a_structured_resolution_failure(
+    tmp_path: Path, service: object
+) -> None:
+    write_valid_stack(tmp_path)
+    compose_json = json.dumps({"services": {"app": service}})
+
+    completed = run_validate_with_compose_json(tmp_path, tmp_path, compose_json)
+
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout)["errors"] == [
+        {
+            "code": "compose-resolution",
+            "message": "Docker Compose returned an invalid stack definition",
+            "path": "compose",
+        }
+    ]
+    assert "Traceback" not in completed.stderr
+
+
+@pytest.mark.parametrize("image", [None, "", "   ", [], 7])
+def test_invalid_effective_compose_image_returns_a_structured_resolution_failure(
+    tmp_path: Path, image: object
+) -> None:
+    write_valid_stack(tmp_path)
+    compose_json = json.dumps({"services": {"app": {"image": image}}})
+
+    completed = run_validate_with_compose_json(tmp_path, tmp_path, compose_json)
+
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout)["errors"] == [
+        {
+            "code": "compose-resolution",
+            "message": "Docker Compose returned an invalid stack definition",
+            "path": "compose",
+        }
+    ]
+    assert "Traceback" not in completed.stderr
+
+
+def test_missing_track_diagnostic_redacts_secret_shaped_compose_service_name(
+    tmp_path: Path,
+) -> None:
+    stack = write_valid_stack(tmp_path)
+    metadata = (stack / "stack.yaml").read_text(encoding="utf-8")
+    (stack / "stack.yaml").write_text(
+        metadata.replace("  track: stable\n", ""), encoding="utf-8"
+    )
+    marker = "api_token_fixture_marker"
+    compose_json = json.dumps(
+        {"services": {marker: {"image": "example/app:1.2"}}}
+    )
+
+    completed = run_validate_with_compose_json(tmp_path, tmp_path, compose_json)
+
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout)["errors"] == [
+        {
+            "code": "missing-track",
+            "message": "image-bearing service has no effective image update track",
+            "path": "stack.yaml.updates.services.<secret-key>",
+        }
+    ]
+    assert marker not in completed.stdout
+    assert marker not in completed.stderr
+
+
 def test_malformed_metadata_diagnostics_do_not_echo_yaml_input(tmp_path: Path) -> None:
     stack = write_valid_stack(tmp_path)
     secret_marker = "fixture-value-that-must-not-be-echoed"
@@ -1240,3 +1347,94 @@ exit 97
         + str(stack / "compose.yaml")
         + " config --format json --no-interpolate --no-env-resolution"
     ]
+
+
+def test_documented_module_command_leaves_its_repository_byte_for_byte_unchanged(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    package = repository / "stack_update_policy"
+    package.mkdir(parents=True)
+    for source in (REPO_ROOT / "stack_update_policy").glob("*.py"):
+        shutil.copy2(source, package / source.name)
+    write_valid_stack(repository)
+    assert not list(repository.rglob("__pycache__"))
+    assert not list(repository.rglob("*.pyc"))
+
+    real_git = shutil.which("git")
+    assert real_git is not None
+    subprocess.run([real_git, "init", "-q"], cwd=repository, check=True)
+    subprocess.run(
+        [real_git, "config", "user.name", "Policy Test"],
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(
+        [real_git, "config", "user.email", "policy@example.invalid"],
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run([real_git, "add", "."], cwd=repository, check=True)
+    subprocess.run(
+        [real_git, "commit", "-qm", "fixture"], cwd=repository, check=True
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker = fake_bin / "docker"
+    docker.write_text(
+        "#!/bin/sh\nprintf '%s\\n' "
+        "'{\"services\":{\"app\":{\"image\":\"example/app:1.2\"}}}'\n",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+
+    def repository_snapshot() -> tuple[set[str], dict[str, bytes]]:
+        paths = {
+            path.relative_to(repository).as_posix()
+            for path in repository.rglob("*")
+        }
+        bytes_by_path = {
+            path.relative_to(repository).as_posix(): path.read_bytes()
+            for path in repository.rglob("*")
+            if path.is_file()
+        }
+        return paths, bytes_by_path
+
+    before_snapshot = repository_snapshot()
+    before_status = subprocess.check_output(
+        [real_git, "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=repository,
+        text=True,
+    )
+    environment = os.environ.copy()
+    environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-m",
+            "stack_update_policy",
+            "validate",
+            "--repository-root",
+            str(repository),
+            "stacks/media/example",
+        ],
+        cwd=repository,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=environment,
+    )
+
+    assert completed.returncode == 0
+    assert json.loads(completed.stdout)["valid"] is True
+    assert repository_snapshot() == before_snapshot
+    assert (
+        subprocess.check_output(
+            [real_git, "status", "--porcelain=v1", "--untracked-files=all"],
+            cwd=repository,
+            text=True,
+        )
+        == before_status
+    )

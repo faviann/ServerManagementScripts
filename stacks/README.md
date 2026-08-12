@@ -143,7 +143,7 @@ The runbook path is relative to the stack directory and must resolve to a reposi
 Validate exactly one repo-managed stack without changing repository or deployed state:
 
 ```bash
-uv run --locked python -m stack_update_policy validate \
+uv run --locked python -B -m stack_update_policy validate \
   --repository-root . stacks/<host>/<stack>
 ```
 
