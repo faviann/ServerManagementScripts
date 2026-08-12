@@ -130,6 +130,42 @@ def test_lookup_warning_is_incomplete_only_for_its_stack(tmp_path: Path) -> None
     assert failed["limitations"] == [{"kind": "dependency-lookup-warning", "message": "lookup unavailable"}]
 
 
+def test_vendor_lookup_warning_preserves_successful_stack_in_same_batch(tmp_path: Path) -> None:
+    vendor_stack = {
+        "host": "media",
+        "stack": "failed-vendor",
+        "tracking_mode": "vendor",
+        "vendor": {
+            "repository": "https://github.com/example/photos",
+            "current_commit": "def456",
+            "candidate_commit": "abc123",
+        },
+        "services": [{
+            "service": "server",
+            "image": "example/photos",
+            "current_effective_reference": f"example/photos:2.5.0@{DIGEST_A}",
+            "candidate_effective_reference": "example/photos:2.7.5",
+            "current_digest": DIGEST_A,
+            "track": {"kind": "exact-version", "value": "2.7.5"},
+        }],
+    }
+
+    completed, _ = run_adapter(
+        tmp_path,
+        request(vendor_stack, stack("healthy")),
+        FAKE_SUCCESS,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert [item["scan_status"] for item in result["stacks"]] == ["incomplete", "complete"]
+    vendor, healthy = result["observations"]
+    assert vendor["status"] == "lookup-failed"
+    assert vendor["candidate"] is None
+    assert healthy["status"] == "candidate"
+    assert healthy["candidate"] is not None
+
+
 def test_image_exact_version_uses_readable_selected_reference_and_separate_digest(tmp_path: Path) -> None:
     value = request(stack("web"))
     service = value["stacks"][0]["services"][0]

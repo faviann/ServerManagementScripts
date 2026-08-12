@@ -264,7 +264,7 @@ def _normalize(request: dict[str, Any], index: dict[str, dict[str, Any]], batch:
         dep_data = raw_by_path[path]
         dep, updates, warnings = dep_data["dep"], dep_data["updates"], dep_data["warnings"]
         selected = None if warnings else _select(service, updates)
-        if stack["tracking_mode"] == "vendor" and selected is None:
+        if stack["tracking_mode"] == "vendor" and not warnings and selected is None:
             raise ContractError(f"Renovate did not select the required vendor candidate for {path}")
         candidate = None
         if selected:
