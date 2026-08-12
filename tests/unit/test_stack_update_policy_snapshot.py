@@ -979,6 +979,248 @@ updates:
     )
 
 
+@pytest.mark.parametrize(
+    "canonical_name",
+    [
+        "compose.yaml",
+        "compose.yml",
+        "compose.override.yaml",
+        "compose.override.yml",
+    ],
+)
+def test_checked_in_compose_symlink_binds_link_and_target(
+    tmp_path: Path, canonical_name: str
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    stack = repository / "stacks/media/example"
+    original = stack / "compose.yaml"
+    if original.exists() or original.is_symlink():
+        original.unlink()
+    fragments = stack / "fragments"
+    fragments.mkdir()
+    target = fragments / "services.yaml"
+    target.write_text("services:\n  app:\n    image: example/app:1\n", encoding="utf-8")
+    (stack / canonical_name).symlink_to("fragments/services.yaml")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", f"symlink {canonical_name}")
+    commit = git(repository, "rev-parse", "HEAD")
+    reader = lambda owner, name: GitHubRepositoryState("main", commit)
+
+    clean = build_repository_snapshot(
+        repository, ["stacks/media/example"], github_reader=reader
+    )
+    target.write_text("services:\n  changed: {}\n", encoding="utf-8")
+    dirty = build_repository_snapshot(
+        repository, ["stacks/media/example"], github_reader=reader
+    )
+
+    assert clean.snapshot is not None
+    assert dirty.snapshot is not None
+    canonical_path = f"stacks/media/example/{canonical_name}"
+    target_path = "stacks/media/example/fragments/services.yaml"
+    assert clean.snapshot.stacks[0].relevant_inputs == tuple(
+        sorted(
+            {
+                canonical_path,
+                target_path,
+                "stacks/media/example/stack.yaml",
+            }
+        )
+    )
+    assert clean.snapshot.stacks[0].complete is True
+    assert dirty.snapshot.stacks[0].changed_inputs == (target_path,)
+    assert dirty.snapshot.stacks[0].complete is False
+
+
+def test_checked_in_symlinked_policy_is_parsed_from_its_resolved_target(
+    tmp_path: Path,
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    stack = repository / "stacks/media/example"
+    policy = stack / "stack.yaml"
+    policy.unlink()
+    metadata = stack / "metadata"
+    metadata.mkdir()
+    target = metadata / "policy.yaml"
+    target.write_text(
+        "updates:\n  procedure:\n    mode: assisted\n    runbook: docs/upgrade.md\n",
+        encoding="utf-8",
+    )
+    policy.symlink_to("metadata/policy.yaml")
+    (stack / "docs").mkdir()
+    (stack / "docs/upgrade.md").write_text("# Upgrade\n", encoding="utf-8")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "symlink policy")
+    commit = git(repository, "rev-parse", "HEAD")
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+    target.write_text("updates: {}\n", encoding="utf-8")
+    dirty = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+
+    assert result.snapshot is not None
+    assert dirty.snapshot is not None
+    snapshot = result.snapshot.stacks[0]
+    assert snapshot.complete is True
+    assert snapshot.relevant_inputs == (
+        "stacks/media/example/compose.yaml",
+        "stacks/media/example/docs/upgrade.md",
+        "stacks/media/example/metadata/policy.yaml",
+        "stacks/media/example/stack.yaml",
+    )
+    assert dirty.snapshot.stacks[0].relevant_inputs == snapshot.relevant_inputs
+    assert dirty.snapshot.stacks[0].changed_inputs == (
+        "stacks/media/example/metadata/policy.yaml",
+    )
+    assert dirty.snapshot.stacks[0].complete is False
+
+
+def test_checked_in_compose_ancestor_chain_binds_every_link_and_final_target(
+    tmp_path: Path,
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    stack = repository / "stacks/media/example"
+    (stack / "compose.yaml").unlink()
+    (stack / "content").mkdir()
+    target = stack / "content/final.yaml"
+    target.write_text("services: {}\n", encoding="utf-8")
+    (stack / "fragments").symlink_to("content", target_is_directory=True)
+    (stack / "compose.yaml").symlink_to("fragments/final.yaml")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "compose link chain")
+    commit = git(repository, "rev-parse", "HEAD")
+    reader = lambda owner, name: GitHubRepositoryState("main", commit)
+
+    clean = build_repository_snapshot(
+        repository, ["stacks/media/example"], github_reader=reader
+    )
+    target.write_text("services:\n  changed: {}\n", encoding="utf-8")
+    git(repository, "add", "stacks/media/example/content/final.yaml")
+    staged = build_repository_snapshot(
+        repository, ["stacks/media/example"], github_reader=reader
+    )
+
+    assert clean.snapshot is not None
+    assert staged.snapshot is not None
+    assert clean.snapshot.stacks[0].relevant_inputs == (
+        "stacks/media/example/compose.yaml",
+        "stacks/media/example/content/final.yaml",
+        "stacks/media/example/fragments",
+        "stacks/media/example/stack.yaml",
+    )
+    assert staged.snapshot.stacks[0].changed_inputs == (
+        "stacks/media/example/content/final.yaml",
+    )
+
+
+@pytest.mark.parametrize("staged", [False, True])
+def test_checked_in_compose_link_dirtiness_makes_stack_incomplete(
+    tmp_path: Path, staged: bool
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    stack = repository / "stacks/media/example"
+    compose_path = "stacks/media/example/compose.yaml"
+    compose = repository / compose_path
+    compose.unlink()
+    (stack / "fragments").mkdir()
+    (stack / "fragments/services.yaml").write_text(
+        "services: {}\n", encoding="utf-8"
+    )
+    (stack / "fragments/alternate.yaml").write_text(
+        "services: {}\n", encoding="utf-8"
+    )
+    compose.symlink_to("fragments/services.yaml")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "symlink compose")
+    commit = git(repository, "rev-parse", "HEAD")
+    compose.unlink()
+    compose.symlink_to("fragments/alternate.yaml")
+    if staged:
+        git(repository, "add", compose_path)
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+
+    assert result.snapshot is not None
+    snapshot = result.snapshot.stacks[0]
+    assert snapshot.complete is False
+    assert snapshot.changed_inputs == (compose_path,)
+    assert "stacks/media/example/fragments/services.yaml" in snapshot.relevant_inputs
+    assert "stacks/media/example/fragments/alternate.yaml" not in snapshot.relevant_inputs
+
+
+def test_committed_compose_symlink_target_changes_snapshot_fingerprint(
+    tmp_path: Path,
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    stack = repository / "stacks/media/example"
+    compose = stack / "compose.yaml"
+    compose.unlink()
+    (stack / "fragments").mkdir()
+    target = stack / "fragments/services.yaml"
+    target.write_text("services: {}\n", encoding="utf-8")
+    compose.symlink_to("fragments/services.yaml")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "symlink compose")
+
+    def at_head() -> StackInputSnapshot:
+        commit = git(repository, "rev-parse", "HEAD")
+        result = build_repository_snapshot(
+            repository,
+            ["stacks/media/example"],
+            github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+        )
+        assert result.snapshot is not None
+        return result.snapshot.stacks[0]
+
+    original = at_head()
+    target.write_text("services:\n  changed: {}\n", encoding="utf-8")
+    git(repository, "add", "stacks/media/example/fragments/services.yaml")
+    git(repository, "commit", "-m", "change compose target")
+
+    assert at_head().fingerprint != original.fingerprint
+
+
+def test_escaping_canonical_symlink_fails_closed_without_binding_external_target(
+    tmp_path: Path,
+) -> None:
+    repository, _ = create_repository(tmp_path)
+    stack = repository / "stacks/media/example"
+    compose = stack / "compose.yaml"
+    compose.unlink()
+    external = repository / "stacks/media/shared.yaml"
+    external.write_text("services: {}\n", encoding="utf-8")
+    compose.symlink_to("../../shared.yaml")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "escaping compose link")
+    commit = git(repository, "rev-parse", "HEAD")
+
+    result = build_repository_snapshot(
+        repository,
+        ["stacks/media/example"],
+        github_reader=lambda owner, name: GitHubRepositoryState("main", commit),
+    )
+
+    assert result.snapshot is not None
+    snapshot = result.snapshot.stacks[0]
+    assert snapshot.complete is False
+    assert snapshot.relevant_inputs == (
+        "stacks/media/example/compose.yaml",
+        "stacks/media/example/stack.yaml",
+    )
+    assert "stacks/media/shared.yaml" not in snapshot.relevant_inputs
+
+
 def test_checked_in_runbook_symlink_chain_returns_each_link_and_final_target(
     tmp_path: Path,
 ) -> None:

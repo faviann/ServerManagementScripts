@@ -34,6 +34,12 @@ class GitHubRepositoryState:
 
 
 @dataclass(frozen=True)
+class _CheckedInPathResolution:
+    paths: tuple[str, ...]
+    final_path: str | None
+
+
+@dataclass(frozen=True)
 class SnapshotError:
     code: str
     path: str
@@ -435,10 +441,10 @@ def _index_differs_from_head(repository: Path, path: str) -> bool:
         raise
 
 
-def _resolve_checked_in_runbook(
+def _resolve_checked_in_path(
     repository: Path, stack_identity: str, lexical_path: str
-) -> tuple[str, ...]:
-    """Return the checked-in symlinks and final object for one policy runbook."""
+) -> _CheckedInPathResolution:
+    """Return checked-in local symlinks and the final object for one stack input."""
     stack_parts = PurePosixPath(stack_identity).parts
     lexical_parts = PurePosixPath(lexical_path).parts
     current = list(stack_parts)
@@ -453,7 +459,7 @@ def _resolve_checked_in_runbook(
         if entry is not None and entry[0] == "120000" and entry[1] == "blob":
             relevant.append(candidate)
             if candidate in visited_links:
-                return tuple(dict.fromkeys(relevant))
+                return _CheckedInPathResolution(tuple(dict.fromkeys(relevant)), None)
             visited_links.add(candidate)
             try:
                 raw_target = _git(repository, "show", f"HEAD:{candidate}", text=False)
@@ -461,75 +467,88 @@ def _resolve_checked_in_runbook(
                 target = raw_target.decode("utf-8")
                 target_path = PurePosixPath(target)
             except (UnicodeDecodeError, ValueError, subprocess.CalledProcessError):
-                return tuple(dict.fromkeys(relevant))
+                return _CheckedInPathResolution(tuple(dict.fromkeys(relevant)), None)
             if (
                 not target
                 or not _is_filesystem_encodable(target)
                 or target_path.is_absolute()
             ):
-                return tuple(dict.fromkeys(relevant))
+                return _CheckedInPathResolution(tuple(dict.fromkeys(relevant)), None)
             replacement = list(current)
             for part in target.split("/"):
                 if part in {"", "."}:
                     continue
                 if part == "..":
                     if len(replacement) == len(stack_parts):
-                        return tuple(dict.fromkeys(relevant))
+                        return _CheckedInPathResolution(
+                            tuple(dict.fromkeys(relevant)), None
+                        )
                     replacement.pop()
                 else:
                     replacement.append(part)
             if tuple(replacement[: len(stack_parts)]) != stack_parts:
-                return tuple(dict.fromkeys(relevant))
+                return _CheckedInPathResolution(tuple(dict.fromkeys(relevant)), None)
             current = list(stack_parts)
             remaining = [*replacement[len(stack_parts) :], *remaining]
             continue
         if entry is None:
-            relevant.append(PurePosixPath(candidate, *remaining).as_posix())
-            return tuple(dict.fromkeys(relevant))
+            final_path = PurePosixPath(candidate, *remaining).as_posix()
+            relevant.append(final_path)
+            return _CheckedInPathResolution(
+                tuple(dict.fromkeys(relevant)), final_path
+            )
         current.append(component)
         if not remaining:
             relevant.append(candidate)
         elif entry[1] != "tree":
             relevant.append(candidate)
-            return tuple(dict.fromkeys(relevant))
+            return _CheckedInPathResolution(tuple(dict.fromkeys(relevant)), candidate)
 
-    return tuple(dict.fromkeys(relevant))
+    final_path = relevant[-1] if relevant else lexical_path
+    return _CheckedInPathResolution(tuple(dict.fromkeys(relevant)), final_path)
 
 
-def _checked_in_runbook(repository: Path, stack_identity: str) -> tuple[str, ...]:
-    manifest_path = f"{stack_identity}/stack.yaml"
+def _checked_in_runbook(
+    repository: Path,
+    stack_identity: str,
+    manifest: _CheckedInPathResolution,
+) -> tuple[tuple[str, ...], bool]:
+    manifest_path = manifest.final_path
+    if manifest_path is None:
+        return (), False
     entry = _tree_entry(repository, "HEAD", manifest_path)
     if entry is None or entry[1] != "blob":
-        return ()
+        return (), True
     try:
         content = _git(repository, "show", f"HEAD:{manifest_path}", text=False)
         assert isinstance(content, bytes)
         metadata = yaml.safe_load(content.decode("utf-8"))
     except (UnicodeDecodeError, RecursionError, yaml.YAMLError):
-        return ()
+        return (), True
     if not isinstance(metadata, dict):
-        return ()
+        return (), True
     updates = metadata.get("updates")
     procedure = updates.get("procedure") if isinstance(updates, dict) else None
     if not isinstance(procedure, dict) or procedure.get("mode") != "assisted":
-        return ()
+        return (), True
     runbook = procedure.get("runbook")
     if not isinstance(runbook, str):
-        return ()
+        return (), True
     raw_runbook_path = runbook.partition("#")[0]
     if not _is_filesystem_encodable(raw_runbook_path) or any(
         ord(character) < 32 or ord(character) == 127
         for character in raw_runbook_path
     ):
-        return ()
+        return (), True
     try:
         runbook_path = PurePosixPath(raw_runbook_path)
     except ValueError:
-        return ()
+        return (), True
     if runbook_path.is_absolute() or not runbook_path.parts or ".." in runbook_path.parts:
-        return ()
+        return (), True
     lexical_path = (PurePosixPath(stack_identity) / runbook_path).as_posix()
-    return _resolve_checked_in_runbook(repository, stack_identity, lexical_path)
+    resolution = _resolve_checked_in_path(repository, stack_identity, lexical_path)
+    return resolution.paths, resolution.final_path is not None
 
 
 def build_repository_snapshot(
@@ -693,10 +712,32 @@ def build_repository_snapshot(
     for stack_identity in selected_stack_identities:
         current_path = f"{stack_identity}/stack.yaml"
         try:
-            candidates = tuple(
+            canonical_paths = tuple(
                 f"{stack_identity}/{filename}" for filename in supported
             )
-            runbook_inputs = _checked_in_runbook(resolved_root, stack_identity)
+            candidates = canonical_paths
+            resolutions_complete = True
+            resolutions: dict[str, _CheckedInPathResolution] = {}
+            for path in canonical_paths:
+                entry = _tree_entry(resolved_root, "HEAD", path)
+                if entry is not None and entry[0] == "120000" and entry[1] == "blob":
+                    resolution = _resolve_checked_in_path(
+                        resolved_root, stack_identity, path
+                    )
+                    resolutions[path] = resolution
+                    candidates += resolution.paths
+                    resolutions_complete = (
+                        resolutions_complete and resolution.final_path is not None
+                    )
+                else:
+                    resolutions[path] = _CheckedInPathResolution((path,), path)
+            manifest_path = f"{stack_identity}/stack.yaml"
+            runbook_inputs, runbook_resolution_complete = _checked_in_runbook(
+                resolved_root, stack_identity, resolutions[manifest_path]
+            )
+            resolutions_complete = (
+                resolutions_complete and runbook_resolution_complete
+            )
             candidates += runbook_inputs
             candidates = tuple(sorted(set(candidates)))
             checked_in: dict[str, bool] = {}
@@ -740,7 +781,7 @@ def build_repository_snapshot(
             stacks.append(
                 StackInputSnapshot(
                     stack_identity,
-                    not changed,
+                    not changed and resolutions_complete,
                     fingerprint,
                     paths,
                     changed,
