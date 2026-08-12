@@ -33,13 +33,13 @@ Once the dotfiles herdr supervision slice lands, herdr gains a user service and 
 
 Stopping herdr ends the processes running in its panes. That is a known and accepted property of the herdr cutover, not a surprise — schedule this migration when no important pane work is in flight. Start Collie again after the deploy, and relaunch herdr the way you normally do.
 
-`/ephemeral` is a separate filesystem, so use a copy mode that preserves ownership, modes, ACLs, and xattrs. `rsync -aHAX` does; `mv` across filesystems and plain `cp` do not.
+`/ephemeral` is a separate filesystem, so use a copy mode that preserves ownership, modes, ACLs, and xattrs. `cp -a` implies `--preserve=all` and does; a bare `cp` drops them. Use coreutils rather than rsync — rsync is not a workstation package, so it is not there on a freshly rebuilt LXC.
 
 ```bash
 mkdir -p /ephemeral/workstation/home/.config /ephemeral/workstation/home/.local/state
 
-rsync -aHAX --numeric-ids ~/.config/herdr/ /ephemeral/workstation/home/.config/herdr/
-rsync -aHAX --numeric-ids ~/.local/state/collie/ /ephemeral/workstation/home/.local/state/collie/
+cp -a ~/.config/herdr /ephemeral/workstation/home/.config/herdr
+cp -a ~/.local/state/collie /ephemeral/workstation/home/.local/state/collie
 ```
 
 Collie's env file holds the VAPID private key at mode `0600`. Verify it survived before moving anything aside:
