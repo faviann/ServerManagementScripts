@@ -156,7 +156,7 @@ def test_vendor_exact_track_selects_requested_tag_and_keeps_major_alternative(tm
         "host": "media",
         "stack": "photos",
         "tracking_mode": "vendor",
-        "vendor": {"repository": "https://github.com/example/photos", "candidate_commit": "abc123"},
+        "vendor": {"repository": "https://github.com/example/photos", "current_commit": "def456", "candidate_commit": "abc123"},
         "services": [{
             "service": "server",
             "image": "example/photos",
@@ -185,11 +185,14 @@ def test_vendor_exact_track_selects_requested_tag_and_keeps_major_alternative(tm
         "version": "3.1.0",
         "digest": "sha256:" + "c" * 64,
     }]
-    assert observation["vendor"] == {"repository": "https://github.com/example/photos", "candidate_commit": "abc123"}
-    assert capture["config"]["packageRules"][-1] == {
-        "matchFileNames": ["projections/media/photos/server/compose.yaml"],
-        "allowedVersions": "/^2\\.7\\.5$/",
+    assert observation["vendor"] == {
+        "repository": "https://github.com/example/photos",
+        "current_commit": "def456",
+        "candidate_commit": "abc123",
     }
+    assert capture["config"]["packageRules"] == [
+        {"matchDatasources": ["docker"], "pinDigests": True, "separateMajorMinor": True},
+    ]
 
 
 def test_vendor_candidate_embedded_digest_must_match_renovate_selection(tmp_path: Path) -> None:
@@ -197,7 +200,7 @@ def test_vendor_candidate_embedded_digest_must_match_renovate_selection(tmp_path
         "host": "media",
         "stack": "photos",
         "tracking_mode": "vendor",
-        "vendor": {"repository": "https://github.com/example/photos", "candidate_commit": "abc123"},
+        "vendor": {"repository": "https://github.com/example/photos", "current_commit": "def456", "candidate_commit": "abc123"},
         "services": [{
             "service": "server",
             "image": "example/photos",
@@ -223,7 +226,7 @@ def test_vendor_candidate_tag_must_match_renovate_selection(tmp_path: Path) -> N
         "host": "media",
         "stack": "photos",
         "tracking_mode": "vendor",
-        "vendor": {"repository": "https://github.com/example/photos", "candidate_commit": "abc123"},
+        "vendor": {"repository": "https://github.com/example/photos", "current_commit": "def456", "candidate_commit": "abc123"},
         "services": [{
             "service": "server",
             "image": "example/photos",
@@ -284,6 +287,18 @@ def test_projection_mutation_invalidates_the_batch(tmp_path: Path) -> None:
     assert "projection mutation" in completed.stderr
 
 
+def test_unexpected_regular_file_under_projections_invalidates_the_batch(tmp_path: Path) -> None:
+    body = FAKE_SUCCESS.replace(
+        'pathlib.Path(os.environ["ADAPTER_TEST_CAPTURE"]).write_text',
+        'pathlib.Path("projections/unexpected.txt").write_text("unexpected")\npathlib.Path(os.environ["ADAPTER_TEST_CAPTURE"]).write_text',
+    )
+    completed, _ = run_adapter(tmp_path, request(stack("web")), body)
+
+    assert completed.returncode != 0
+    assert completed.stdout == ""
+    assert "projection mutation" in completed.stderr
+
+
 def test_unexpected_started_record_level_invalidates_the_batch(tmp_path: Path) -> None:
     body = FAKE_SUCCESS.replace(
         '{"level": 30, "msg": "Renovate started"',
@@ -329,7 +344,7 @@ def test_vendor_tracking_requires_candidate_reference_before_renovate(tmp_path: 
     value = request(stack("photos", image="example/photos"))
     value["stacks"][0].update({
         "tracking_mode": "vendor",
-        "vendor": {"repository": "https://github.com/example/photos", "candidate_commit": "abc123"},
+        "vendor": {"repository": "https://github.com/example/photos", "current_commit": "def456", "candidate_commit": "abc123"},
     })
 
     completed, capture = run_adapter(tmp_path, value, FAKE_SUCCESS)
@@ -338,6 +353,83 @@ def test_vendor_tracking_requires_candidate_reference_before_renovate(tmp_path: 
     assert completed.stdout == ""
     assert capture == {}
     assert "vendor tracking requires candidate_effective_reference" in completed.stderr
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        "[]",
+        '[{"updateType": "minor", "newValue": "2.6.0", "newDigest": "sha256:" + "b" * 64}]',
+    ],
+    ids=["empty-updates", "nonmatching-updates"],
+)
+def test_vendor_tracking_requires_renovate_to_select_supplied_candidate(tmp_path: Path, updates: str) -> None:
+    value = request({
+        "host": "media",
+        "stack": "photos",
+        "tracking_mode": "vendor",
+        "vendor": {"repository": "https://github.com/example/photos", "current_commit": "def456", "candidate_commit": "abc123"},
+        "services": [{
+            "service": "server",
+            "image": "example/photos",
+            "current_effective_reference": f"example/photos:2.5.0@{DIGEST_A}",
+            "candidate_effective_reference": "example/photos:2.7.5",
+            "current_digest": DIGEST_A,
+            "track": {"kind": "exact-version", "value": "2.7.5"},
+        }],
+    })
+    body = FAKE_SUCCESS.replace(
+        '[{"updateType": "digest", "newValue": tag, "newDigest": "sha256:" + "b" * 64}]',
+        updates,
+    )
+
+    completed, _ = run_adapter(tmp_path, value, body)
+
+    assert completed.returncode != 0
+    assert completed.stdout == ""
+    assert "vendor candidate" in completed.stderr
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["missing-vendor", "missing-field", "empty-field", "extra-field", "wrong-type", "image-with-vendor"],
+)
+def test_vendor_provenance_contract_is_enforced_before_renovate(tmp_path: Path, change: str) -> None:
+    value = request({
+        "host": "media",
+        "stack": "photos",
+        "tracking_mode": "vendor",
+        "vendor": {"repository": "repo", "current_commit": "current", "candidate_commit": "candidate"},
+        "services": [{
+            "service": "server",
+            "image": "example/photos",
+            "current_effective_reference": f"example/photos:2.5.0@{DIGEST_A}",
+            "candidate_effective_reference": "example/photos:2.7.5",
+            "current_digest": DIGEST_A,
+            "track": {"kind": "exact-version", "value": "2.7.5"},
+        }],
+    })
+    subject = value["stacks"][0]
+    if change == "missing-vendor":
+        del subject["vendor"]
+    elif change == "missing-field":
+        del subject["vendor"]["current_commit"]
+    elif change == "empty-field":
+        subject["vendor"]["candidate_commit"] = ""
+    elif change == "extra-field":
+        subject["vendor"]["url"] = "https://example.test"
+    elif change == "wrong-type":
+        subject["vendor"]["repository"] = 42
+    else:
+        subject["tracking_mode"] = "image"
+        del subject["services"][0]["candidate_effective_reference"]
+
+    completed, capture = run_adapter(tmp_path, value, FAKE_SUCCESS)
+
+    assert completed.returncode != 0
+    assert completed.stdout == ""
+    assert capture == {}
+    assert "vendor" in completed.stderr
 
 
 def test_image_tracking_rejects_candidate_reference_before_renovate(tmp_path: Path) -> None:

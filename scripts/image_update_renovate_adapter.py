@@ -94,8 +94,18 @@ def validate_request(value: Any) -> tuple[dict[str, Any], dict[str, dict[str, An
             raise ContractError("request schema tracking_mode must be image or vendor")
         if stack["tracking_mode"] == "vendor" and "vendor" not in stack:
             raise ContractError("request schema vendor tracking requires vendor provenance")
+        if stack["tracking_mode"] == "image" and "vendor" in stack:
+            raise ContractError("request schema image tracking prohibits vendor provenance")
         if "vendor" in stack:
-            _object(stack["vendor"], "request schema vendor")
+            vendor = _object(stack["vendor"], "request schema vendor")
+            _exact_keys(
+                vendor,
+                {"repository", "current_commit", "candidate_commit"},
+                set(),
+                "request schema vendor",
+            )
+            for field in ("repository", "current_commit", "candidate_commit"):
+                _string(vendor[field], f"request schema vendor.{field}")
         services = _list(stack["services"], "request schema services")
         if not services:
             raise ContractError("request schema services must not be empty")
@@ -149,7 +159,9 @@ def _config(index: dict[str, dict[str, Any]]) -> dict[str, Any]:
     rules: list[dict[str, Any]] = [{"matchDatasources": ["docker"], "pinDigests": True, "separateMajorMinor": True}]
     for path, item in index.items():
         track = item["service"]["track"]
-        if track["kind"] in {"floating-tag", "exact-version"}:
+        if track["kind"] in {"floating-tag", "exact-version"} and not (
+            item["stack"]["tracking_mode"] == "vendor" and track["kind"] == "exact-version"
+        ):
             rules.append({"matchFileNames": [path], "allowedVersions": f"/^{re.escape(str(track['value']))}$/"})
     return {"$schema": "https://docs.renovatebot.com/renovate-schema.json", "enabledManagers": ["docker-compose"], "packageRules": rules}
 
@@ -252,6 +264,8 @@ def _normalize(request: dict[str, Any], index: dict[str, dict[str, Any]], batch:
         dep_data = raw_by_path[path]
         dep, updates, warnings = dep_data["dep"], dep_data["updates"], dep_data["warnings"]
         selected = None if warnings else _select(service, updates)
+        if stack["tracking_mode"] == "vendor" and selected is None:
+            raise ContractError(f"Renovate did not select the required vendor candidate for {path}")
         candidate = None
         if selected:
             digest = selected.get("newDigest")
@@ -330,9 +344,12 @@ def scan(request_value: Any) -> dict[str, Any]:
             raise ContractError(
                 f"Renovate started record must have level 30 and exact version {RENOVATE_VERSION}"
             )
-        after = {relative: hashlib.sha256((root / relative).read_bytes()).hexdigest() if (root / relative).is_file() else "missing" for relative in before}
-        actual = {path.relative_to(root).as_posix() for path in root.glob("projections/**/compose.yaml")}
-        if before != after or actual != set(before):
+        after = {
+            path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in (root / "projections").rglob("*")
+            if path.is_file()
+        }
+        if before != after:
             raise ContractError("projection mutation detected")
         result = _normalize(request, index, batches[0], fingerprint)
         _validate_normalized_output(result)

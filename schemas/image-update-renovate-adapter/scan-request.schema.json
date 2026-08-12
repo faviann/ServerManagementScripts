@@ -17,7 +17,7 @@
           "host": {"$ref": "#/$defs/identity"},
           "stack": {"$ref": "#/$defs/identity"},
           "tracking_mode": {"enum": ["image", "vendor"]},
-          "vendor": {"type": "object"},
+          "vendor": {"$ref": "#/$defs/vendor"},
           "services": {
             "type": "array",
             "minItems": 1,
@@ -53,6 +53,7 @@
           {
             "if": {"properties": {"tracking_mode": {"const": "vendor"}}},
             "then": {
+              "required": ["vendor"],
               "properties": {
                 "services": {"items": {"required": ["candidate_effective_reference"]}}
               }
@@ -63,7 +64,8 @@
             "then": {
               "properties": {
                 "services": {"items": {"not": {"required": ["candidate_effective_reference"]}}}
-              }
+              },
+              "not": {"required": ["vendor"]}
             }
           }
         ]
@@ -72,6 +74,16 @@
   },
   "$defs": {
     "identity": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"},
-    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "vendor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "current_commit", "candidate_commit"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "current_commit": {"type": "string", "minLength": 1},
+        "candidate_commit": {"type": "string", "minLength": 1}
+      }
+    }
   }
 }

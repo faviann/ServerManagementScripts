@@ -97,14 +97,31 @@
               "properties": {"kind": {"const": "dependency-lookup-warning"}, "message": {"type": "string"}}
             }
           },
-          "vendor": {"type": ["object", "null"]}
-        }
+          "vendor": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/vendor"}]}
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"tracking_mode": {"const": "vendor"}}},
+            "then": {"properties": {"vendor": {"$ref": "#/$defs/vendor"}}},
+            "else": {"properties": {"vendor": {"type": "null"}}}
+          }
+        ]
       }
     }
   },
   "$defs": {
     "identity": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"},
     "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "vendor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "current_commit", "candidate_commit"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "current_commit": {"type": "string", "minLength": 1},
+        "candidate_commit": {"type": "string", "minLength": 1}
+      }
+    },
     "stackIdentity": {
       "type": "object",
       "additionalProperties": false,
