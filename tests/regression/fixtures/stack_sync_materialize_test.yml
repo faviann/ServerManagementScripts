@@ -9,8 +9,8 @@
       stacks_source: "{{ temp_root }}/stacks-source"
       shared_owner: "{{ ansible_user_uid }}"
       shared_group: "{{ ansible_user_gid }}"
-      docker_uid: "{{ ansible_user_uid }}"
-      docker_gid: "{{ ansible_user_gid }}"
+      docker_uid: 12345
+      docker_gid: 12346
       path_ownership_overrides:
         - path: "{{ temp_root }}/shared/stacks/komf/data/cache"
           owner: "{{ ansible_user_uid }}"
@@ -29,6 +29,17 @@
       loop:
         - "{{ lxc_docker_environment_internal.stacks_source }}/komf"
         - "{{ lxc_docker_environment_internal.shared_mount_source }}/stacks"
+        - "{{ lxc_docker_environment_internal.shared_mount_source }}/stacks/komf/data"
+      check_mode: false
+
+    - name: Seed an existing prereq directory with divergent metadata
+      ansible.builtin.file:
+        path: "{{ lxc_docker_environment_internal.shared_mount_source }}/stacks/komf/data/uploads"
+        state: directory
+        owner: "{{ ansible_user_uid }}"
+        group: "{{ ansible_user_gid }}"
+        mode: "0700"
+      check_mode: false
 
     - name: Create a templated Komf compose file (.j2)
       ansible.builtin.copy:
@@ -40,9 +51,11 @@
               image: "example.invalid/komf-{{ '{{' }} stack_vars.komga_user {{ '}}' }}:latest"
           x-prereq-dirs:
             - ./data/uploads
+            - ./data/downloads
             - ./data/cache
         dest: "{{ lxc_docker_environment_internal.stacks_source }}/komf/compose.yaml.j2"
         mode: "0644"
+      check_mode: false
 
     - name: Create a templated Komf .env.j2
       ansible.builtin.copy:
@@ -53,12 +66,14 @@
           STACK_NAME={{ '{{' }} stack_name {{ '}}' }}
         dest: "{{ lxc_docker_environment_internal.stacks_source }}/komf/.env.j2"
         mode: "0644"
+      check_mode: false
 
     - name: Create a static config file
       ansible.builtin.copy:
         content: "static-config-content"
         dest: "{{ lxc_docker_environment_internal.stacks_source }}/komf/config.conf"
         mode: "0644"
+      check_mode: false
 
     - name: Run actual find ops to populate discover registers
       ansible.builtin.find:
@@ -93,7 +108,71 @@
       become: false
 
     - name: Include materialize
-      ansible.builtin.include_tasks: "../../../playbooks/roles/config/lxc_stack_sync/tasks/materialize.yml"
+      ansible.builtin.include_tasks:
+        file: "../../../playbooks/roles/config/lxc_stack_sync/tasks/materialize.yml"
+        apply:
+          become: true
+
+    - name: Inspect prereq directory metadata after materialization
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ lxc_docker_environment_internal.shared_mount_source }}/stacks/komf/data/uploads"
+        - "{{ lxc_docker_environment_internal.shared_mount_source }}/stacks/komf/data/downloads"
+      register: _prereq_dir_stats_after
+
+    - name: Verify existing prereq metadata is preserved
+      ansible.builtin.assert:
+        that:
+          - _prereq_dir_stats_after.results[0].stat.mode == '0700'
+          - _prereq_dir_stats_after.results[0].stat.uid == ansible_user_uid
+          - _prereq_dir_stats_after.results[0].stat.gid == ansible_user_gid
+          - >-
+            (lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/data/uploads')
+            not in (_lxc_docker_env_reconciliation.materialized.created_dirs | default([]))
+          - >-
+            (lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/data/uploads')
+            not in (_lxc_docker_env_reconciliation.materialized.updated_dirs | default([]))
+
+    - name: Verify missing prereq creation behavior
+      ansible.builtin.assert:
+        that:
+          - >-
+            ansible_check_mode
+            or _prereq_dir_stats_after.results[1].stat.exists
+          - >-
+            ansible_check_mode
+            or _prereq_dir_stats_after.results[1].stat.mode == '0755'
+          - >-
+            ansible_check_mode
+            or _prereq_dir_stats_after.results[1].stat.uid == 12345
+          - >-
+            ansible_check_mode
+            or _prereq_dir_stats_after.results[1].stat.gid == 12346
+          - >-
+            (lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/data/downloads')
+            in (_lxc_docker_env_reconciliation.materialized.created_dirs | default([]))
+          - >-
+            (lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/data/downloads')
+            not in (_lxc_docker_env_reconciliation.materialized.updated_dirs | default([]))
+          - >-
+            (_lxc_docker_env_reconciliation.materialized.changed_results | default([])
+            | selectattr('path', 'defined')
+            | selectattr('path', 'equalto', lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/data/uploads')
+            | list
+            | length) == 0
+          - >-
+            (_lxc_docker_env_reconciliation.materialized.changed_results | default([])
+            | selectattr('path', 'defined')
+            | selectattr('path', 'equalto', lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/data/downloads')
+            | selectattr('changed', 'defined')
+            | selectattr('changed')
+            | list
+            | length) == 1
+
+    - name: Finish after check-mode prereq verification
+      ansible.builtin.meta: end_play
+      when: ansible_check_mode
 
     - name: Assert templated files were rendered at target paths
       ansible.builtin.stat:
@@ -164,6 +243,8 @@
           - lxc_stack_sync_manifest_plan.files_to_render | length == 2
           - lxc_stack_sync_manifest_plan.files_to_copy | length == 1
           - "(lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/data/uploads')
+            not in (lxc_stack_sync_manifest_plan.prereq_dirs | map(attribute='path') | list)"
+          - "(lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/data/downloads')
             in (lxc_stack_sync_manifest_plan.prereq_dirs | map(attribute='path') | list)"
           - "(lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/data/cache')
             not in (lxc_stack_sync_manifest_plan.prereq_dirs | map(attribute='path') | list)"
