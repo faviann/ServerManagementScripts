@@ -43,7 +43,7 @@ systemctl --user list-units --state=active | grep -E 'collie|herdr'   # expect n
 pgrep -af 'herdr|collie'                                              # expect no output
 ```
 
-Stopping herdr ends the processes running in its panes. That is a known and accepted property of the herdr cutover, not a surprise — schedule this migration when no important pane work is in flight. Restart both after the deploy, following [Restarting Afterwards](#restarting-afterwards) — starting `collie.service` alone is not enough.
+Stopping herdr ends the processes running in its panes. That is a known and accepted property of the herdr cutover, not a surprise — schedule this migration when no important pane work is in flight. Restart both after the deploy, following [Restarting Afterwards](#restarting-afterwards).
 
 **herdr does not use tmux.** It runs its own panes as direct children of the `herdr server` process, so `tmux list-sessions` tells you nothing about what you are about to kill. List the real panes and what is running in them:
 
@@ -129,28 +129,15 @@ Every declared path must appear. A missing row is an unmounted bind mount, and t
 
 ## Restarting Afterwards
 
-Start herdr first, then Collie. Collie's bridge polls for the herdr socket and retries, so the reverse order recovers on its own — but it logs a `cannot reach Herdr socket` line that looks like a failure and is not.
+Start herdr, then `systemctl --user start collie`. Collie pulls up its origin socket through `Wants=collie-origin-forwarder.socket`, so that is the whole sequence. Starting Collie first also works — its bridge polls for herdr and retries — but it logs a `cannot reach Herdr socket` line that looks like a failure and is not.
+
+`Wants` is soft, so a socket that fails to bind leaves Collie started and reporting healthy while nothing outside can reach it. Confirm the listener rather than the unit state:
 
 ```bash
-# 1. herdr, however you normally launch it
-# 2. Collie: the service AND its origin forwarder socket
-systemctl --user start collie
-systemctl --user start collie-origin-forwarder.socket
+ss -tln | grep 8788
 ```
 
-**Starting `collie.service` alone leaves Collie unreachable from anything but the workstation.** The bridge binds `127.0.0.1:8787` only. `collie-origin-forwarder.socket` is what binds `0.0.0.0:8788`, and 8788 is the address Traefik forwards to — see `collie-workstation` in `stacks/portal/traefik3/appdata/traefik3/config/conf.d/externalservice.yaml`. With the forwarder down, a phone gets no route and the PWA sits on "waiting for herdr", which reads like a herdr fault when herdr is fine.
-
-The units are `enabled`, so a reboot starts them. Only a manual stop — like the migration above — leaves them down.
-
-Verify the whole path rather than just the unit states:
-
-```bash
-systemctl --user is-active collie collie-origin-forwarder.socket   # active active
-ss -tln | grep -E '8787|8788'                                      # both must be listening
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8788/    # 200
-```
-
-`8788` missing from `ss` is the signature of this failure. A `302` from `https://collie.admin.faviann.com` is success, not an error — the route carries `protected-edge-auth`, so it redirects to Authentik before reaching Collie.
+Nothing there is the signature of an unreachable Collie: the phone gets no route and the PWA sits on "waiting for herdr", which reads like a herdr fault when herdr is fine.
 
 ## What Is Deliberately Not Persisted
 
