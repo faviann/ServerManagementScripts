@@ -83,12 +83,13 @@
         name: nvidia-container-toolkit
         state: present
 
-    # The Docker nvidia runtime is declared in lxc_docker_runtime's daemon
-    # options, so Ansible writes /etc/docker/daemon.json once. Running
-    # `nvidia-ctk runtime configure` here would be a second writer, and it
-    # reports "Wrote updated config" even when content is unchanged, so it
-    # restarted Docker on every apply. The verification below still fails the
-    # play if the runtime is not actually registered.
+    # No `nvidia-ctk runtime configure` task here, on purpose: the Docker
+    # nvidia runtime is declared in lxc_docker_runtime's daemon options, so
+    # Ansible writes /etc/docker/daemon.json once. nvidia-ctk would be a second
+    # writer, and it reports "Wrote updated config" even when content is
+    # unchanged, so it restarted Docker on every apply. The verification at the
+    # end of this file still fails the play if the runtime is not registered.
+
     - name: Set no-cgroups for unprivileged LXC compatibility
       ansible.builtin.lineinfile:
         path: "{{ lxc_nvidia_runtime_config_toml }}"

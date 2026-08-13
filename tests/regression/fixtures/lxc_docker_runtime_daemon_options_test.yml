@@ -4,6 +4,10 @@
 # Ansible must be the single writer of that file (issue #136): on a GPU host the
 # rendered options must already carry the NVIDIA runtime block, and on a non-GPU
 # host they must carry no runtimes key at all.
+#
+# Enters the role at tasks/install_docker.yml — the production entrypoint that
+# hands the options over — so main.yml's service and verification tasks never
+# touch the machine running this fixture.
 - name: Observe rendered Docker daemon options
   hosts: localhost
   connection: local
@@ -34,7 +38,6 @@
       }
   tasks:
     - name: Observe daemon options across GPU states
-      tags: lxc_docker_runtime_daemon_options
       block:
         - name: Select the undefined-gpu observation
           ansible.builtin.set_fact:
@@ -43,6 +46,7 @@
         - name: Render daemon options with gpu_enabled undefined
           ansible.builtin.include_role:
             name: config/lxc_docker_runtime
+            tasks_from: install_docker.yml
 
         - name: Select the gpu-disabled observation
           ansible.builtin.set_fact:
@@ -51,6 +55,7 @@
         - name: Render daemon options with gpu_enabled false
           ansible.builtin.include_role:
             name: config/lxc_docker_runtime
+            tasks_from: install_docker.yml
           vars:
             gpu_enabled: false
 
@@ -61,6 +66,7 @@
         - name: Render daemon options with gpu_enabled true
           ansible.builtin.include_role:
             name: config/lxc_docker_runtime
+            tasks_from: install_docker.yml
           vars:
             gpu_enabled: true
 

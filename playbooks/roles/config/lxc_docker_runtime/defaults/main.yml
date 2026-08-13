@@ -15,6 +15,15 @@ lxc_docker_runtime_compose_package_state: present
 # second writer (nvidia-ctk) makes both writers rewrite the file and restart
 # Docker on every apply.
 #
+# Ordering note: configure.yml runs this role before lxc_nvidia_runtime, so on a
+# freshly built GPU host daemon.json declares path: nvidia-container-runtime and
+# Docker restarts before that binary exists. That is safe because dockerd only
+# resolves a runtime path when a container asks for it — `dockerd --validate`
+# accepts exactly this file with no nvidia-container-runtime present (auth,
+# Docker 29.7.2). It would break if a future daemon validated runtime paths at
+# startup; the safer rule is to keep nvidia workloads off a host until
+# lxc_nvidia_runtime has run, rather than to split the file across two writers.
+#
 # The runtimes block is a byte-for-byte restatement of what
 # `nvidia-ctk runtime configure --runtime=docker` emitted with NVIDIA Container
 # Toolkit 1.19.1. A newer toolkit may expect a different shape; re-verify the
