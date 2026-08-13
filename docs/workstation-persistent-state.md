@@ -43,7 +43,7 @@ systemctl --user list-units --state=active | grep -E 'collie|herdr'   # expect n
 pgrep -af 'herdr|collie'                                              # expect no output
 ```
 
-Stopping herdr ends the processes running in its panes. That is a known and accepted property of the herdr cutover, not a surprise — schedule this migration when no important pane work is in flight. Start Collie again after the deploy, and relaunch herdr the way you normally do.
+Stopping herdr ends the processes running in its panes. That is a known and accepted property of the herdr cutover, not a surprise — schedule this migration when no important pane work is in flight. Restart both after the deploy, following [Restarting Afterwards](#restarting-afterwards) — starting `collie.service` alone is not enough.
 
 **herdr does not use tmux.** It runs its own panes as direct children of the `herdr server` process, so `tmux list-sessions` tells you nothing about what you are about to kill. List the real panes and what is running in them:
 
@@ -127,6 +127,31 @@ findmnt ~/.claude ~/.codex ~/.agents ~/.pi ~/.config/agent-of-empires \
 
 Every declared path must appear. A missing row is an unmounted bind mount, and the play recap will not have flagged it.
 
+## Restarting Afterwards
+
+Start herdr first, then Collie. Collie's bridge polls for the herdr socket and retries, so the reverse order recovers on its own — but it logs a `cannot reach Herdr socket` line that looks like a failure and is not.
+
+```bash
+# 1. herdr, however you normally launch it
+# 2. Collie: the service AND its origin forwarder socket
+systemctl --user start collie
+systemctl --user start collie-origin-forwarder.socket
+```
+
+**Starting `collie.service` alone leaves Collie unreachable from anything but the workstation.** The bridge binds `127.0.0.1:8787` only. `collie-origin-forwarder.socket` is what binds `0.0.0.0:8788`, and 8788 is the address Traefik forwards to — see `collie-workstation` in `stacks/portal/traefik3/appdata/traefik3/config/conf.d/externalservice.yaml`. With the forwarder down, a phone gets no route and the PWA sits on "waiting for herdr", which reads like a herdr fault when herdr is fine.
+
+The units are `enabled`, so a reboot starts them. Only a manual stop — like the migration above — leaves them down.
+
+Verify the whole path rather than just the unit states:
+
+```bash
+systemctl --user is-active collie collie-origin-forwarder.socket   # active active
+ss -tln | grep -E '8787|8788'                                      # both must be listening
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8788/    # 200
+```
+
+`8788` missing from `ss` is the signature of this failure. A `302` from `https://collie.admin.faviann.com` is success, not an error — the route carries `protected-edge-auth`, so it redirects to Authentik before reaching Collie.
+
 ## What Is Deliberately Not Persisted
 
 - `~/.config/systemd/user/collie.service` — Collie regenerates this unit, and it embeds checkout-specific paths. A persisted copy would pin stale paths across a rebuild.
@@ -136,10 +161,12 @@ Note that `~/.local/state/collie` is mounted, not `~/.local/state`. Mounting the
 
 ## Post-Rebuild Validation
 
-After rebuilding the LXC against the retained `/ephemeral` volume, confirm:
+After rebuilding the LXC against the retained `/ephemeral` volume, bring both back up using [Restarting Afterwards](#restarting-afterwards), then confirm:
 
 - herdr starts with its previous configuration, restores its session snapshot, and lists the same registered plugins.
 - Collie starts with its previous configuration and the same VAPID identity (subscriptions enrolled before the rebuild remain valid).
 - The enrolled Android device still receives a push notification.
+
+Do not diagnose a missing push as lost VAPID material before checking that `8788` is listening. An unreachable device and a lost identity look identical from the phone, and the forwarder being down is much the likelier cause. Collie logs `[push] enabled (N saved subscription(s))` on startup — if N is non-zero, the subscriptions survived and any failure past that point is a routing problem, not a persistence one.
 
 Live pane processes do **not** survive an LXC rebuild — the container is replaced, so every running process is gone. That is expected and is not a validation failure. herdr restores session state reconstructively from its snapshot; it does not resume the old processes.
