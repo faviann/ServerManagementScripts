@@ -9,7 +9,7 @@ services:
     container_name: rensaio
     restart: unless-stopped
     environment:
-      UID: ${PUID}
+      PUID: ${PUID}
       PGID: ${PGID}
       UMASK: ${UMASK}
       TZ: ${TZ}
