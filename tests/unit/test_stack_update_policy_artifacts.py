@@ -150,6 +150,58 @@ def test_final_artifact_contains_only_exact_publishable_actions(tmp_path: Path) 
     assert artifact["publish_actions"][0]["body"].endswith("Exact managed Markdown\n")
 
 
+def test_final_writer_preserves_managed_markdown_without_forbidden_material(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "final.json"
+    body = (
+        "<!-- managed:image-update -->\n"
+        'Operator note: {"level":"recommended","msg":"keep this exact text"}\n'
+    )
+
+    checksum = write_final_artifact(
+        destination,
+        repository="faviann/homelab-iac",
+        source_commit="a" * 40,
+        input_fingerprints=FINGERPRINTS,
+        evidence=EVIDENCE,
+        publish_actions=[{"kind": "create_issue", "title": "Update", "body": body}],
+        now=CREATED,
+    )
+    artifact = load_artifact(
+        destination,
+        expected_checksum=checksum,
+        expected_kind="final",
+        repository="faviann/homelab-iac",
+        source_commit="a" * 40,
+        input_fingerprints=FINGERPRINTS,
+        now=CREATED,
+    )
+
+    assert artifact["publish_actions"][0]["body"] == body
+
+
+def test_final_writer_requires_semantic_evidence_for_publish_actions(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "final.json"
+
+    with pytest.raises(ArtifactError, match="does not match schema"):
+        write_final_artifact(
+            destination,
+            repository="faviann/homelab-iac",
+            source_commit="a" * 40,
+            input_fingerprints=FINGERPRINTS,
+            evidence=[],
+            publish_actions=[
+                {"kind": "create_issue", "title": "Update", "body": "Managed body"}
+            ],
+            now=CREATED,
+        )
+
+    assert not destination.exists()
+
+
 @pytest.mark.parametrize("artifact_kind", ["draft", "final"])
 def test_writers_reject_repository_with_terminal_newline(
     tmp_path: Path, artifact_kind: str
@@ -256,6 +308,73 @@ def test_draft_writer_rejects_assessment_stack_with_terminal_newline(
     assert not destination.exists()
 
 
+@pytest.mark.parametrize("artifact_kind", ["draft", "final"])
+def test_writers_reject_evidence_without_a_relevant_input_fingerprint(
+    tmp_path: Path, artifact_kind: str
+) -> None:
+    destination = tmp_path / f"{artifact_kind}.json"
+    evidence = [dict(EVIDENCE[0], stack="stacks/media/unbound")]
+
+    with pytest.raises(ArtifactError, match="evidence stack.*fingerprint"):
+        write_artifact_for_kind(destination, artifact_kind, evidence=evidence)
+
+    assert not destination.exists()
+
+
+def test_draft_writer_rejects_assessment_without_a_relevant_input_fingerprint(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "draft.json"
+
+    with pytest.raises(ArtifactError, match="assessment stack.*fingerprint"):
+        write_draft_artifact(
+            destination,
+            repository="faviann/homelab-iac",
+            source_commit="a" * 40,
+            input_fingerprints=FINGERPRINTS,
+            evidence=EVIDENCE,
+            assessment_requests=[
+                {
+                    "stack": "stacks/media/unbound",
+                    "question": "Assess migration",
+                    "evidence_ids": ["example-app-update"],
+                }
+            ],
+            now=CREATED,
+        )
+
+    assert not destination.exists()
+
+
+def test_draft_writer_rejects_assessment_bound_to_another_evidence_stack(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "draft.json"
+    fingerprints = {
+        **FINGERPRINTS,
+        "stacks/media/other": "2" * 64,
+    }
+
+    with pytest.raises(ArtifactError, match="assessment stack.*evidence"):
+        write_draft_artifact(
+            destination,
+            repository="faviann/homelab-iac",
+            source_commit="a" * 40,
+            input_fingerprints=fingerprints,
+            evidence=EVIDENCE,
+            assessment_requests=[
+                {
+                    "stack": "stacks/media/other",
+                    "question": "Assess migration",
+                    "evidence_ids": ["example-app-update"],
+                }
+            ],
+            now=CREATED,
+        )
+
+    assert not destination.exists()
+
+
 def test_consumer_rejects_exact_expiry_boundary(tmp_path: Path) -> None:
     destination = tmp_path / "final.json"
     checksum = write_fixture(destination)
@@ -278,6 +397,24 @@ def test_consumer_rejects_exact_expiry_boundary(tmp_path: Path) -> None:
             source_commit="a" * 40,
             input_fingerprints=FINGERPRINTS,
             now=datetime(2026, 8, 14, 12, 0, tzinfo=UTC),
+        )
+
+
+def test_consumer_rejects_naive_clock_before_expiry_comparison(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "final.json"
+    checksum = write_fixture(destination)
+
+    with pytest.raises(ArtifactError, match="clock must be timezone-aware"):
+        load_artifact(
+            destination,
+            expected_checksum=checksum,
+            expected_kind="final",
+            repository="faviann/homelab-iac",
+            source_commit="a" * 40,
+            input_fingerprints=FINGERPRINTS,
+            now=datetime(2026, 8, 13, 12, 0),
         )
 
 
@@ -368,6 +505,55 @@ def test_consumer_rejects_unknown_schema_version_after_checksum_match(
         )
 
 
+def test_consumer_rejects_checksum_bound_evidence_without_fingerprint(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "final.json"
+    write_fixture(destination)
+    artifact = json.loads(destination.read_bytes())
+    artifact["evidence"][0]["stack"] = "stacks/media/unbound"
+    encoded = json.dumps(
+        artifact, sort_keys=True, separators=(",", ":")
+    ).encode() + b"\n"
+    destination.write_bytes(encoded)
+
+    with pytest.raises(ArtifactError, match="evidence stack.*fingerprint"):
+        load_artifact(
+            destination,
+            expected_checksum=hashlib.sha256(encoded).hexdigest(),
+            expected_kind="final",
+            repository="faviann/homelab-iac",
+            source_commit="a" * 40,
+            input_fingerprints=FINGERPRINTS,
+            now=CREATED,
+        )
+
+
+def test_consumer_rejects_checksum_bound_assessment_for_another_evidence_stack(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "draft.json"
+    write_artifact_for_kind(destination, "draft")
+    artifact = json.loads(destination.read_bytes())
+    artifact["input_fingerprints"]["stacks/media/other"] = "2" * 64
+    artifact["assessment_requests"][0]["stack"] = "stacks/media/other"
+    encoded = json.dumps(
+        artifact, sort_keys=True, separators=(",", ":")
+    ).encode() + b"\n"
+    destination.write_bytes(encoded)
+
+    with pytest.raises(ArtifactError, match="assessment stack.*evidence"):
+        load_artifact(
+            destination,
+            expected_checksum=hashlib.sha256(encoded).hexdigest(),
+            expected_kind="draft",
+            repository="faviann/homelab-iac",
+            source_commit="a" * 40,
+            input_fingerprints=artifact["input_fingerprints"],
+            now=CREATED,
+        )
+
+
 def test_consumer_rejects_non_rfc3339_timestamp_after_checksum_match(
     tmp_path: Path,
 ) -> None:
@@ -412,6 +598,7 @@ def test_consumer_rejects_artifact_of_wrong_lifecycle_kind(tmp_path: Path) -> No
     "sensitive_value",
     [
         "token=top-secret-value",
+        "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
         "-----BEGIN PRIVATE KEY-----",
         "ghp_abcdefghijklmnopqrstuvwxyz123456",
     ],
@@ -472,11 +659,19 @@ def test_writers_reject_temporary_scan_paths(
 
 
 @pytest.mark.parametrize("artifact_kind", ["draft", "final"])
+@pytest.mark.parametrize(
+    "raw_log",
+    [
+        '{"level":20,"msg":"packageFiles with updates","config":{}}',
+        '{"level":40,"msg":"Repository has invalid config","repository":"example/repo"}',
+        '{"level":40,"msg":"Repository started","token":"exposed"}',
+        '{"msg":"Dependency lookup failed","repository":"example/repo","level":50}',
+    ],
+)
 def test_writers_reject_raw_renovate_log_records(
-    tmp_path: Path, artifact_kind: str
+    tmp_path: Path, artifact_kind: str, raw_log: str
 ) -> None:
     destination = tmp_path / f"{artifact_kind}.json"
-    raw_log = '{"level":20,"msg":"packageFiles with updates","config":{}}'
     evidence = [dict(EVIDENCE[0], reason=raw_log)]
 
     with pytest.raises(ArtifactError, match="sensitive material"):

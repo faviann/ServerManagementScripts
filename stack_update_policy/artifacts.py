@@ -24,9 +24,9 @@ _SENSITIVE_MATERIAL = re.compile(
     r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----"
     r"|\bgh[pousr]_[A-Za-z0-9]{20,}\b"
     r"|\bAuthorization\s*:\s*Bearer\s+\S+"
+    r"|\bAWS_(?:ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN)\s*=\s*\S+"
     r"|(?<![A-Za-z0-9._/-])/tmp/[^\s\"'<>]+"
-    r'|\{"level"\s*:\s*(?:20|30)\s*,\s*"msg"\s*:\s*'
-    r'"(?:Renovate started|packageFiles with updates)"'
+    r'|\{(?=[^\r\n]*"level"\s*:\s*\d+)(?=[^\r\n]*"msg"\s*:)'
     r"|\b(?:api[_ -]?key|password|secret|token)\s*[:=]\s*\S+",
     re.IGNORECASE,
 )
@@ -75,7 +75,17 @@ def validate_artifact(artifact: object) -> None:
     evidence_ids = {item["id"] for item in artifact["evidence"]}
     if len(evidence_ids) != len(artifact["evidence"]):
         raise ArtifactError("artifact evidence IDs must be unique")
+    fingerprinted_stacks = set(artifact["input_fingerprints"])
+    if any(
+        item["stack"] not in fingerprinted_stacks for item in artifact["evidence"]
+    ):
+        raise ArtifactError("artifact evidence stack is not fingerprint-bound")
     if kind == "draft":
+        if any(
+            request["stack"] not in fingerprinted_stacks
+            for request in artifact["assessment_requests"]
+        ):
+            raise ArtifactError("artifact assessment stack is not fingerprint-bound")
         requested = {
             evidence_id
             for request in artifact["assessment_requests"]
@@ -83,6 +93,15 @@ def validate_artifact(artifact: object) -> None:
         }
         if not requested <= evidence_ids:
             raise ArtifactError("assessment request refers to unknown evidence")
+        evidence_stacks = {
+            item["id"]: item["stack"] for item in artifact["evidence"]
+        }
+        if any(
+            evidence_stacks[evidence_id] != request["stack"]
+            for request in artifact["assessment_requests"]
+            for evidence_id in request["evidence_ids"]
+        ):
+            raise ArtifactError("artifact assessment stack does not match its evidence")
 
 
 def _contains_sensitive_material(value: object) -> bool:
@@ -214,7 +233,9 @@ def load_artifact(
         raise ArtifactError("artifact source commit does not match")
     if artifact["input_fingerprints"] != dict(input_fingerprints):
         raise ArtifactError("artifact relevant inputs do not match")
-    boundary = now.astimezone(UTC) if now.tzinfo is not None else now
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ArtifactError("artifact clock must be timezone-aware")
+    boundary = now.astimezone(UTC)
     if _parse_timestamp(artifact["expires_at"]) <= boundary:
         raise ArtifactError("artifact has expired")
     return artifact
