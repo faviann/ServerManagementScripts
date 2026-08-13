@@ -1,9 +1,8 @@
 ---
-# Docker installation entrypoint. Kept as its own tasks file so the daemon
-# options this role hands to geerlingguy.docker can be observed on their own
-# (tests/regression/test_lxc_docker_runtime_daemon_options.py includes this
-# file via tasks_from) without also running the service and verification tasks
-# in main.yml against the machine running the test.
+# Docker installation tasks imported by main.yml. The daemon-options regression
+# enters through the role's public entrypoint and stubs the external systemd and
+# Docker process boundaries so later service and verification tasks cannot touch
+# the workstation.
 
 - name: Install Docker using geerlingguy.docker role
   ansible.builtin.include_role:
