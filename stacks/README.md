@@ -198,6 +198,12 @@ The API infers the GitHub `owner/repository` identity only from `origin`, reads 
 
 The result is immutable and exposes `as_dict()` for stable schema-versioned consumption. It does not select stacks, validate policy, inspect containers or deployments, invoke Renovate, write GitHub state, or modify the repository. Tests replace only the GitHub read boundary; Git and filesystem behavior use real temporary repositories.
 
+Run the credential-free snapshot contract tests with the locked environment:
+
+```bash
+uv run --locked pytest -q tests/unit/test_stack_update_policy_snapshot.py
+```
+
 ### Image Update Planning Selection
 
 `build_stack_selection` creates the read-only, versioned scope used before image
@@ -229,7 +235,7 @@ validation continues to reject the missing policy.
 Run the credential-free contract tests with the locked environment:
 
 ```bash
-uv run --locked pytest -q tests/unit/test_stack_update_policy_snapshot.py
+uv run --locked pytest -q tests/unit/test_stack_update_policy_selection.py
 ```
 
 ## Build a Stack

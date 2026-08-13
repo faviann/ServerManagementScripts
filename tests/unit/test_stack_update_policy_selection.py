@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -348,7 +349,7 @@ def test_github_proposal_read_failure_is_safe_and_global(tmp_path: Path) -> None
     ]
 
 
-def test_default_github_boundary_reads_issues_without_writes(
+def test_public_selection_uses_only_read_only_git_and_github_processes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repository = create_repository(tmp_path)
@@ -356,21 +357,79 @@ def test_default_github_boundary_reads_issues_without_writes(
     commit(repository)
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    invocation = tmp_path / "invocation.json"
+    invocations = tmp_path / "invocations.tsv"
+    real_git = shutil.which("git")
+    assert real_git is not None
+    git_executable = fake_bin / "git"
+    git_executable.write_text(
+        """#!/bin/sh
+{ printf 'git'; for argument in "$@"; do printf '\t%s' "$argument"; done; printf '\n'; } >> "$INVOCATIONS"
+exec "$REAL_GIT" "$@"
+""",
+        encoding="utf-8",
+    )
+    git_executable.chmod(0o755)
     gh = fake_bin / "gh"
     gh.write_text(
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$INVOCATION\"\nprintf '%s\\n' '[[{\"number\":12,\"state\":\"open\",\"body\":\"<!-- image-update-proposal:v1 {\\\"fingerprint\\\":\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"stack\\\":\\\"stacks/media/example\\\"} -->\"}]]'\n",
+        r"""#!/bin/sh
+{ printf 'gh'; for argument in "$@"; do printf '\t%s' "$argument"; done; printf '\n'; } >> "$INVOCATIONS"
+printf '%s\n' '[[{"number":12,"state":"open","body":"<!-- image-update-proposal:v1 {\"fingerprint\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"stack\":\"stacks/media/example\"} -->"}]]'
+""",
         encoding="utf-8",
     )
     gh.chmod(0o755)
+    for name in (
+        "ansible",
+        "ansible-playbook",
+        "docker",
+        "docker-compose",
+        "pct",
+        "podman",
+        "pvesh",
+        "ssh",
+    ):
+        executable = fake_bin / name
+        executable.write_text(
+            f"#!/bin/sh\nprintf '{name}' >> \"$INVOCATIONS\"\n"
+            "for argument in \"$@\"; do printf '\\t%s' \"$argument\" >> \"$INVOCATIONS\"; done\n"
+            "printf '\\n' >> \"$INVOCATIONS\"\nexit 97\n",
+            encoding="utf-8",
+        )
+        executable.chmod(0o755)
     monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
-    monkeypatch.setenv("INVOCATION", str(invocation))
+    monkeypatch.setenv("INVOCATIONS", str(invocations))
+    monkeypatch.setenv("REAL_GIT", real_git)
 
     result = build_stack_selection(repository)
 
     assert result.valid
-    assert invocation.read_text(encoding="utf-8").strip() == (
-        "api --paginate --slurp repos/example/homelab/issues?state=all&per_page=100"
+    commands = [
+        line.split("\t")
+        for line in invocations.read_text(encoding="utf-8").splitlines()
+    ]
+    assert {command[0] for command in commands} == {"git", "gh"}
+    git_commands = [command[1:] for command in commands if command[0] == "git"]
+    assert git_commands
+    assert all(
+        len({"config", "ls-tree", "rev-parse", "show"} & set(command)) == 1
+        for command in git_commands
+    )
+    assert all(
+        "config" not in command or "--get" in command for command in git_commands
+    )
+    github_commands = [command[1:] for command in commands if command[0] == "gh"]
+    assert github_commands
+    assert all(command[0] == "api" for command in github_commands)
+    assert all(
+        not {"--input", "--method", "-f", "-F", "-X"} & set(command)
+        for command in github_commands
+    )
+    assert all(
+        any(
+            argument.startswith("repos/example/homelab/issues?")
+            for argument in command
+        )
+        for command in github_commands
     )
     assert result.selection is not None
     assert result.selection.stacks[0].open_proposals[0].number == 12
