@@ -9,9 +9,33 @@ lxc_docker_runtime_install_compose_plugin: true
 lxc_docker_runtime_compose_package: docker-compose-plugin
 lxc_docker_runtime_compose_package_state: present
 
-# Docker daemon options
-lxc_docker_runtime_daemon_options:
-  log-driver: "json-file"
-  log-opts:
-    max-size: "10m"
-    max-file: "3"
+# Docker daemon options. geerlingguy.docker writes this mapping to
+# /etc/docker/daemon.json verbatim, so Ansible must declare the complete file
+# in one pass — including the NVIDIA runtime on GPU hosts. Anything left to a
+# second writer (nvidia-ctk) makes both writers rewrite the file and restart
+# Docker on every apply.
+#
+# Ordering note: configure.yml runs this role before lxc_nvidia_runtime, so on a
+# freshly built GPU host daemon.json declares path: nvidia-container-runtime and
+# Docker restarts before that binary exists. That is safe because dockerd only
+# resolves a runtime path when a container asks for it — `dockerd --validate`
+# accepts exactly this file with no nvidia-container-runtime present (auth,
+# Docker 29.7.2). It would break if a future daemon validated runtime paths at
+# startup; the safer rule is to keep nvidia workloads off a host until
+# lxc_nvidia_runtime has run, rather than to split the file across two writers.
+#
+# The runtimes block is a byte-for-byte restatement of what
+# `nvidia-ctk runtime configure --runtime=docker` emitted with NVIDIA Container
+# Toolkit 1.19.1. A newer toolkit may expect a different shape; re-verify the
+# block against the toolkit's own output when it is upgraded.
+lxc_docker_runtime_daemon_options: >-
+  {{
+    {
+      'log-driver': 'json-file',
+      'log-opts': {'max-size': '10m', 'max-file': '3'},
+    }
+    | combine(
+      {'runtimes': {'nvidia': {'args': [], 'path': 'nvidia-container-runtime'}}}
+      if (gpu_enabled | default(false) | bool) else {}
+    )
+  }}
