@@ -71,6 +71,7 @@ FULL_ONLY_SCRIPTS = (
     "test_proxmox_lxc_host_config_check_mode_missing_config.py",
     "test_proxmox_lxc_host_config_observation_failure.py",
     "test_proxmox_lxc_host_config_readiness_deadline.py",
+    "test_lxc_docker_runtime_daemon_options.py",
     "test_lxc_lifecycle_wiring.py",
     "test_proxmox_lxc_host_config_result.py",
 )

@@ -5,6 +5,7 @@
 # config/lxc_docker_environment so UID/GID are enforced in one place.
 
 - name: Install Docker using geerlingguy.docker role
+  tags: lxc_docker_runtime_daemon_options
   ansible.builtin.include_role:
     name: geerlingguy.docker
   vars:

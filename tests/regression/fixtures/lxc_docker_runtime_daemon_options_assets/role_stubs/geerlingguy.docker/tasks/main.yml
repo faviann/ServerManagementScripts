@@ -1,0 +1,19 @@
+---
+# Stub for the external geerlingguy.docker role. It absorbs the include and
+# records the daemon options the real lxc_docker_runtime role hands it,
+# rendered exactly the way the real role renders /etc/docker/daemon.json
+# (tasks/main.yml: content: "{{ docker_daemon_options | to_nice_json }}").
+
+- name: Record daemon options handed to geerlingguy.docker
+  tags: lxc_docker_runtime_daemon_options
+  ansible.builtin.copy:
+    dest: "{{ temp_root }}/{{ observation_case }}.json"
+    mode: "0644"
+    content: "{{ docker_daemon_options | to_nice_json }}"
+
+- name: Record whether daemon options arrived as a mapping
+  tags: lxc_docker_runtime_daemon_options
+  ansible.builtin.copy:
+    dest: "{{ temp_root }}/{{ observation_case }}.mapping"
+    mode: "0644"
+    content: "{{ docker_daemon_options is mapping }}"
