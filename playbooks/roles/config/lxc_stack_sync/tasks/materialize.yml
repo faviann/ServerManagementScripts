@@ -4,6 +4,25 @@
 - name: Plan desired stack materialization inputs
   ansible.builtin.include_tasks: planner.yml
 
+- name: Check which stack prereq dirs already exist
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+  loop: "{{ lxc_stack_sync_manifest_plan.prereq_dirs | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
+  register: _stack_sync_prereq_dir_stats
+  when: (lxc_stack_sync_manifest_plan.prereq_dirs | default([])) | length > 0
+
+- name: Verify existing stack prereq paths are directories
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists or (item.stat.isdir | default(false))
+    fail_msg: >-
+      Stack prerequisite path is not a directory: {{ item.item.path }}
+  loop: "{{ ((_stack_sync_prereq_dir_stats | default({})).results | default([])) }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+
 - name: Check which per-host stack directories already exist
   ansible.builtin.stat:
     path: "{{ item }}"
@@ -52,25 +71,6 @@
   loop_control:
     label: "{{ item.relative_path }}"
   register: _stack_sync_copy_results
-
-- name: Check which stack prereq dirs already exist
-  ansible.builtin.stat:
-    path: "{{ item.path }}"
-  loop: "{{ lxc_stack_sync_manifest_plan.prereq_dirs | default([]) }}"
-  loop_control:
-    label: "{{ item.path }}"
-  register: _stack_sync_prereq_dir_stats
-  when: (lxc_stack_sync_manifest_plan.prereq_dirs | default([])) | length > 0
-
-- name: Verify existing stack prereq paths are directories
-  ansible.builtin.assert:
-    that:
-      - not item.stat.exists or (item.stat.isdir | default(false))
-    fail_msg: >-
-      Stack prerequisite path is not a directory: {{ item.item.path }}
-  loop: "{{ ((_stack_sync_prereq_dir_stats | default({})).results | default([])) }}"
-  loop_control:
-    label: "{{ item.item.path }}"
 
 - name: Limit stack prereq directory plan to missing paths
   ansible.builtin.set_fact:

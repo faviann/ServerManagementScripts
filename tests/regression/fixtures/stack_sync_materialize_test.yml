@@ -14,6 +14,8 @@
       path_ownership_overrides: []
     wrong_type_prereq_path: >-
       {{ lxc_docker_environment_internal.shared_mount_source }}/stacks/komf/data/uploads
+    wrong_type_target_stack_file: >-
+      {{ lxc_docker_environment_internal.shared_mount_source }}/stacks/komf/compose.yaml
   tasks:
     - name: Create wrong-type prereq fixture layout
       ansible.builtin.file:
@@ -86,11 +88,17 @@
           ansible.builtin.fail:
             msg: "Materialize accepted a regular file as a prerequisite directory"
       rescue:
+        - name: Inspect target stack file after wrong-type rejection
+          ansible.builtin.stat:
+            path: "{{ wrong_type_target_stack_file }}"
+          register: _wrong_type_target_stack_file_stat
+
         - name: Verify wrong-type prereq failure is actionable
           ansible.builtin.assert:
             that:
               - wrong_type_prereq_path in wrong_type_failure_messages
               - "'not a directory' in wrong_type_failure_messages"
+              - not _wrong_type_target_stack_file_stat.stat.exists
           vars:
             wrong_type_failure_messages: >-
               {{ ansible_failed_result.results | default([])
