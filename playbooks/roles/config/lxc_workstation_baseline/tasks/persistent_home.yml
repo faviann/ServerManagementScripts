@@ -55,6 +55,11 @@
   loop: "{{ workstation_persistent_home_links }}"
   register: _workstation_persistent_home_paths
 
+# check_mode: false is required, not an optimization. This is a read-only probe, but
+# ansible.builtin.command does not support check mode and would otherwise be skipped,
+# leaving the conflict assert below with no mount evidence. An already-mounted path then
+# matches none of the assert's accepted shapes and check mode fails on paths that are
+# already correct — so every check run breaks once the mounts exist.
 - name: Inspect existing mount status for persistent home paths
   ansible.builtin.command:
     cmd: "findmnt -n -o TARGET --target {{ item.item.path | quote }}"
@@ -62,6 +67,7 @@
   register: _workstation_persistent_home_mount_status
   changed_when: false
   failed_when: false
+  check_mode: false
   when:
     - item.stat.exists
     - not (item.stat.islnk | default(false))

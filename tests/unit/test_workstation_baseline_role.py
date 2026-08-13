@@ -577,6 +577,31 @@ class WorkstationBaselineRoleTests(unittest.TestCase):
     def test_workstation_bootstrap_deploy_wrapper_removed(self) -> None:
         self.assertFalse((REPO_ROOT / "scripts/workstation-bootstrap-deploy.sh").exists())
 
+    def test_persistent_home_mount_probe_runs_in_check_mode(self) -> None:
+        """The mount probe must opt out of check mode, or check runs fail on correct hosts.
+
+        ansible.builtin.command has no check-mode support, so without check_mode: false the
+        probe is skipped and the conflict assert loses its mount evidence. An already-mounted
+        path then matches none of the assert's accepted shapes, and every check run fails on
+        paths that are already in their desired state. The probe is read-only, so running it
+        during a check mutates nothing.
+        """
+        tasks = flatten_tasks(
+            load_yaml(
+                REPO_ROOT
+                / "playbooks/roles/config/lxc_workstation_baseline/tasks/persistent_home.yml"
+            )
+        )
+        probes = [
+            task
+            for task in tasks
+            if "findmnt" in str(task.get("ansible.builtin.command", {}).get("cmd", ""))
+        ]
+
+        self.assertEqual(len(probes), 1, "expected exactly one findmnt mount probe")
+        self.assertIs(probes[0].get("check_mode"), False)
+        self.assertIs(probes[0].get("changed_when"), False)
+
 
 if __name__ == "__main__":
     unittest.main()

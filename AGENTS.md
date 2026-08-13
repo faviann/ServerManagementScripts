@@ -111,3 +111,4 @@ Debug: `uv run --locked ansible-playbook site.yml -vvv` for verbose output, `uv 
 → [docs/inventory-structure-guide.md](docs/inventory-structure-guide.md) — read when adding hosts or debugging variable precedence.
 → [stacks/README.md](stacks/README.md) — read when creating or modifying Docker stacks.
 → [setup.sh](setup.sh) — read when addressing workstation tooling, editor config, or environment setup for contributors.
+→ [docs/workstation-persistent-state.md](docs/workstation-persistent-state.md) — read before any workstation deploy that enables persistent home mounts.
