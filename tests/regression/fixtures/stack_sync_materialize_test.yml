@@ -516,27 +516,13 @@
              | selectattr('dest_path', 'equalto', planner_root ~ '/shared/stacks/metadata/undeclared.conf')
              | first }}
 
-- name: Test exact repository stack files materialize with declared modes
+- name: Prepare exact repository stack file fixtures
   hosts: localhost
   connection: local
   gather_facts: true
   vars:
     exact_root: "{{ temp_root }}/exact-file-modes"
     exact_source_root: "{{ exact_root }}/source"
-    lxc_docker_environment_internal:
-      shared_mount_source: "{{ exact_root }}/shared"
-      stacks_source: "{{ exact_source_root }}"
-      shared_owner: "{{ ansible_user_uid }}"
-      shared_group: "{{ ansible_user_gid }}"
-      docker_uid: "{{ ansible_user_uid }}"
-      docker_gid: "{{ ansible_user_gid }}"
-      path_ownership_overrides: []
-    lxc_docker_env_stack_vars:
-      overmind:
-        agent_key: "fixture-agent-key"
-    lxc_docker_env_desired_top_level_stack_dirs: []
-    _per_host_stack_metadata_files:
-      files: []
     actual_agent_keys_source: "{{ repo_root }}/stacks/overmind/overmind/agent-keys.yaml.j2"
     actual_overmind_compose_source: "{{ repo_root }}/stacks/overmind/overmind/compose.yaml"
     actual_beets_compose_source: >-
@@ -557,7 +543,7 @@
       ansible.builtin.meta: end_play
       when: ansible_check_mode
 
-    - name: Create exact artifact target parents
+    - name: Create per-host exact artifact source layouts
       ansible.builtin.file:
         path: "{{ item }}"
         state: directory
@@ -566,9 +552,6 @@
         - "{{ exact_source_root }}/overmind/overmind"
         - "{{ exact_source_root }}/servarr/beets-flask/appdata"
         - "{{ exact_source_root }}/servarr/lidarr/appdata/lidarr/scripts"
-        - "{{ exact_root }}/shared/stacks/overmind/overmind"
-        - "{{ exact_root }}/shared/stacks/servarr/beets-flask/appdata"
-        - "{{ exact_root }}/shared/stacks/servarr/lidarr/appdata/lidarr/scripts"
 
     - name: Mirror actual compose declarations without unrelated prereq directories
       ansible.builtin.copy:
@@ -636,7 +619,36 @@
       loop_control:
         label: "{{ item.source }}"
 
-    - name: Publish exact template discovery results
+- name: Test exact Overmind artifacts through its production source topology
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    exact_root: "{{ temp_root }}/exact-file-modes"
+    exact_source_root: "{{ exact_root }}/source/overmind"
+    exact_agent_keys_source: "{{ exact_source_root }}/overmind/agent-keys.yaml.j2"
+    exact_overmind_compose_source: "{{ exact_source_root }}/overmind/compose.yaml"
+    exact_agent_keys_target: "{{ exact_root }}/shared/stacks/overmind/agent-keys.yaml"
+    lxc_docker_environment_internal:
+      shared_mount_source: "{{ exact_root }}/shared"
+      stacks_source: "{{ exact_source_root }}"
+      shared_owner: "{{ ansible_user_uid }}"
+      shared_group: "{{ ansible_user_gid }}"
+      docker_uid: "{{ ansible_user_uid }}"
+      docker_gid: "{{ ansible_user_gid }}"
+      path_ownership_overrides: []
+    lxc_docker_env_stack_vars:
+      overmind:
+        agent_key: "fixture-agent-key"
+    lxc_docker_env_desired_top_level_stack_dirs: []
+    _per_host_stack_metadata_files:
+      files: []
+  tasks:
+    - name: Finish before exact Overmind fixture in check mode
+      ansible.builtin.meta: end_play
+      when: ansible_check_mode
+
+    - name: Publish exact Overmind discovery results
       ansible.builtin.set_fact:
         _per_host_j2_files:
           files:
@@ -644,42 +656,113 @@
         _per_host_static_files:
           files:
             - path: "{{ exact_overmind_compose_source }}"
+        _per_host_dirs:
+          files:
+            - path: "{{ exact_source_root }}/overmind"
+
+    - name: Materialize exact Overmind artifacts through production tasks
+      ansible.builtin.include_tasks: ../../../playbooks/roles/config/lxc_stack_sync/tasks/materialize.yml
+
+    - name: Inspect exact materialized Overmind artifact
+      ansible.builtin.stat:
+        path: "{{ exact_agent_keys_target }}"
+      register: _exact_agent_keys_stat
+
+    - name: Assert exact Overmind artifact retains its production contract
+      ansible.builtin.assert:
+        that:
+          - _exact_agent_keys_stat.stat.exists
+          - _exact_agent_keys_stat.stat.mode == '0600'
+          - exact_agent_keys_plan.stack_name == 'overmind'
+          - exact_agent_keys_plan.dest_path == exact_agent_keys_target
+          - >-
+            exact_agent_keys_target not in
+            (_stack_sync_managed_file_create_results.results | default([])
+            | map(attribute='item.path') | list)
+          - >-
+            exact_agent_keys_target not in
+            (_stack_sync_managed_file_permission_results.results | default([])
+            | map(attribute='item.path') | list)
+      vars:
+        exact_agent_keys_plan: >-
+          {{ lxc_stack_sync_manifest_plan.files_to_render
+             | selectattr('source_path', 'equalto', exact_agent_keys_source)
+             | first }}
+
+- name: Test exact Servarr artifacts through its production source topology
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    exact_root: "{{ temp_root }}/exact-file-modes"
+    exact_source_root: "{{ exact_root }}/source/servarr"
+    exact_beets_compose_source: "{{ exact_source_root }}/beets-flask/compose.override.yaml"
+    exact_startup_source: "{{ exact_source_root }}/beets-flask/appdata/startup.sh"
+    exact_lidarr_compose_source: "{{ exact_source_root }}/lidarr/compose.yaml"
+    exact_post_import_source: >-
+      {{ exact_source_root }}/lidarr/appdata/lidarr/scripts/beets-post-import.sh
+    exact_startup_target: "{{ exact_root }}/shared/stacks/beets-flask/appdata/startup.sh"
+    exact_post_import_target: >-
+      {{ exact_root }}/shared/stacks/lidarr/appdata/lidarr/scripts/beets-post-import.sh
+    lxc_docker_environment_internal:
+      shared_mount_source: "{{ exact_root }}/shared"
+      stacks_source: "{{ exact_source_root }}"
+      shared_owner: "{{ ansible_user_uid }}"
+      shared_group: "{{ ansible_user_gid }}"
+      docker_uid: "{{ ansible_user_uid }}"
+      docker_gid: "{{ ansible_user_gid }}"
+      path_ownership_overrides: []
+    lxc_docker_env_desired_top_level_stack_dirs: []
+    _per_host_stack_metadata_files:
+      files: []
+  tasks:
+    - name: Finish before exact Servarr fixture in check mode
+      ansible.builtin.meta: end_play
+      when: ansible_check_mode
+
+    - name: Publish exact Servarr discovery results
+      ansible.builtin.set_fact:
+        _per_host_j2_files:
+          files: []
+        _per_host_static_files:
+          files:
             - path: "{{ exact_beets_compose_source }}"
             - path: "{{ exact_startup_source }}"
             - path: "{{ exact_lidarr_compose_source }}"
             - path: "{{ exact_post_import_source }}"
         _per_host_dirs:
-          files: []
+          files:
+            - path: "{{ exact_source_root }}/beets-flask"
+            - path: "{{ exact_source_root }}/beets-flask/appdata"
+            - path: "{{ exact_source_root }}/lidarr"
+            - path: "{{ exact_source_root }}/lidarr/appdata"
+            - path: "{{ exact_source_root }}/lidarr/appdata/lidarr"
+            - path: "{{ exact_source_root }}/lidarr/appdata/lidarr/scripts"
 
-    - name: Materialize exact repository artifacts through production tasks
+    - name: Materialize exact Servarr artifacts through production tasks
       ansible.builtin.include_tasks: ../../../playbooks/roles/config/lxc_stack_sync/tasks/materialize.yml
 
-    - name: Inspect exact materialized repository artifacts
+    - name: Inspect exact materialized Servarr artifacts
       ansible.builtin.stat:
         path: "{{ item.path }}"
       loop:
-        - path: "{{ exact_root }}/shared/stacks/overmind/overmind/agent-keys.yaml"
-          mode: "0600"
-          source: "{{ exact_agent_keys_source }}"
-        - path: "{{ exact_root }}/shared/stacks/servarr/beets-flask/appdata/startup.sh"
+        - path: "{{ exact_startup_target }}"
           mode: "0755"
           source: "{{ exact_startup_source }}"
-        - path: "{{ exact_root }}/shared/stacks/servarr/lidarr/appdata/lidarr/scripts/beets-post-import.sh"
+          stack_name: beets-flask
+        - path: "{{ exact_post_import_target }}"
           mode: "0755"
           source: "{{ exact_post_import_source }}"
-      register: _exact_artifact_stats
+          stack_name: lidarr
+      register: _exact_servarr_artifact_stats
 
-    - name: Assert exact artifacts retain declaration modes at the production seam
+    - name: Assert exact Servarr artifacts retain their production contracts
       ansible.builtin.assert:
         that:
           - item.stat.exists
           - item.stat.mode == item.item.mode
-          - >-
-            (((lxc_stack_sync_manifest_plan.files_to_render | default([]))
-            + (lxc_stack_sync_manifest_plan.files_to_copy | default([])))
-            | selectattr('source_path', 'equalto', item.item.source)
-            | map(attribute='dest_path')
-            | list) == [item.item.path]
+          - exact_artifact_plan.stack_name == item.item.stack_name
+          - exact_artifact_plan.dest_path == item.item.path
           - >-
             item.item.path not in
             (_stack_sync_managed_file_create_results.results | default([])
@@ -688,6 +771,11 @@
             item.item.path not in
             (_stack_sync_managed_file_permission_results.results | default([])
             | map(attribute='item.path') | list)
-      loop: "{{ _exact_artifact_stats.results }}"
+      vars:
+        exact_artifact_plan: >-
+          {{ lxc_stack_sync_manifest_plan.files_to_copy
+             | selectattr('source_path', 'equalto', item.item.source)
+             | first }}
+      loop: "{{ _exact_servarr_artifact_stats.results }}"
       loop_control:
         label: "{{ item.item.path }}"
