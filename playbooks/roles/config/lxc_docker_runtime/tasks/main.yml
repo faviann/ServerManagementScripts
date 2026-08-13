@@ -4,8 +4,14 @@
 # Managed account creation and Docker group membership are owned by
 # config/lxc_docker_environment so UID/GID are enforced in one place.
 
-- name: Install Docker
-  ansible.builtin.import_tasks: install_docker.yml
+- name: Install Docker using geerlingguy.docker role
+  ansible.builtin.include_role:
+    name: geerlingguy.docker
+  vars:
+    docker_install_compose_plugin: "{{ lxc_docker_runtime_install_compose_plugin }}"
+    docker_compose_package: "{{ lxc_docker_runtime_compose_package }}"
+    docker_compose_package_state: "{{ lxc_docker_runtime_compose_package_state }}"
+    docker_daemon_options: "{{ lxc_docker_runtime_daemon_options }}"
 
 - name: Ensure Docker service is started and enabled
   ansible.builtin.systemd:
