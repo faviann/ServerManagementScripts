@@ -198,10 +198,44 @@ The API infers the GitHub `owner/repository` identity only from `origin`, reads 
 
 The result is immutable and exposes `as_dict()` for stable schema-versioned consumption. It does not select stacks, validate policy, inspect containers or deployments, invoke Renovate, write GitHub state, or modify the repository. Tests replace only the GitHub read boundary; Git and filesystem behavior use real temporary repositories.
 
-Run the credential-free contract tests with the locked environment:
+Run the credential-free snapshot contract tests with the locked environment:
 
 ```bash
 uv run --locked pytest -q tests/unit/test_stack_update_policy_snapshot.py
+```
+
+### Image Update Planning Selection
+
+`build_stack_selection` creates the read-only, versioned scope used before image
+discovery. Its default scope is the union of checked-in repo-managed stacks and
+stack identities retained by open image update proposals. A removed or renamed
+stack therefore remains selectable while its open proposal needs resolution.
+Closed proposals are loaded only for selected current stacks; a closed proposal
+alone does not add its identity to the default scope.
+
+Host and stack filters are exact and repeatable. Repeated values within one
+dimension are ORed, while host and stack dimensions are ANDed. Globs and regular
+expressions are unsupported, and a filter that matches neither a current stack
+nor an open marked proposal fails before image discovery. A proposal-only match
+is valid.
+
+Proposal identity comes only from the supported versioned hidden marker, which
+records the canonical `stacks/<host>/<stack>` identity and proposal fingerprint.
+Titles and labels are presentation, not identity. Duplicate open proposals make
+that stack incomplete. A malformed, duplicated, or unsupported marker makes
+repository-wide proposal discovery untrustworthy and stops selection without
+repairing or guessing identity. Selection performs GitHub reads only and never
+inspects deployed containers.
+
+A checked-in stack without `stack.yaml` or without an `updates` section is
+reported as `policy-not-configured`. Broad planning can report and skip that
+legacy stack without changing an existing proposal; strict single-stack
+validation continues to reject the missing policy.
+
+Run the credential-free contract tests with the locked environment:
+
+```bash
+uv run --locked pytest -q tests/unit/test_stack_update_policy_selection.py
 ```
 
 ## Build a Stack
