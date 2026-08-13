@@ -5,9 +5,9 @@ Runs the real config/lxc_docker_runtime role against a stub geerlingguy.docker
 role and observes the daemon options the real role actually hands over, for a
 GPU host, a non-GPU host, and a host where gpu_enabled is undefined.
 
-The fixture enters the role at tasks/install_docker.yml, the production
-entrypoint that hands the options over, so the seam never runs main.yml's
-service and verification tasks against the machine running the suite.
+The fixture enters the role through its normal public entrypoint. External
+Docker and systemd commands are replaced at the process boundary so exercising
+the production wiring cannot inspect or change the workstation's Docker state.
 """
 
 from __future__ import annotations
@@ -36,6 +36,14 @@ FIXTURE_ROLES = (
     # Not named "roles": ansible-lint would classify the geerlingguy.docker
     # stub as a repo role and reject its dotted name.
     / "role_stubs"
+)
+FIXTURE_SYSTEM_BIN = (
+    REPO_ROOT
+    / "tests"
+    / "regression"
+    / "fixtures"
+    / "lxc_docker_runtime_daemon_options_assets"
+    / "system_bin"
 )
 
 
@@ -71,6 +79,8 @@ def run_isolated_playbook() -> subprocess.CompletedProcess[str]:
                 "1",
                 "-e",
                 f"temp_root={temp_root}",
+                "-e",
+                f"fixture_system_bin={FIXTURE_SYSTEM_BIN}",
             ],
             cwd=REPO_ROOT,
             capture_output=True,

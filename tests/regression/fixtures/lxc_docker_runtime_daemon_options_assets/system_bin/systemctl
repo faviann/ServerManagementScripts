@@ -1,0 +1,17 @@
+#!/bin/sh
+
+# A running, enabled Docker unit is the only external state this role needs to
+# observe. Reject every other operation so a production-task change cannot
+# accidentally mutate the workstation through this fixture.
+case "$1" in
+  show)
+    printf '%s\n' 'LoadState=loaded' 'ActiveState=active'
+    ;;
+  is-enabled)
+    printf '%s\n' 'enabled'
+    ;;
+  *)
+    echo "unsupported fixture systemctl operation: $*" >&2
+    exit 86
+    ;;
+esac

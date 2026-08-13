@@ -1,0 +1,14 @@
+#!/bin/sh
+
+case "$*" in
+  --version)
+    printf '%s\n' 'Docker version fixture'
+    ;;
+  'compose version')
+    printf '%s\n' 'Docker Compose version fixture'
+    ;;
+  *)
+    echo "unsupported fixture docker operation: $*" >&2
+    exit 86
+    ;;
+esac
