@@ -17,13 +17,22 @@ ANSIBLE_PLAYBOOK = "uv run --locked ansible-playbook".split()
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="stack-sync-materialize-") as temp_root:
         runs = [
-            [*ANSIBLE_PLAYBOOK, str(PLAYBOOK), "-e", f"temp_root={temp_root}/apply"],
+            [
+                *ANSIBLE_PLAYBOOK,
+                str(PLAYBOOK),
+                "-e",
+                f"temp_root={temp_root}/apply",
+                "-e",
+                f"repo_root={REPO_ROOT}",
+            ],
             [
                 *ANSIBLE_PLAYBOOK,
                 str(PLAYBOOK),
                 "--check",
                 "-e",
                 f"temp_root={temp_root}/check",
+                "-e",
+                f"repo_root={REPO_ROOT}",
             ],
         ]
         results = [
@@ -43,7 +52,7 @@ def main() -> int:
             print(f"{result.stdout}\n{result.stderr}", file=sys.stderr)
             return 1
 
-    print("ok: materialize preserves existing prereq metadata and creates missing dirs")
+    print("ok: materialize preserves directory and exact stack-file metadata contracts")
     return 0
 
 
