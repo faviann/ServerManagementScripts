@@ -75,3 +75,15 @@ _Avoid_: Ensure-running lifecycle, guest configuration
 **Full lifecycle**:
 A lifecycle run that reconciles both LXC infrastructure and guest configuration. It may start an existing stopped LXC because guest configuration requires the LXC to be running.
 _Avoid_: Provision-only lifecycle, configure-only lifecycle
+
+**Workstation setup marker**:
+The record written by a completed workstation setup run, holding the identity of the inputs that run applied. It is the authority consulted before any work begins, so an input the marker does not record is an input no later run can detect a change to.
+_Avoid_: Completion flag, sentinel file, done marker
+
+**Workstation tool readiness**:
+The proof that the workstation's required commands are present, runnable, and resolved from their managed locations. It says nothing about which declared configuration produced those commands.
+_Avoid_: Environment healthy, validated environment, workstation configuration freshness
+
+**Workstation configuration freshness**:
+Whether the workstation's active Home Manager generation was built from the currently checked-out dotfiles source. It is evaluated against the local checkout only, never against the remote, and it is independent of workstation tool readiness — working tools prove nothing about it.
+_Avoid_: Drift, environment health, in sync with origin
