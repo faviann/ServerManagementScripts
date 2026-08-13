@@ -158,6 +158,11 @@
             - ./data/uploads
             - ./data/downloads
             - ./data/cache
+          x-managed-files:
+            - path: ./agent-keys.yaml
+              mode: "0600"
+            - path: ./config.conf
+              mode: "0755"
         dest: "{{ lxc_docker_environment_internal.stacks_source }}/komf/compose.yaml.j2"
         mode: "0644"
       check_mode: false
@@ -170,6 +175,14 @@
           KOMF_KOMGA_PASSWORD={{ '{{' }} stack_vars.komga_password | compose_env {{ '}}' }}
           STACK_NAME={{ '{{' }} stack_name {{ '}}' }}
         dest: "{{ lxc_docker_environment_internal.stacks_source }}/komf/.env.j2"
+        mode: "0644"
+      check_mode: false
+
+    - name: Create a templated managed file
+      ansible.builtin.copy:
+        content: |
+          agent: {{ '{{' }} stack_name {{ '}}' }}
+        dest: "{{ lxc_docker_environment_internal.stacks_source }}/komf/agent-keys.yaml.j2"
         mode: "0644"
       check_mode: false
 
@@ -286,12 +299,14 @@
       loop:
         - "{{ lxc_docker_environment_internal.shared_mount_source }}/stacks/komf/compose.yaml"
         - "{{ lxc_docker_environment_internal.shared_mount_source }}/stacks/komf/.env"
+        - "{{ lxc_docker_environment_internal.shared_mount_source }}/stacks/komf/agent-keys.yaml"
 
     - name: Verify templated files exist
       ansible.builtin.assert:
         that:
-          - _rendered_file_stats.results | map(attribute='stat.exists') | select('equalto', true) | list | length == 2
-        fail_msg: "Rendered Komf compose.yaml and .env were not both created"
+          - _rendered_file_stats.results | map(attribute='stat.exists') | select('equalto', true) | list | length == 3
+          - _rendered_file_stats.results[2].stat.mode == '0600'
+        fail_msg: "Rendered files were not created at their effective declared modes"
 
     - name: Read rendered Komf compose file
       ansible.builtin.slurp:
@@ -322,7 +337,31 @@
       ansible.builtin.assert:
         that:
           - _static_file_stat.stat.exists
+          - _static_file_stat.stat.mode == '0755'
         fail_msg: "Static config.conf not found at target path"
+
+    - name: Assert an undeclared synced file keeps the default mode
+      ansible.builtin.assert:
+        that:
+          - _rendered_file_stats.results[0].stat.mode == '0644'
+
+    - name: Assert synced managed files bypass managed-only enforcement
+      ansible.builtin.assert:
+        that:
+          - >-
+            (_stack_sync_managed_file_create_results.results | default([])
+            | map(attribute='item.path')
+            | intersect([
+              lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/agent-keys.yaml',
+              lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/config.conf'
+            ]) | length) == 0
+          - >-
+            (_stack_sync_managed_file_permission_results.results | default([])
+            | map(attribute='item.path')
+            | intersect([
+              lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/agent-keys.yaml',
+              lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/config.conf'
+            ]) | length) == 0
 
     - name: Assert .j2 source files were NOT copied as static files
       ansible.builtin.stat:
@@ -345,8 +384,13 @@
           - "'komf/.env' in (lxc_stack_sync_manifest_plan.templated_outputs | default([]))"
           - "'example.invalid/komf-komf-user:latest' in (lxc_stack_sync_manifest_plan.source_compose_specs | first).content"
           - lxc_stack_sync_manifest_plan.stack_dirs_to_create | length > 0
-          - lxc_stack_sync_manifest_plan.files_to_render | length == 2
+          - lxc_stack_sync_manifest_plan.files_to_render | length == 3
+          - >-
+            (lxc_stack_sync_manifest_plan.files_to_render
+            | selectattr('relative_path', 'equalto', 'komf/agent-keys.yaml')
+            | first).mode == '0600'
           - lxc_stack_sync_manifest_plan.files_to_copy | length == 1
+          - (lxc_stack_sync_manifest_plan.files_to_copy | first).mode == '0755'
           - "(lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/data/uploads')
             not in (lxc_stack_sync_manifest_plan.prereq_dirs | map(attribute='path') | list)"
           - "(lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/data/downloads')
@@ -355,3 +399,19 @@
             not in (lxc_stack_sync_manifest_plan.prereq_dirs | map(attribute='path') | list)"
           - lxc_stack_sync_manifest_plan.ownership_overrides | length == 1
         fail_msg: "Planner output did not capture the expected stack assets and prereq dirs"
+
+    - name: Re-run materialize to verify synced files are idempotent
+      ansible.builtin.include_tasks:
+        file: "../../../playbooks/roles/config/lxc_stack_sync/tasks/materialize.yml"
+        apply:
+          become: true
+
+    - name: Assert repeated materialization has no changes
+      ansible.builtin.assert:
+        that:
+          - >-
+            (_lxc_docker_env_reconciliation.materialized.changed_results | default([])
+            | selectattr('changed', 'defined')
+            | selectattr('changed')
+            | list
+            | length) == 0
