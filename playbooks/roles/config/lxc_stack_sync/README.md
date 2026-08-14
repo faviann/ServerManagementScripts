@@ -25,8 +25,8 @@
 - `templated_outputs`: relative target paths for `.j2` sources with the `.j2` suffix removed
 - `source_compose_specs`: compose sources with rendered or raw content plus target path metadata
 - `stack_dirs_to_create`: absolute stack directory paths under the shared mount
-- `files_to_render`: templated source files with `source_path`, `dest_path`, `relative_path`, and `stack_name`
-- `files_to_copy`: static source files with `source_path`, `dest_path`, `relative_path`, and `stack_name`
+- `files_to_render`: templated source files with `source_path`, `dest_path`, `relative_path`, `stack_name`, and effective `owner`, `group`, and `mode`
+- `files_to_copy`: static source files with `source_path`, `dest_path`, `relative_path`, `stack_name`, and effective `owner`, `group`, and `mode`
 - `stack_metadata`: parsed non-secret `stack.yaml` files, keyed by `stack_name`, kept as role-scoped plan data and never injected into Ansible host/global variable scope
 - `prereq_dirs`: resolved `x-prereq-dirs` creation candidates with `path`, `owner`, `group`, and `mode`; materialization narrows this to paths observed as missing
 - `ownership_overrides`: passthrough ownership override entries from `lxc_docker_environment_internal`
@@ -39,6 +39,8 @@
 - relative `x-prereq-dirs` and `x-managed-files` paths are resolved from the compose target directory
 - `prereq_dirs` exclude paths that are already covered by `path_ownership_overrides`
 - `x-prereq-dirs` paths are created with shared Docker ownership and mode `0755` only when absent; existing directory metadata is preserved
+- synced files use matching `x-managed-files` metadata during their single render or copy; undeclared files use shared ownership and mode `0644`
+- managed files that are not repository-synced are created empty when absent and keep their declared metadata enforced without truncating existing content
 - `planner.yml` and `materialize.yml` consume `stack_vars` as task-scoped render data, not host scope
 - `materialize.yml` consumes the plan and does not re-parse compose extensions inline
 

@@ -308,6 +308,55 @@
       {{ files | unique(attribute='path') }}
   when: (lxc_stack_sync_manifest_plan.source_compose_specs | default([])) | length > 0
 
+- name: Apply managed metadata to planned synced files
+  ansible.builtin.set_fact:
+    lxc_stack_sync_manifest_plan: >-
+      {{
+        lxc_stack_sync_manifest_plan
+        | combine(
+            {
+              'files_to_render': (
+                planned_synced_files
+                | selectattr('source_path', 'in', render_source_paths)
+                | list
+              ),
+              'files_to_copy': (
+                planned_synced_files
+                | rejectattr('source_path', 'in', render_source_paths)
+                | list
+              )
+            },
+            recursive=True
+          )
+      }}
+  vars:
+    render_source_paths: >-
+      {{
+        lxc_stack_sync_manifest_plan.files_to_render
+        | map(attribute='source_path')
+        | list
+      }}
+    planned_synced_files: >-
+      {%- set planned_files = [] -%}
+      {%- for file in (
+        lxc_stack_sync_manifest_plan.files_to_render
+        + lxc_stack_sync_manifest_plan.files_to_copy
+      ) -%}
+      {%- set managed = (
+        lxc_stack_sync_manifest_plan.managed_files
+        | default([])
+        | selectattr('path', 'equalto', file.dest_path)
+        | first
+        | default({})
+      ) -%}
+      {%- set _ = planned_files.append(file | combine({
+        'owner': managed.owner | default(lxc_docker_environment_internal.shared_owner),
+        'group': managed.group | default(lxc_docker_environment_internal.shared_group),
+        'mode': managed.mode | default('0644')
+      })) -%}
+      {%- endfor -%}
+      {{ planned_files }}
+
 - name: Build planner managed file parent directories
   ansible.builtin.set_fact:
     lxc_stack_sync_manifest_plan: >-
