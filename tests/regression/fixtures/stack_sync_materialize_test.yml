@@ -449,8 +449,8 @@
           ---
           x-managed-files:
             - path: ./declared.conf
-              owner: nobody
-              group: nogroup
+              owner: root
+              group: root
               mode: "0600"
           services: {}
         dest: "{{ lxc_docker_environment_internal.stacks_source }}/metadata/compose.yaml"
@@ -503,8 +503,8 @@
     - name: Assert declaration ownership wins only for its resolved destination
       ansible.builtin.assert:
         that:
-          - declared_entry.owner == 'nobody'
-          - declared_entry.group == 'nogroup'
+          - declared_entry.owner == 'root'
+          - declared_entry.group == 'root'
           - declared_entry.mode == '0600'
           - undeclared_entry.owner == ansible_user_uid
           - undeclared_entry.group == ansible_user_gid
@@ -524,12 +524,17 @@
         path: "{{ planner_root }}/shared/stacks/metadata/declared.conf"
       register: _declared_materialized_file
 
+    - name: Inspect materialized undeclared file metadata
+      ansible.builtin.stat:
+        path: "{{ planner_root }}/shared/stacks/metadata/undeclared.conf"
+      register: _undeclared_materialized_file
+
     - name: Assert declaration metadata is applied by the sync operation
       ansible.builtin.assert:
         that:
           - _declared_materialized_file.stat.exists
-          - _declared_materialized_file.stat.uid == 65534
-          - _declared_materialized_file.stat.gid == 65534
+          - _declared_materialized_file.stat.uid == 0
+          - _declared_materialized_file.stat.gid == 0
           - _declared_materialized_file.stat.mode == '0600'
           - >-
             (_stack_sync_managed_file_create_results.results | default([])
@@ -546,6 +551,16 @@
         fail_msg: >-
           The synced declaration-specific owner, group, or mode was not applied directly
           by materialization
+
+    - name: Assert shared metadata defaults are applied to undeclared copy artifacts
+      ansible.builtin.assert:
+        that:
+          - _undeclared_materialized_file.stat.exists
+          - _undeclared_materialized_file.stat.uid == ansible_user_uid
+          - _undeclared_materialized_file.stat.gid == ansible_user_gid
+          - _undeclared_materialized_file.stat.mode == '0644'
+        fail_msg: >-
+          The undeclared synced file did not retain the shared owner, group, or mode defaults
 
     - name: Restore planner fixture ownership for temporary-directory cleanup
       ansible.builtin.file:

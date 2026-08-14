@@ -87,6 +87,12 @@
           - _managed_file_stat.stat.mode == '0600'
         fail_msg: "Expected mode 0600, got {{ _managed_file_stat.stat.mode }}"
 
+    - name: Assert newly created managed file is empty
+      ansible.builtin.assert:
+        that:
+          - _managed_file_stat.stat.size == 0
+        fail_msg: "Expected newly created managed file to be empty"
+
     - name: Place content in the managed file to test force:false
       ansible.builtin.copy:
         content: "existing-content"
