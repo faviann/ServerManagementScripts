@@ -87,6 +87,32 @@ validate_marker_state() {
   (validate_environment) >/dev/null 2>&1 || return 1
 }
 
+marker_field() {
+  sed -n "s/^$1=//p" "$MARKER_PATH"
+}
+
+local_source_commit() {
+  git -C "$HOME/.local/share/chezmoi" rev-parse HEAD
+}
+
+active_home_manager_generation() {
+  readlink -f "$HOME/.local/state/nix/profiles/home-manager"
+}
+
+configuration_is_fresh_without_build() {
+  test -z "$(git -C "$HOME/.local/share/chezmoi" status --porcelain)" || return 1
+  test "$(marker_field source_commit)" = "$(local_source_commit)" || return 1
+  test "$(marker_field active_generation)" = "$(active_home_manager_generation)" || return 1
+}
+
+build_local_home_manager_configuration() {
+  local flake_configuration flake_path
+  flake_path="${HOME_MANAGER_FLAKE_REF%%#*}"
+  flake_configuration="${HOME_MANAGER_FLAKE_REF#*#}"
+  nix build --offline --no-link --print-out-paths \
+    "$flake_path#homeConfigurations.$flake_configuration.activationPackage"
+}
+
 required_managed_commands_ready() {
   local command_name expected_path resolved_path specification
   required_managed_command_error=""
@@ -196,6 +222,20 @@ switch_home_manager() {
   fi
 }
 
+activate_built_home_manager_generation() {
+  local built_generation="$1"
+  test -x "$built_generation/activate" \
+    || fail "built Home Manager configuration has no executable activation program"
+  rm -f \
+    "$WORKSTATION_HOME/.config/systemd/user/default.target.wants/aoe-serve.service" \
+    "$WORKSTATION_HOME/.config/systemd/user/sockets.target.wants/aoe-lan-proxy.socket" \
+    "$WORKSTATION_HOME/.config/systemd/user/openclaw-gateway.service" \
+    "$WORKSTATION_HOME/.config/systemd/user/default.target.wants/openclaw-gateway.service"
+  nix-env --profile "$HOME/.local/state/nix/profiles/home-manager" \
+    --set "$built_generation"
+  "$built_generation/activate" --driver-version 1
+}
+
 ensure_agent_tools() {
   if [ -x "$WORKSTATION_HOME/.local/bin/codex" ] \
     && [ -x "$WORKSTATION_HOME/.local/bin/claude" ] \
@@ -277,17 +317,47 @@ validate_environment() {
 }
 
 write_marker() {
+  local active_generation source_commit
+  source_commit="$(local_source_commit)" \
+    || fail "could not read the local dotfiles source commit"
+  active_generation="$(active_home_manager_generation)" \
+    || fail "could not read the active Home Manager generation"
   mkdir -p "$(dirname "$MARKER_PATH")"
   {
     printf 'version=%s\n' "$SETUP_VERSION"
     printf 'dotfiles=%s\n' "$DOTFILES_REPO_URL"
     printf 'fingerprint=%s\n' "$MARKER_FINGERPRINT"
+    printf 'source_commit=%s\n' "$source_commit"
+    printf 'active_generation=%s\n' "$active_generation"
     printf 'completed_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   } > "$MARKER_PATH"
 }
 
 if validate_marker_state; then
-  printf 'workstation-setup: environment healthy.\n'
+  if configuration_is_fresh_without_build; then
+    printf 'workstation-setup: environment healthy.\n'
+    exit 0
+  fi
+
+  if ! built_generation="$(build_local_home_manager_configuration)"; then
+    fail "failed to build the local Home Manager configuration"
+  fi
+  active_generation="$(active_home_manager_generation)" \
+    || fail "could not read the active Home Manager generation"
+  if [ "$built_generation" = "$active_generation" ]; then
+    write_marker
+    printf 'workstation-setup: environment healthy.\n'
+    exit 0
+  fi
+
+  activate_built_home_manager_generation "$built_generation"
+  active_generation="$(active_home_manager_generation)" \
+    || fail "could not read the active Home Manager generation after activation"
+  test "$active_generation" = "$built_generation" \
+    || fail "Home Manager activation did not activate the built configuration"
+  validate_environment
+  write_marker
+  printf 'workstation-setup: environment repaired and ready.\n'
   exit 0
 fi
 
