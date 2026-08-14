@@ -4,13 +4,27 @@
 Ansible exits 0 when a ``--tags`` selector matches no tasks, so a return code
 alone cannot tell a real run apart from a run that asserted nothing. Each
 scenario therefore also requires its own existing final semantic assertion task
-to be visible as *completed* in the captured output.
+to have run and passed, read out of the machine-readable report emitted by the
+``ansible.builtin.json`` stdout callback.
+
+Reading that report works because task names and per-host outcomes are fields
+in a structured document. Reading the human-facing renderer instead breaks the
+moment the caller's environment changes it -- verbosity inserts a task path,
+color wraps the lines in escapes, an extra callback injects timings, a
+different stdout callback drops banners, and Ansible itself prints a task-level
+warning between a banner and its status line with no environment change at all.
+The safer rule is to pin the JSON callback and parse it, never to regex the
+display.
+
+This guards each scenario's *final* semantic observation only -- that one task
+is required to have run and passed. It does not prove that every assertion
+inside a fixture ran.
 """
 
 from __future__ import annotations
 
+import json
 import os
-import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -57,18 +71,7 @@ def run_isolated_playbook(
         )
         env["UV_CACHE_DIR"] = str(Path(temp_root) / "uv-cache")
         env["TMPDIR"] = temp_root
-        # The observation below asserts on how the default stdout callback
-        # renders task banners, so that rendering is part of this fixture's
-        # contract. It holds under the settings pinned here; it breaks when the
-        # caller's shell changes them -- `-vvv` (documented in AGENTS.md) adds a
-        # `task path:` line between banner and status, `minimal` drops banners,
-        # arg display rewrites the banner text, and hiding ok hosts removes the
-        # status line. Pin them rather than inherit whatever the caller exports.
-        env["ANSIBLE_STDOUT_CALLBACK"] = "ansible.builtin.default"
-        env["ANSIBLE_VERBOSITY"] = "0"
-        env["ANSIBLE_DISPLAY_ARGS_TO_STDOUT"] = "false"
-        env["ANSIBLE_DISPLAY_OK_HOSTS"] = "true"
-        env["ANSIBLE_NOCOWS"] = "1"
+        env["ANSIBLE_STDOUT_CALLBACK"] = "ansible.builtin.json"
         result = subprocess.run(
             [
                 "bwrap",
@@ -114,21 +117,67 @@ def assert_observation_completed(
 ) -> None:
     """Require a successful run in which ``task_name`` actually ran and passed.
 
-    The default stdout callback prints a task's header immediately followed by
-    its per-host status line, so demanding ``ok:`` on the line after the header
-    rejects a task that was skipped (``skipping:``) as well as a tag selection
-    that never emitted the header at all.
+    The JSON stdout callback lists every task that started under
+    ``plays[].tasks[]`` with its name and a per-host outcome under ``hosts``.
+    A task that tag selection filtered out is absent from that list entirely, a
+    task that ran but was skipped carries ``skipped: true``, and a failed one
+    carries ``failed: true`` -- so each of those stays distinguishable from a
+    genuine pass no matter how the run is displayed. Other display lines can
+    still share stdout -- verbosity banners ahead of the report, an extra
+    enabled callback's timings around it -- so the report is located as an
+    embedded document rather than assumed to be the whole stream. When no such
+    document is there at all, that is treated as a failure rather than quietly
+    as a pass.
     """
-    output = f"{result.stdout}\n{result.stderr}"
-    assert result.returncode == 0, output
-
-    observation = re.compile(
-        rf"^TASK \[{re.escape(task_name)}\] \*+\nok: \[", re.MULTILINE
+    stderr_note = (
+        f"\ncaptured stderr:\n{result.stderr}" if result.stderr.strip() else ""
     )
-    assert observation.search(output), (
-        f"ansible-playbook exited 0, but the task {task_name!r} was never "
-        f"observed completing with 'ok'. Either it did not run (tag selection "
-        f"or a skip) or it was renamed.\n{output}"
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+
+    decoder = json.JSONDecoder()
+    report = None
+    offset = 0
+    for line in result.stdout.splitlines(keepends=True):
+        if line.startswith("{"):
+            try:
+                candidate, _ = decoder.raw_decode(result.stdout, offset)
+            except ValueError:
+                candidate = None
+            if isinstance(candidate, dict) and "plays" in candidate:
+                report = candidate
+                break
+        offset += len(line)
+
+    if report is None:
+        raise AssertionError(
+            f"ansible-playbook exited 0, but its stdout carried no JSON "
+            f"callback report, so the task {task_name!r} could not be confirmed "
+            f"to have run.{stderr_note}"
+        )
+
+    observed: list[str] = []
+    for play in report.get("plays", []):
+        for task in play.get("tasks", []):
+            name = task.get("task", {}).get("name")
+            if name not in observed:
+                observed.append(name)
+            if name != task_name:
+                continue
+            if any(
+                not host_result.get("skipped", False)
+                and not host_result.get("failed", False)
+                for host_result in task.get("hosts", {}).values()
+            ):
+                return
+
+    cause = (
+        "it started but every host result skipped or failed"
+        if task_name in observed
+        else "it never started -- tag selection missed it, or it was renamed"
+    )
+    raise AssertionError(
+        f"ansible-playbook exited 0, but the task {task_name!r} did not run to a "
+        f"passing result: {cause}. Tasks observed: {observed}.{stderr_note}"
     )
 
 
