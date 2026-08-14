@@ -84,7 +84,44 @@ validate_marker_state() {
   grep -Fxq "version=$SETUP_VERSION" "$MARKER_PATH" || return 1
   grep -Fxq "dotfiles=$DOTFILES_REPO_URL" "$MARKER_PATH" || return 1
   grep -Fxq "fingerprint=$MARKER_FINGERPRINT" "$MARKER_PATH" || return 1
-  (validate_environment) >/dev/null 2>&1 || return 1
+  (validate_local_tool_readiness) >/dev/null 2>&1 || return 1
+}
+
+marker_field() {
+  sed -n "s/^$1=//p" "$MARKER_PATH"
+}
+
+local_source_commit() {
+  git -C "$HOME/.local/share/chezmoi" rev-parse HEAD
+}
+
+active_home_manager_generation() {
+  readlink -f "$HOME/.local/state/nix/profiles/home-manager"
+}
+
+configuration_is_fresh_without_build() {
+  local active_generation marker_active_generation marker_source_commit source_commit source_status
+  source_status="$(git -C "$HOME/.local/share/chezmoi" status --porcelain)" \
+    || return 1
+  test -z "$source_status" || return 1
+  source_commit="$(local_source_commit)" || return 1
+  test -n "$source_commit" || return 1
+  marker_source_commit="$(marker_field source_commit)"
+  test -n "$marker_source_commit" || return 1
+  test "$marker_source_commit" = "$source_commit" || return 1
+  active_generation="$(active_home_manager_generation)" || return 1
+  test -n "$active_generation" || return 1
+  marker_active_generation="$(marker_field active_generation)"
+  test -n "$marker_active_generation" || return 1
+  test "$marker_active_generation" = "$active_generation" || return 1
+}
+
+build_local_home_manager_configuration() {
+  local flake_configuration flake_path
+  flake_path="${HOME_MANAGER_FLAKE_REF%%#*}"
+  flake_configuration="${HOME_MANAGER_FLAKE_REF#*#}"
+  nix build --offline --no-link --print-out-paths \
+    "$flake_path#homeConfigurations.$flake_configuration.activationPackage"
 }
 
 required_managed_commands_ready() {
@@ -196,6 +233,20 @@ switch_home_manager() {
   fi
 }
 
+activate_built_home_manager_generation() {
+  local built_generation="$1"
+  test -x "$built_generation/activate" \
+    || fail "built Home Manager configuration has no executable activation program"
+  rm -f \
+    "$WORKSTATION_HOME/.config/systemd/user/default.target.wants/aoe-serve.service" \
+    "$WORKSTATION_HOME/.config/systemd/user/sockets.target.wants/aoe-lan-proxy.socket" \
+    "$WORKSTATION_HOME/.config/systemd/user/openclaw-gateway.service" \
+    "$WORKSTATION_HOME/.config/systemd/user/default.target.wants/openclaw-gateway.service"
+  nix-env --profile "$HOME/.local/state/nix/profiles/home-manager" \
+    --set "$built_generation"
+  "$built_generation/activate" --driver-version 1
+}
+
 ensure_agent_tools() {
   if [ -x "$WORKSTATION_HOME/.local/bin/codex" ] \
     && [ -x "$WORKSTATION_HOME/.local/bin/claude" ] \
@@ -220,6 +271,31 @@ authenticate_gh() {
   unset token
 }
 
+validate_local_tool_readiness() {
+  nix --version >/dev/null || fail "nix missing or not working"
+  home-manager --version >/dev/null || fail "home-manager missing or not working"
+  node --version >/dev/null || fail "node missing or not working"
+  npm --version >/dev/null || fail "npm missing or not working"
+  command -v bwrap >/dev/null 2>&1 || fail "bwrap missing from PATH"
+  uv --version >/dev/null || fail "uv missing or not working"
+  jq --version >/dev/null || fail "jq missing or not working"
+  rg --version >/dev/null || fail "rg missing or not working"
+  fd --version >/dev/null || fail "fd missing or not working"
+  fzf --version >/dev/null || fail "fzf missing or not working"
+  test "$(command -v codex)" = "$WORKSTATION_HOME/.local/bin/codex" \
+    || fail "codex must resolve from $WORKSTATION_HOME/.local/bin"
+  codex --version >/dev/null || fail "codex missing or not working"
+  test "$(command -v claude)" = "$WORKSTATION_HOME/.local/bin/claude" \
+    || fail "claude must resolve from $WORKSTATION_HOME/.local/bin"
+  claude --version >/dev/null || fail "claude missing or not working"
+  test "$(command -v pi)" = "$WORKSTATION_HOME/.local/bin/pi" \
+    || fail "pi must resolve from $WORKSTATION_HOME/.local/bin"
+  pi --version >/dev/null || fail "pi missing or not working"
+  required_managed_commands_ready || fail "$required_managed_command_error"
+  hermes version >/dev/null || fail "hermes missing or not working"
+  openclaw --version >/dev/null || fail "openclaw missing or not working"
+}
+
 validate_environment() {
   test -f "$HOME/.ansible/vault-pass" || fail "vault pass missing"
   mode_is_private "$HOME/.ansible/vault-pass" || fail "vault pass must be mode 0400 or 0600"
@@ -233,30 +309,9 @@ validate_environment() {
   ssh-keygen -F github.com -f "$HOME/.ssh/known_hosts" >/dev/null \
     || fail "github.com is missing from known_hosts"
 
-  nix --version >/dev/null || fail "nix missing or not working"
-  home-manager --version >/dev/null || fail "home-manager missing or not working"
-  node --version >/dev/null || fail "node missing or not working"
-  npm --version >/dev/null || fail "npm missing or not working"
-  command -v bwrap >/dev/null 2>&1 || fail "bwrap missing from PATH"
-  uv --version >/dev/null || fail "uv missing or not working"
-  jq --version >/dev/null || fail "jq missing or not working"
-  rg --version >/dev/null || fail "rg missing or not working"
-  fd --version >/dev/null || fail "fd missing or not working"
-  fzf --version >/dev/null || fail "fzf missing or not working"
+  validate_local_tool_readiness
   gh auth status --hostname github.com >/dev/null || fail "gh auth not configured"
   gh api user --jq .login >/dev/null || fail "gh api not working"
-  test "$(command -v codex)" = "$WORKSTATION_HOME/.local/bin/codex" \
-    || fail "codex must resolve from $WORKSTATION_HOME/.local/bin"
-  codex --version >/dev/null || fail "codex missing or not working"
-  test "$(command -v claude)" = "$WORKSTATION_HOME/.local/bin/claude" \
-    || fail "claude must resolve from $WORKSTATION_HOME/.local/bin"
-  claude --version >/dev/null || fail "claude missing or not working"
-  test "$(command -v pi)" = "$WORKSTATION_HOME/.local/bin/pi" \
-    || fail "pi must resolve from $WORKSTATION_HOME/.local/bin"
-  pi --version >/dev/null || fail "pi missing or not working"
-  required_managed_commands_ready || fail "$required_managed_command_error"
-  hermes version >/dev/null || fail "hermes missing or not working"
-  openclaw --version >/dev/null || fail "openclaw missing or not working"
 
   ssh_output="$(ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -T git@github.com 2>&1 || true)"
   printf '%s' "$ssh_output" | grep -Eq "successfully authenticated|You've successfully authenticated" \
@@ -277,17 +332,55 @@ validate_environment() {
 }
 
 write_marker() {
+  local active_generation source_commit
+  source_commit="$(local_source_commit)" \
+    || fail "could not read the local dotfiles source commit"
+  test -n "$source_commit" \
+    || fail "could not read the local dotfiles source commit"
+  active_generation="$(active_home_manager_generation)" \
+    || fail "could not read the active Home Manager generation"
+  test -n "$active_generation" \
+    || fail "could not read the active Home Manager generation"
   mkdir -p "$(dirname "$MARKER_PATH")"
   {
     printf 'version=%s\n' "$SETUP_VERSION"
     printf 'dotfiles=%s\n' "$DOTFILES_REPO_URL"
     printf 'fingerprint=%s\n' "$MARKER_FINGERPRINT"
+    printf 'source_commit=%s\n' "$source_commit"
+    printf 'active_generation=%s\n' "$active_generation"
     printf 'completed_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   } > "$MARKER_PATH"
 }
 
 if validate_marker_state; then
-  printf 'workstation-setup: environment healthy.\n'
+  if configuration_is_fresh_without_build; then
+    printf 'workstation-setup: environment healthy.\n'
+    exit 0
+  fi
+
+  if ! built_generation="$(build_local_home_manager_configuration)"; then
+    fail "failed to build the local Home Manager configuration"
+  fi
+  test -n "$built_generation" \
+    || fail "local Home Manager build returned no generation"
+  active_generation="$(active_home_manager_generation)" \
+    || fail "could not read the active Home Manager generation"
+  test -n "$active_generation" \
+    || fail "could not read the active Home Manager generation"
+  if [ "$built_generation" = "$active_generation" ]; then
+    write_marker
+    printf 'workstation-setup: environment healthy.\n'
+    exit 0
+  fi
+
+  activate_built_home_manager_generation "$built_generation"
+  active_generation="$(active_home_manager_generation)" \
+    || fail "could not read the active Home Manager generation after activation"
+  test "$active_generation" = "$built_generation" \
+    || fail "Home Manager activation did not activate the built configuration"
+  validate_local_tool_readiness
+  write_marker
+  printf 'workstation-setup: environment repaired and ready.\n'
   exit 0
 fi
 
