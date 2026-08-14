@@ -50,6 +50,7 @@ def _prepare_completed_workstation(temp_root: Path) -> tuple[Path, dict[str, str
     git_commit = temp_root / "git-commit"
     git_dirty = temp_root / "git-dirty"
     active_generation = temp_root / "active-generation"
+    active_generation_read_count = temp_root / "active-generation-read-count"
     built_generation = temp_root / "built-generation"
     generation_a = temp_root / "nix" / "store" / "generation-a"
 
@@ -93,16 +94,31 @@ case "$name:$1" in
     if [ "${ACTIVE_GENERATION_READ_FAIL:-0}" = "1" ]; then
       exit 1
     fi
-    if [ "${ACTIVE_GENERATION_READ_EMPTY:-0}" != "1" ]; then
-      cat "$ACTIVE_GENERATION"
+    if [ -n "${ACTIVE_GENERATION_READ_EMPTY_ON_CALL:-}" ]; then
+      read_count="$(cat "$ACTIVE_GENERATION_READ_COUNT" 2>/dev/null || printf '0')"
+      read_count="$((read_count + 1))"
+      printf '%s\n' "$read_count" > "$ACTIVE_GENERATION_READ_COUNT"
+      if [ "$read_count" = "$ACTIVE_GENERATION_READ_EMPTY_ON_CALL" ]; then
+        exit 0
+      fi
     fi
+    if [ "${ACTIVE_GENERATION_READ_EMPTY:-0}" = "1" ]; then
+      exit 0
+    fi
+    if [ "${ACTIVE_GENERATION_READ_EMPTY_AFTER_BUILD:-0}" = "1" ] \
+      && grep -q '^nix build ' "$COMMAND_LOG"; then
+      exit 0
+    fi
+    cat "$ACTIVE_GENERATION"
     ;;
   nix:build)
     if [ "${NIX_BUILD_FAIL:-0}" = "1" ]; then
       printf 'mock local flake build failed\n' >&2
       exit 1
     fi
-    cat "$BUILT_GENERATION"
+    if [ "${NIX_BUILD_EMPTY:-0}" != "1" ]; then
+      cat "$BUILT_GENERATION"
+    fi
     ;;
   nix-env:--profile)
     expected_profile="$HOME/.local/state/nix/profiles/home-manager"
@@ -175,6 +191,7 @@ exit 0
         "GIT_COMMIT": str(git_commit),
         "GIT_DIRTY": str(git_dirty),
         "ACTIVE_GENERATION": str(active_generation),
+        "ACTIVE_GENERATION_READ_COUNT": str(active_generation_read_count),
         "BUILT_GENERATION": str(built_generation),
     }
     return home, env
@@ -188,6 +205,12 @@ def _run_setup(temp_root: Path, env: dict[str, str]) -> subprocess.CompletedProc
         stderr=subprocess.PIPE,
         env=env,
         check=False,
+    )
+
+
+def _assert_no_direct_home_manager_activation(commands: str) -> None:
+    assert not any(
+        line.endswith("/activate --driver-version 1") for line in commands.splitlines()
     )
 
 
@@ -229,6 +252,7 @@ def test_workstation_configuration_freshness_contract() -> None:
         ):
             (home / ".ssh" / name).unlink()
         freshness_command_logs: list[str] = []
+        no_switch_command_logs: list[str] = []
 
         healthy = _run_setup(root, env)
 
@@ -236,11 +260,13 @@ def test_workstation_configuration_freshness_contract() -> None:
         assert healthy.stdout == "workstation-setup: environment healthy.\n"
         healthy_commands = (root / "commands.log").read_text(encoding="utf-8")
         freshness_command_logs.append(healthy_commands)
+        no_switch_command_logs.append(healthy_commands)
         assert "git -C " in healthy_commands
         assert " status --porcelain" in healthy_commands
         assert "readlink -f " in healthy_commands
         assert "nix build " not in healthy_commands
         assert "home-manager switch" not in healthy_commands
+        _assert_no_direct_home_manager_activation(healthy_commands)
 
         (root / "commands.log").write_text("", encoding="utf-8")
         (root / "git-commit").write_text("commit-b\n", encoding="utf-8")
@@ -251,8 +277,10 @@ def test_workstation_configuration_freshness_contract() -> None:
         assert result.stdout == "workstation-setup: environment healthy.\n"
         commands = (root / "commands.log").read_text(encoding="utf-8")
         freshness_command_logs.append(commands)
+        no_switch_command_logs.append(commands)
         assert "nix build --offline " in commands
         assert "home-manager switch" not in commands
+        _assert_no_direct_home_manager_activation(commands)
         marker = (
             home / ".local" / "state" / "workstation-setup" / "complete"
         ).read_text(encoding="utf-8")
@@ -314,14 +342,18 @@ def test_workstation_configuration_freshness_contract() -> None:
         (root / "active-generation").write_text(
             f"{root / 'nix/store/generation-d'}\n", encoding="utf-8"
         )
-        active_drift = _run_setup(root, env)
-        assert active_drift.returncode == 0, active_drift.stderr
-        active_drift_commands = (root / "commands.log").read_text(encoding="utf-8")
-        freshness_command_logs.append(active_drift_commands)
-        assert "nix build " in active_drift_commands
-        assert f"{generation_c / 'activate'} " in active_drift_commands
-        assert "home-manager switch" not in active_drift_commands
-        assert "nix run " not in active_drift_commands
+        active_generation_mismatch = _run_setup(root, env)
+        assert (
+            active_generation_mismatch.returncode == 0
+        ), active_generation_mismatch.stderr
+        active_generation_mismatch_commands = (root / "commands.log").read_text(
+            encoding="utf-8"
+        )
+        freshness_command_logs.append(active_generation_mismatch_commands)
+        assert "nix build " in active_generation_mismatch_commands
+        assert f"{generation_c / 'activate'} " in active_generation_mismatch_commands
+        assert "home-manager switch" not in active_generation_mismatch_commands
+        assert "nix run " not in active_generation_mismatch_commands
 
         (root / "commands.log").write_text("", encoding="utf-8")
         (root / "git-dirty").write_text(" M home.nix\n", encoding="utf-8")
@@ -330,8 +362,10 @@ def test_workstation_configuration_freshness_contract() -> None:
         assert dirty.stdout == "workstation-setup: environment healthy.\n"
         dirty_commands = (root / "commands.log").read_text(encoding="utf-8")
         freshness_command_logs.append(dirty_commands)
+        no_switch_command_logs.append(dirty_commands)
         assert "nix build " in dirty_commands
         assert "home-manager switch" not in dirty_commands
+        _assert_no_direct_home_manager_activation(dirty_commands)
         (root / "git-dirty").write_text("", encoding="utf-8")
 
         marker_path = home / ".local" / "state" / "workstation-setup" / "complete"
@@ -351,8 +385,10 @@ def test_workstation_configuration_freshness_contract() -> None:
             assert healed.returncode == 0, healed.stderr
             healed_commands = (root / "commands.log").read_text(encoding="utf-8")
             freshness_command_logs.append(healed_commands)
+            no_switch_command_logs.append(healed_commands)
             assert "nix build " in healed_commands
             assert "home-manager switch" not in healed_commands
+            _assert_no_direct_home_manager_activation(healed_commands)
             healed_marker = marker_path.read_text(encoding="utf-8")
             assert "source_commit=commit-c\n" in healed_marker
             assert f"active_generation={generation_c}\n" in healed_marker
@@ -414,7 +450,13 @@ def test_workstation_configuration_freshness_contract() -> None:
         )
         assert "environment healthy" not in empty_source_after_build.stdout
         assert marker_path.read_text(encoding="utf-8") == marker_with_empty_source
+        _assert_no_direct_home_manager_activation(
+            (root / "commands.log").read_text(encoding="utf-8")
+        )
         freshness_command_logs.append(
+            (root / "commands.log").read_text(encoding="utf-8")
+        )
+        no_switch_command_logs.append(
             (root / "commands.log").read_text(encoding="utf-8")
         )
         marker_path.write_text(complete_marker, encoding="utf-8")
@@ -461,6 +503,72 @@ def test_workstation_configuration_freshness_contract() -> None:
             marker_path.write_text(complete_marker, encoding="utf-8")
 
         (root / "commands.log").write_text("", encoding="utf-8")
+        marker_before_empty_build = marker_path.read_text(encoding="utf-8")
+        (root / "git-commit").write_text("commit-d-empty-build\n", encoding="utf-8")
+
+        empty_build = _run_setup(root, env | {"NIX_BUILD_EMPTY": "1"})
+
+        assert empty_build.returncode != 0
+        assert "local Home Manager build returned no generation" in empty_build.stderr
+        assert "environment healthy" not in empty_build.stdout
+        assert marker_path.read_text(encoding="utf-8") == marker_before_empty_build
+        freshness_command_logs.append(
+            (root / "commands.log").read_text(encoding="utf-8")
+        )
+
+        (root / "commands.log").write_text("", encoding="utf-8")
+        marker_before_empty_active_generation = marker_path.read_text(encoding="utf-8")
+        (root / "git-commit").write_text("commit-d-empty-active\n", encoding="utf-8")
+
+        empty_active_generation = _run_setup(
+            root, env | {"ACTIVE_GENERATION_READ_EMPTY_AFTER_BUILD": "1"}
+        )
+
+        assert empty_active_generation.returncode != 0
+        assert (
+            "could not read the active Home Manager generation"
+            in empty_active_generation.stderr
+        )
+        assert "environment healthy" not in empty_active_generation.stdout
+        empty_active_generation_commands = (root / "commands.log").read_text(
+            encoding="utf-8"
+        )
+        assert f"{generation_c / 'activate'} --driver-version 1" not in (
+            empty_active_generation_commands.splitlines()
+        )
+        assert marker_path.read_text(encoding="utf-8") == (
+            marker_before_empty_active_generation
+        )
+        freshness_command_logs.append(empty_active_generation_commands)
+
+        (root / "commands.log").write_text("", encoding="utf-8")
+        marker_before_empty_marker_generation = marker_path.read_text(encoding="utf-8")
+        (root / "git-commit").write_text("commit-d-empty-marker\n", encoding="utf-8")
+        (root / "active-generation-read-count").write_text("0\n", encoding="utf-8")
+
+        empty_marker_generation = _run_setup(
+            root, env | {"ACTIVE_GENERATION_READ_EMPTY_ON_CALL": "2"}
+        )
+
+        assert empty_marker_generation.returncode != 0
+        assert (
+            "could not read the active Home Manager generation"
+            in empty_marker_generation.stderr
+        )
+        assert "environment healthy" not in empty_marker_generation.stdout
+        empty_marker_generation_commands = (root / "commands.log").read_text(
+            encoding="utf-8"
+        )
+        assert f"{generation_c / 'activate'} --driver-version 1" not in (
+            empty_marker_generation_commands.splitlines()
+        )
+        assert marker_path.read_text(encoding="utf-8") == (
+            marker_before_empty_marker_generation
+        )
+        freshness_command_logs.append(empty_marker_generation_commands)
+        no_switch_command_logs.append(empty_marker_generation_commands)
+
+        (root / "commands.log").write_text("", encoding="utf-8")
         (root / "git-commit").write_text("commit-e\n", encoding="utf-8")
         failed_build = _run_setup(root, env | {"NIX_BUILD_FAIL": "1"})
         assert failed_build.returncode != 0
@@ -504,14 +612,29 @@ def test_workstation_configuration_freshness_contract() -> None:
         assert "nix run " not in failed_readiness_commands
         assert marker_path.read_text(encoding="utf-8") == marker_before_failed_readiness
 
+        for no_switch_commands in no_switch_command_logs:
+            _assert_no_direct_home_manager_activation(no_switch_commands)
+
         all_freshness_commands = "\n".join(freshness_command_logs)
-        assert " pull --ff-only" not in all_freshness_commands
+        freshness_command_lines = all_freshness_commands.splitlines()
         assert not any(
-            line.startswith(
-                ("bw ", "chezmoi ", "curl ", "gh ", "ssh ", "ssh-keygen ")
-            )
-            for line in all_freshness_commands.splitlines()
+            line.startswith(("bw ", "chezmoi ", "gh ", "ssh ", "ssh-keygen "))
+            for line in freshness_command_lines
         )
+        allowed_freshness_git_commands = {
+            f"git -C {home / '.local/share/chezmoi'} rev-parse HEAD",
+            f"git -C {home / '.local/share/chezmoi'} status --porcelain",
+        }
+        assert {
+            line for line in freshness_command_lines if line.startswith("git ")
+        } <= allowed_freshness_git_commands
+        assert not any(
+            line.startswith(("nix run ", "nix flake update"))
+            for line in freshness_command_lines
+        )
+        assert {
+            line for line in freshness_command_lines if line.startswith("nix build ")
+        } == {expected_build_command}
         setup_source = (
             REPO_ROOT
             / "playbooks/roles/config/lxc_workstation_baseline/templates/workstation-setup.sh.j2"

@@ -337,6 +337,8 @@ write_marker() {
     || fail "could not read the local dotfiles source commit"
   active_generation="$(active_home_manager_generation)" \
     || fail "could not read the active Home Manager generation"
+  test -n "$active_generation" \
+    || fail "could not read the active Home Manager generation"
   mkdir -p "$(dirname "$MARKER_PATH")"
   {
     printf 'version=%s\n' "$SETUP_VERSION"
@@ -357,7 +359,11 @@ if validate_marker_state; then
   if ! built_generation="$(build_local_home_manager_configuration)"; then
     fail "failed to build the local Home Manager configuration"
   fi
+  test -n "$built_generation" \
+    || fail "local Home Manager build returned no generation"
   active_generation="$(active_home_manager_generation)" \
+    || fail "could not read the active Home Manager generation"
+  test -n "$active_generation" \
     || fail "could not read the active Home Manager generation"
   if [ "$built_generation" = "$active_generation" ]; then
     write_marker
