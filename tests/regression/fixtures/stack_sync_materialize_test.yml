@@ -419,16 +419,16 @@
 - name: Test planner applies declaration ownership by resolved destination
   hosts: localhost
   connection: local
-  gather_facts: false
+  gather_facts: true
   vars:
     planner_root: "{{ temp_root }}/planner-metadata"
     lxc_docker_environment_internal:
       shared_mount_source: "{{ planner_root }}/shared"
       stacks_source: "{{ planner_root }}/source"
-      shared_owner: "52520"
-      shared_group: "52521"
-      docker_uid: "52520"
-      docker_gid: "52521"
+      shared_owner: "{{ ansible_user_uid }}"
+      shared_group: "{{ ansible_user_gid }}"
+      docker_uid: "{{ ansible_user_uid }}"
+      docker_gid: "{{ ansible_user_gid }}"
       path_ownership_overrides: []
     _per_host_stack_metadata_files:
       files: []
@@ -449,8 +449,8 @@
           ---
           x-managed-files:
             - path: ./declared.conf
-              owner: "42420"
-              group: "42421"
+              owner: nobody
+              group: nogroup
               mode: "0600"
           services: {}
         dest: "{{ lxc_docker_environment_internal.stacks_source }}/metadata/compose.yaml"
@@ -494,17 +494,20 @@
         file_type: directory
       register: _per_host_dirs
 
-    - name: Plan synced file metadata
-      ansible.builtin.include_tasks: ../../../playbooks/roles/config/lxc_stack_sync/tasks/planner.yml
+    - name: Materialize synced files with planned metadata
+      ansible.builtin.include_tasks:
+        file: "../../../playbooks/roles/config/lxc_stack_sync/tasks/materialize.yml"
+        apply:
+          become: true
 
     - name: Assert declaration ownership wins only for its resolved destination
       ansible.builtin.assert:
         that:
-          - declared_entry.owner == '42420'
-          - declared_entry.group == '42421'
+          - declared_entry.owner == 'nobody'
+          - declared_entry.group == 'nogroup'
           - declared_entry.mode == '0600'
-          - undeclared_entry.owner == '52520'
-          - undeclared_entry.group == '52521'
+          - undeclared_entry.owner == ansible_user_uid
+          - undeclared_entry.group == ansible_user_gid
           - undeclared_entry.mode == '0644'
       vars:
         declared_entry: >-
@@ -515,6 +518,43 @@
           {{ lxc_stack_sync_manifest_plan.files_to_copy
              | selectattr('dest_path', 'equalto', planner_root ~ '/shared/stacks/metadata/undeclared.conf')
              | first }}
+
+    - name: Inspect materialized declared file metadata
+      ansible.builtin.stat:
+        path: "{{ planner_root }}/shared/stacks/metadata/declared.conf"
+      register: _declared_materialized_file
+
+    - name: Assert declaration metadata is applied by the sync operation
+      ansible.builtin.assert:
+        that:
+          - _declared_materialized_file.stat.exists
+          - _declared_materialized_file.stat.uid == 65534
+          - _declared_materialized_file.stat.gid == 65534
+          - _declared_materialized_file.stat.mode == '0600'
+          - >-
+            (_stack_sync_managed_file_create_results.results | default([])
+            | map(attribute='item.path')
+            | select('equalto', planner_root ~ '/shared/stacks/metadata/declared.conf')
+            | list
+            | length) == 0
+          - >-
+            (_stack_sync_managed_file_permission_results.results | default([])
+            | map(attribute='item.path')
+            | select('equalto', planner_root ~ '/shared/stacks/metadata/declared.conf')
+            | list
+            | length) == 0
+        fail_msg: >-
+          The synced declaration-specific owner, group, or mode was not applied directly
+          by materialization
+
+    - name: Restore planner fixture ownership for temporary-directory cleanup
+      ansible.builtin.file:
+        path: "{{ planner_root }}"
+        state: directory
+        owner: "{{ ansible_user_uid }}"
+        group: "{{ ansible_user_gid }}"
+        recurse: true
+      become: true
 
 - name: Prepare exact repository stack file fixtures
   hosts: localhost
