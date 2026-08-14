@@ -100,8 +100,10 @@ active_home_manager_generation() {
 }
 
 configuration_is_fresh_without_build() {
-  local active_generation marker_active_generation marker_source_commit source_commit
-  test -z "$(git -C "$HOME/.local/share/chezmoi" status --porcelain)" || return 1
+  local active_generation marker_active_generation marker_source_commit source_commit source_status
+  source_status="$(git -C "$HOME/.local/share/chezmoi" status --porcelain)" \
+    || return 1
+  test -z "$source_status" || return 1
   source_commit="$(local_source_commit)" || return 1
   test -n "$source_commit" || return 1
   marker_source_commit="$(marker_field source_commit)"

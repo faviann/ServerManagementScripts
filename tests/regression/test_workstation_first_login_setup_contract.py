@@ -87,7 +87,12 @@ case "$name:$1" in
           cat "$GIT_COMMIT"
         fi
         ;;
-      status) cat "$GIT_DIRTY" ;;
+      status)
+        if [ "${GIT_STATUS_FAIL:-0}" = "1" ]; then
+          exit 1
+        fi
+        cat "$GIT_DIRTY"
+        ;;
     esac
     ;;
   readlink:-f)
@@ -267,6 +272,22 @@ def test_workstation_configuration_freshness_contract() -> None:
         assert "nix build " not in healthy_commands
         assert "home-manager switch" not in healthy_commands
         _assert_no_direct_home_manager_activation(healthy_commands)
+
+        (root / "commands.log").write_text("", encoding="utf-8")
+        failed_status = _run_setup(
+            root, env | {"GIT_STATUS_FAIL": "1", "NIX_BUILD_FAIL": "1"}
+        )
+
+        assert failed_status.returncode != 0
+        assert (
+            "failed to build the local Home Manager configuration"
+            in failed_status.stderr
+        )
+        assert "environment healthy" not in failed_status.stdout
+        failed_status_commands = (root / "commands.log").read_text(encoding="utf-8")
+        freshness_command_logs.append(failed_status_commands)
+        assert " status --porcelain" in failed_status_commands
+        assert "nix build " in failed_status_commands
 
         (root / "commands.log").write_text("", encoding="utf-8")
         (root / "git-commit").write_text("commit-b\n", encoding="utf-8")
@@ -581,6 +602,51 @@ def test_workstation_configuration_freshness_contract() -> None:
         freshness_command_logs.append(failed_commands)
         assert "nix build " in failed_commands
         assert "home-manager switch" not in failed_commands
+
+        (root / "commands.log").write_text("", encoding="utf-8")
+        (root / "git-dirty").write_text(" M home.nix\n", encoding="utf-8")
+        generation_e = root / "nix" / "store" / "generation-e"
+        _write_activation_package(generation_e)
+        (root / "built-generation").write_text(
+            f"{generation_e}\n", encoding="utf-8"
+        )
+
+        dirty_repaired = _run_setup(root, env)
+
+        assert dirty_repaired.returncode == 0, dirty_repaired.stderr
+        assert (
+            dirty_repaired.stdout
+            == "workstation-setup: environment repaired and ready.\n"
+        )
+        dirty_repaired_commands = (root / "commands.log").read_text(
+            encoding="utf-8"
+        )
+        freshness_command_logs.append(dirty_repaired_commands)
+        dirty_repaired_lines = dirty_repaired_commands.splitlines()
+        expected_dirty_profile_set = (
+            "nix-env --profile "
+            f"{home / '.local/state/nix/profiles/home-manager'} --set {generation_e}"
+        )
+        expected_dirty_activation = f"{generation_e / 'activate'} --driver-version 1"
+        assert [
+            line for line in dirty_repaired_lines if line.startswith("nix-env --profile ")
+        ] == [expected_dirty_profile_set]
+        assert [
+            line
+            for line in dirty_repaired_lines
+            if line.endswith("/activate --driver-version 1")
+        ] == [expected_dirty_activation]
+        assert dirty_repaired_lines.index(
+            expected_dirty_profile_set
+        ) < dirty_repaired_lines.index(expected_dirty_activation)
+        assert dirty_repaired_lines.count("nix --version") == 2
+        assert (root / "active-generation").read_text(encoding="utf-8") == (
+            f"{generation_e}\n"
+        )
+        dirty_repaired_marker = marker_path.read_text(encoding="utf-8")
+        assert "source_commit=commit-e\n" in dirty_repaired_marker
+        assert f"active_generation={generation_e}\n" in dirty_repaired_marker
+        (root / "git-dirty").write_text("", encoding="utf-8")
 
         (root / "commands.log").write_text("", encoding="utf-8")
         marker_before_failed_readiness = marker_path.read_text(encoding="utf-8")
