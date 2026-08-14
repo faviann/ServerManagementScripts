@@ -103,6 +103,10 @@ def run_isolated_playbook(
                 "--ro-bind",
                 "/",
                 "/",
+                # TMPDIR may be below /dev/shm, so establish /dev before
+                # rebinding the scenario root that holds its prerequisites.
+                "--dev",
+                "/dev",
                 "--bind",
                 temp_root,
                 temp_root,
@@ -111,8 +115,6 @@ def run_isolated_playbook(
                 "/etc/apt/sources.list.d",
                 "--proc",
                 "/proc",
-                "--dev",
-                "/dev",
                 "--chdir",
                 str(REPO_ROOT),
                 "uv",
