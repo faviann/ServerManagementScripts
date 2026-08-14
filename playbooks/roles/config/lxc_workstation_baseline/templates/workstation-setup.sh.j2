@@ -84,7 +84,7 @@ validate_marker_state() {
   grep -Fxq "version=$SETUP_VERSION" "$MARKER_PATH" || return 1
   grep -Fxq "dotfiles=$DOTFILES_REPO_URL" "$MARKER_PATH" || return 1
   grep -Fxq "fingerprint=$MARKER_FINGERPRINT" "$MARKER_PATH" || return 1
-  (validate_environment) >/dev/null 2>&1 || return 1
+  (validate_local_tool_readiness) >/dev/null 2>&1 || return 1
 }
 
 marker_field() {
@@ -100,9 +100,18 @@ active_home_manager_generation() {
 }
 
 configuration_is_fresh_without_build() {
+  local active_generation marker_active_generation marker_source_commit source_commit
   test -z "$(git -C "$HOME/.local/share/chezmoi" status --porcelain)" || return 1
-  test "$(marker_field source_commit)" = "$(local_source_commit)" || return 1
-  test "$(marker_field active_generation)" = "$(active_home_manager_generation)" || return 1
+  source_commit="$(local_source_commit)" || return 1
+  test -n "$source_commit" || return 1
+  marker_source_commit="$(marker_field source_commit)"
+  test -n "$marker_source_commit" || return 1
+  test "$marker_source_commit" = "$source_commit" || return 1
+  active_generation="$(active_home_manager_generation)" || return 1
+  test -n "$active_generation" || return 1
+  marker_active_generation="$(marker_field active_generation)"
+  test -n "$marker_active_generation" || return 1
+  test "$marker_active_generation" = "$active_generation" || return 1
 }
 
 build_local_home_manager_configuration() {
@@ -260,6 +269,31 @@ authenticate_gh() {
   unset token
 }
 
+validate_local_tool_readiness() {
+  nix --version >/dev/null || fail "nix missing or not working"
+  home-manager --version >/dev/null || fail "home-manager missing or not working"
+  node --version >/dev/null || fail "node missing or not working"
+  npm --version >/dev/null || fail "npm missing or not working"
+  command -v bwrap >/dev/null 2>&1 || fail "bwrap missing from PATH"
+  uv --version >/dev/null || fail "uv missing or not working"
+  jq --version >/dev/null || fail "jq missing or not working"
+  rg --version >/dev/null || fail "rg missing or not working"
+  fd --version >/dev/null || fail "fd missing or not working"
+  fzf --version >/dev/null || fail "fzf missing or not working"
+  test "$(command -v codex)" = "$WORKSTATION_HOME/.local/bin/codex" \
+    || fail "codex must resolve from $WORKSTATION_HOME/.local/bin"
+  codex --version >/dev/null || fail "codex missing or not working"
+  test "$(command -v claude)" = "$WORKSTATION_HOME/.local/bin/claude" \
+    || fail "claude must resolve from $WORKSTATION_HOME/.local/bin"
+  claude --version >/dev/null || fail "claude missing or not working"
+  test "$(command -v pi)" = "$WORKSTATION_HOME/.local/bin/pi" \
+    || fail "pi must resolve from $WORKSTATION_HOME/.local/bin"
+  pi --version >/dev/null || fail "pi missing or not working"
+  required_managed_commands_ready || fail "$required_managed_command_error"
+  hermes version >/dev/null || fail "hermes missing or not working"
+  openclaw --version >/dev/null || fail "openclaw missing or not working"
+}
+
 validate_environment() {
   test -f "$HOME/.ansible/vault-pass" || fail "vault pass missing"
   mode_is_private "$HOME/.ansible/vault-pass" || fail "vault pass must be mode 0400 or 0600"
@@ -273,30 +307,9 @@ validate_environment() {
   ssh-keygen -F github.com -f "$HOME/.ssh/known_hosts" >/dev/null \
     || fail "github.com is missing from known_hosts"
 
-  nix --version >/dev/null || fail "nix missing or not working"
-  home-manager --version >/dev/null || fail "home-manager missing or not working"
-  node --version >/dev/null || fail "node missing or not working"
-  npm --version >/dev/null || fail "npm missing or not working"
-  command -v bwrap >/dev/null 2>&1 || fail "bwrap missing from PATH"
-  uv --version >/dev/null || fail "uv missing or not working"
-  jq --version >/dev/null || fail "jq missing or not working"
-  rg --version >/dev/null || fail "rg missing or not working"
-  fd --version >/dev/null || fail "fd missing or not working"
-  fzf --version >/dev/null || fail "fzf missing or not working"
+  validate_local_tool_readiness
   gh auth status --hostname github.com >/dev/null || fail "gh auth not configured"
   gh api user --jq .login >/dev/null || fail "gh api not working"
-  test "$(command -v codex)" = "$WORKSTATION_HOME/.local/bin/codex" \
-    || fail "codex must resolve from $WORKSTATION_HOME/.local/bin"
-  codex --version >/dev/null || fail "codex missing or not working"
-  test "$(command -v claude)" = "$WORKSTATION_HOME/.local/bin/claude" \
-    || fail "claude must resolve from $WORKSTATION_HOME/.local/bin"
-  claude --version >/dev/null || fail "claude missing or not working"
-  test "$(command -v pi)" = "$WORKSTATION_HOME/.local/bin/pi" \
-    || fail "pi must resolve from $WORKSTATION_HOME/.local/bin"
-  pi --version >/dev/null || fail "pi missing or not working"
-  required_managed_commands_ready || fail "$required_managed_command_error"
-  hermes version >/dev/null || fail "hermes missing or not working"
-  openclaw --version >/dev/null || fail "openclaw missing or not working"
 
   ssh_output="$(ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -T git@github.com 2>&1 || true)"
   printf '%s' "$ssh_output" | grep -Eq "successfully authenticated|You've successfully authenticated" \
@@ -319,6 +332,8 @@ validate_environment() {
 write_marker() {
   local active_generation source_commit
   source_commit="$(local_source_commit)" \
+    || fail "could not read the local dotfiles source commit"
+  test -n "$source_commit" \
     || fail "could not read the local dotfiles source commit"
   active_generation="$(active_home_manager_generation)" \
     || fail "could not read the active Home Manager generation"
@@ -355,7 +370,7 @@ if validate_marker_state; then
     || fail "could not read the active Home Manager generation after activation"
   test "$active_generation" = "$built_generation" \
     || fail "Home Manager activation did not activate the built configuration"
-  validate_environment
+  validate_local_tool_readiness
   write_marker
   printf 'workstation-setup: environment repaired and ready.\n'
   exit 0

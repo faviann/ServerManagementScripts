@@ -78,11 +78,25 @@ case "$name:$1" in
   ssh:*) printf "You've successfully authenticated\n" ;;
   git:-C)
     case "$3" in
-      rev-parse) cat "$GIT_COMMIT" ;;
+      rev-parse)
+        if [ "${GIT_COMMIT_READ_FAIL:-0}" = "1" ]; then
+          exit 1
+        fi
+        if [ "${GIT_COMMIT_READ_EMPTY:-0}" != "1" ]; then
+          cat "$GIT_COMMIT"
+        fi
+        ;;
       status) cat "$GIT_DIRTY" ;;
     esac
     ;;
-  readlink:-f) cat "$ACTIVE_GENERATION" ;;
+  readlink:-f)
+    if [ "${ACTIVE_GENERATION_READ_FAIL:-0}" = "1" ]; then
+      exit 1
+    fi
+    if [ "${ACTIVE_GENERATION_READ_EMPTY:-0}" != "1" ]; then
+      cat "$ACTIVE_GENERATION"
+    fi
+    ;;
   nix:build)
     if [ "${NIX_BUILD_FAIL:-0}" = "1" ]; then
       printf 'mock local flake build failed\n' >&2
@@ -206,12 +220,22 @@ def test_workstation_configuration_freshness_contract() -> None:
         _write_executable(
             home / ".local" / "bin" / "workstation-update", "#!/bin/sh\nexit 0\n"
         )
+        (home / ".ansible" / "vault-pass").unlink()
+        for name in (
+            "id_ed25519",
+            "id_ed25519.pub",
+            "allowed_signers",
+            "known_hosts",
+        ):
+            (home / ".ssh" / name).unlink()
+        freshness_command_logs: list[str] = []
 
         healthy = _run_setup(root, env)
 
         assert healthy.returncode == 0, healthy.stderr
         assert healthy.stdout == "workstation-setup: environment healthy.\n"
         healthy_commands = (root / "commands.log").read_text(encoding="utf-8")
+        freshness_command_logs.append(healthy_commands)
         assert "git -C " in healthy_commands
         assert " status --porcelain" in healthy_commands
         assert "readlink -f " in healthy_commands
@@ -226,6 +250,7 @@ def test_workstation_configuration_freshness_contract() -> None:
         assert result.returncode == 0, result.stderr
         assert result.stdout == "workstation-setup: environment healthy.\n"
         commands = (root / "commands.log").read_text(encoding="utf-8")
+        freshness_command_logs.append(commands)
         assert "nix build --offline " in commands
         assert "home-manager switch" not in commands
         marker = (
@@ -247,6 +272,7 @@ def test_workstation_configuration_freshness_contract() -> None:
         assert repaired.returncode == 0, repaired.stderr
         assert repaired.stdout == "workstation-setup: environment repaired and ready.\n"
         repaired_commands = (root / "commands.log").read_text(encoding="utf-8")
+        freshness_command_logs.append(repaired_commands)
         expected_build_command = (
             "nix build --offline --no-link --print-out-paths "
             f"{home / '.local/share/chezmoi'}#homeConfigurations.workstation.activationPackage"
@@ -291,6 +317,7 @@ def test_workstation_configuration_freshness_contract() -> None:
         active_drift = _run_setup(root, env)
         assert active_drift.returncode == 0, active_drift.stderr
         active_drift_commands = (root / "commands.log").read_text(encoding="utf-8")
+        freshness_command_logs.append(active_drift_commands)
         assert "nix build " in active_drift_commands
         assert f"{generation_c / 'activate'} " in active_drift_commands
         assert "home-manager switch" not in active_drift_commands
@@ -302,6 +329,7 @@ def test_workstation_configuration_freshness_contract() -> None:
         assert dirty.returncode == 0, dirty.stderr
         assert dirty.stdout == "workstation-setup: environment healthy.\n"
         dirty_commands = (root / "commands.log").read_text(encoding="utf-8")
+        freshness_command_logs.append(dirty_commands)
         assert "nix build " in dirty_commands
         assert "home-manager switch" not in dirty_commands
         (root / "git-dirty").write_text("", encoding="utf-8")
@@ -322,11 +350,115 @@ def test_workstation_configuration_freshness_contract() -> None:
             healed = _run_setup(root, env)
             assert healed.returncode == 0, healed.stderr
             healed_commands = (root / "commands.log").read_text(encoding="utf-8")
+            freshness_command_logs.append(healed_commands)
             assert "nix build " in healed_commands
             assert "home-manager switch" not in healed_commands
             healed_marker = marker_path.read_text(encoding="utf-8")
             assert "source_commit=commit-c\n" in healed_marker
             assert f"active_generation={generation_c}\n" in healed_marker
+
+        complete_marker = marker_path.read_text(encoding="utf-8")
+        for marker_source_line, read_failure in (
+            (None, {"GIT_COMMIT_READ_FAIL": "1"}),
+            ("source_commit=", {"GIT_COMMIT_READ_EMPTY": "1"}),
+        ):
+            marker_lines = complete_marker.splitlines()
+            marker_without_source = [
+                line
+                for line in marker_lines
+                if not line.startswith("source_commit=")
+            ]
+            if marker_source_line is not None:
+                marker_without_source.append(marker_source_line)
+            marker_path.write_text(
+                "\n".join(marker_without_source) + "\n", encoding="utf-8"
+            )
+            (root / "commands.log").write_text("", encoding="utf-8")
+
+            failed_source_read = _run_setup(
+                root, env | read_failure | {"NIX_BUILD_FAIL": "1"}
+            )
+
+            assert failed_source_read.returncode != 0
+            assert (
+                "failed to build the local Home Manager configuration"
+                in failed_source_read.stderr
+            )
+            assert "environment healthy" not in failed_source_read.stdout
+            assert "nix build " in (root / "commands.log").read_text(
+                encoding="utf-8"
+            )
+            freshness_command_logs.append(
+                (root / "commands.log").read_text(encoding="utf-8")
+            )
+            assert marker_path.read_text(encoding="utf-8") == (
+                "\n".join(marker_without_source) + "\n"
+            )
+            marker_path.write_text(complete_marker, encoding="utf-8")
+
+        marker_with_empty_source = "\n".join(
+            "source_commit=" if line.startswith("source_commit=") else line
+            for line in complete_marker.splitlines()
+        ) + "\n"
+        marker_path.write_text(marker_with_empty_source, encoding="utf-8")
+        (root / "commands.log").write_text("", encoding="utf-8")
+
+        empty_source_after_build = _run_setup(
+            root, env | {"GIT_COMMIT_READ_EMPTY": "1"}
+        )
+
+        assert empty_source_after_build.returncode != 0
+        assert (
+            "could not read the local dotfiles source commit"
+            in empty_source_after_build.stderr
+        )
+        assert "environment healthy" not in empty_source_after_build.stdout
+        assert marker_path.read_text(encoding="utf-8") == marker_with_empty_source
+        freshness_command_logs.append(
+            (root / "commands.log").read_text(encoding="utf-8")
+        )
+        marker_path.write_text(complete_marker, encoding="utf-8")
+
+        for marker_generation_line, read_failure in (
+            (None, {"ACTIVE_GENERATION_READ_FAIL": "1"}),
+            (
+                "active_generation=",
+                {"ACTIVE_GENERATION_READ_EMPTY": "1"},
+            ),
+        ):
+            marker_lines = complete_marker.splitlines()
+            marker_without_generation = [
+                line
+                for line in marker_lines
+                if not line.startswith("active_generation=")
+            ]
+            if marker_generation_line is not None:
+                marker_without_generation.append(marker_generation_line)
+            marker_path.write_text(
+                "\n".join(marker_without_generation) + "\n", encoding="utf-8"
+            )
+            (root / "commands.log").write_text("", encoding="utf-8")
+
+            failed_generation_read = _run_setup(
+                root, env | read_failure | {"NIX_BUILD_FAIL": "1"}
+            )
+
+            assert failed_generation_read.returncode != 0
+            assert (
+                "failed to build the local Home Manager configuration"
+                in failed_generation_read.stderr
+            )
+            assert "environment healthy" not in failed_generation_read.stdout
+            assert "nix build " in (root / "commands.log").read_text(
+                encoding="utf-8"
+            )
+            freshness_command_logs.append(
+                (root / "commands.log").read_text(encoding="utf-8")
+            )
+            assert marker_path.read_text(encoding="utf-8") == (
+                "\n".join(marker_without_generation) + "\n"
+            )
+            marker_path.write_text(complete_marker, encoding="utf-8")
 
         (root / "commands.log").write_text("", encoding="utf-8")
         (root / "git-commit").write_text("commit-e\n", encoding="utf-8")
@@ -338,6 +470,7 @@ def test_workstation_configuration_freshness_contract() -> None:
         )
         assert "environment healthy" not in failed_build.stdout
         failed_commands = (root / "commands.log").read_text(encoding="utf-8")
+        freshness_command_logs.append(failed_commands)
         assert "nix build " in failed_commands
         assert "home-manager switch" not in failed_commands
 
@@ -360,6 +493,7 @@ def test_workstation_configuration_freshness_contract() -> None:
         failed_readiness_commands = (root / "commands.log").read_text(
             encoding="utf-8"
         )
+        freshness_command_logs.append(failed_readiness_commands)
         assert [
             line
             for line in failed_readiness_commands.splitlines()
@@ -370,21 +504,12 @@ def test_workstation_configuration_freshness_contract() -> None:
         assert "nix run " not in failed_readiness_commands
         assert marker_path.read_text(encoding="utf-8") == marker_before_failed_readiness
 
-        all_freshness_commands = "\n".join(
-            (
-                healthy_commands,
-                commands,
-                repaired_commands,
-                active_drift_commands,
-                dirty_commands,
-                healed_commands,
-                failed_commands,
-                failed_readiness_commands,
-            )
-        )
+        all_freshness_commands = "\n".join(freshness_command_logs)
         assert " pull --ff-only" not in all_freshness_commands
         assert not any(
-            line.startswith(("bw ", "chezmoi ", "curl "))
+            line.startswith(
+                ("bw ", "chezmoi ", "curl ", "gh ", "ssh ", "ssh-keygen ")
+            )
             for line in all_freshness_commands.splitlines()
         )
         setup_source = (
@@ -450,7 +575,14 @@ def test_workstation_first_login_setup_contract() -> None:
         assert repaired.returncode == 0, repaired.stderr
         assert workstation_update.is_file() and os.access(workstation_update, os.X_OK)
         assert "workstation-setup: environment repaired and ready." in repaired.stdout
-        assert "home-manager switch" in (root / "commands.log").read_text(encoding="utf-8")
+        full_repair_commands = (root / "commands.log").read_text(encoding="utf-8")
+        assert "home-manager switch" in full_repair_commands
+        assert "gh auth status --hostname github.com" in full_repair_commands
+        assert "gh api user --jq .login" in full_repair_commands
+        assert "ssh -o BatchMode=yes" in full_repair_commands
+        assert "ssh-keygen -F github.com" in full_repair_commands
+        assert "git -C " in full_repair_commands
+        assert " commit -m workstation setup signing test" in full_repair_commands
 
         (root / "commands.log").write_text("", encoding="utf-8")
         healthy = _run_setup(root, env)
