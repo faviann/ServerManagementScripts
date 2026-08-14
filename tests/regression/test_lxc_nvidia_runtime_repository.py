@@ -5,16 +5,18 @@ Ansible exits 0 when a ``--tags`` selector matches no tasks, so a return code
 alone cannot tell a real run apart from a run that asserted nothing. Each
 scenario therefore also requires its own existing final semantic assertion task
 to have run and passed, read out of the machine-readable report emitted by the
-``ansible.builtin.json`` stdout callback.
+``ansible.posix.json`` stdout callback -- that callback ships in the
+``ansible.posix`` collection, which ``collections/requirements.yml`` pins.
 
-Reading that report works because task names and per-host outcomes are fields
-in a structured document. Reading the human-facing renderer instead breaks the
-moment the caller's environment changes it -- verbosity inserts a task path,
-color wraps the lines in escapes, an extra callback injects timings, a
-different stdout callback drops banners, and Ansible itself prints a task-level
-warning between a banner and its status line with no environment change at all.
-The safer rule is to pin the JSON callback and parse it, never to regex the
-display.
+Matching the human-facing display with a regex was rejected because it renders
+whatever the caller's environment asks for, and that changes without any change
+here.
+
+So ``run_isolated_playbook`` pins the display instead of tolerating it: JSON
+callback, zero verbosity, no inherited extra callbacks, leaving stdout as
+exactly one JSON document. That breaks if another writer still reaches stdout,
+so the safer rule is that stdout which does not parse into the report fails the
+test rather than passing it.
 
 This guards each scenario's *final* semantic observation only -- that one task
 is required to have run and passed. It does not prove that every assertion
@@ -71,7 +73,16 @@ def run_isolated_playbook(
         )
         env["UV_CACHE_DIR"] = str(Path(temp_root) / "uv-cache")
         env["TMPDIR"] = temp_root
-        env["ANSIBLE_STDOUT_CALLBACK"] = "ansible.builtin.json"
+        env["ANSIBLE_STDOUT_CALLBACK"] = "ansible.posix.json"
+        # Keep stdout to the report alone: an inherited verbosity prints a
+        # config preamble ahead of it, and inherited callbacks interleave their
+        # own lines around it. Neither overrides useful human debugging here,
+        # because under the JSON callback stdout is a machine document anyway.
+        env["ANSIBLE_VERBOSITY"] = "0"
+        # Dropped rather than set empty: ansible-core parses an empty value as
+        # the one-element list [""] and aborts on the empty plugin name, while
+        # an absent variable falls back to ansible.cfg, which enables none.
+        env.pop("ANSIBLE_CALLBACKS_ENABLED", None)
         result = subprocess.run(
             [
                 "bwrap",
@@ -112,47 +123,62 @@ def run_isolated_playbook(
     return result
 
 
+def summarize_failures(report: object, stdout: str) -> str:
+    """Name the tasks the report marks failed or unreachable, and why."""
+    lines: list[str] = []
+    if isinstance(report, dict):
+        for play in report.get("plays", []):
+            for task in play.get("tasks", []):
+                name = task.get("task", {}).get("name")
+                for host, host_result in task.get("hosts", {}).items():
+                    if not (
+                        host_result.get("failed", False)
+                        or host_result.get("unreachable", False)
+                    ):
+                        continue
+                    lines.append(
+                        f"  [{host}] {name}: {host_result.get('msg', '<no msg>')}"
+                    )
+    if not lines:
+        return f"no failing task in its report. Raw stdout:\n{stdout}"
+    return "failing tasks:\n" + "\n".join(lines)
+
+
 def assert_observation_completed(
     result: subprocess.CompletedProcess[str], task_name: str
 ) -> None:
     """Require a successful run in which ``task_name`` actually ran and passed.
 
-    The JSON stdout callback lists every task that started under
-    ``plays[].tasks[]`` with its name and a per-host outcome under ``hosts``.
-    A task that tag selection filtered out is absent from that list entirely, a
-    task that ran but was skipped carries ``skipped: true``, and a failed one
-    carries ``failed: true`` -- so each of those stays distinguishable from a
-    genuine pass no matter how the run is displayed. Other display lines can
-    still share stdout -- verbosity banners ahead of the report, an extra
-    enabled callback's timings around it -- so the report is located as an
-    embedded document rather than assumed to be the whole stream. When no such
-    document is there at all, that is treated as a failure rather than quietly
-    as a pass.
+    The JSON report lists every task that started under ``plays[].tasks[]``
+    with its name and a per-host outcome under ``hosts``. A task tag selection
+    filtered out is absent from that list entirely; one that ran but was
+    skipped carries ``skipped: true``, a failed one ``failed: true``, and an
+    unreachable host ``unreachable: true`` -- so a genuine pass is the only
+    outcome carrying none of the three. That reading holds only while stdout is
+    the pinned report, so stdout that will not parse raises instead of passing.
     """
     stderr_note = (
         f"\ncaptured stderr:\n{result.stderr}" if result.stderr.strip() else ""
     )
-    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
 
-    decoder = json.JSONDecoder()
-    report = None
-    offset = 0
-    for line in result.stdout.splitlines(keepends=True):
-        if line.startswith("{"):
-            try:
-                candidate, _ = decoder.raw_decode(result.stdout, offset)
-            except ValueError:
-                candidate = None
-            if isinstance(candidate, dict) and "plays" in candidate:
-                report = candidate
-                break
-        offset += len(line)
+    try:
+        report = json.loads(result.stdout)
+    except ValueError:
+        report = None
 
-    if report is None:
+    if result.returncode != 0:
         raise AssertionError(
-            f"ansible-playbook exited 0, but its stdout carried no JSON "
-            f"callback report, so the task {task_name!r} could not be confirmed "
-            f"to have run.{stderr_note}"
+            f"ansible-playbook exited {result.returncode}, so the task "
+            f"{task_name!r} did not run to a passing result: "
+            f"{summarize_failures(report, result.stdout)}{stderr_note}"
+        )
+
+    if not isinstance(report, dict) or "plays" not in report:
+        raise AssertionError(
+            f"ansible-playbook exited 0, but the task {task_name!r} did not run "
+            f"to a passing result: its stdout is not the pinned JSON callback "
+            f"report, so nothing about the run can be confirmed. Raw stdout:\n"
+            f"{result.stdout}{stderr_note}"
         )
 
     observed: list[str] = []
@@ -166,12 +192,13 @@ def assert_observation_completed(
             if any(
                 not host_result.get("skipped", False)
                 and not host_result.get("failed", False)
+                and not host_result.get("unreachable", False)
                 for host_result in task.get("hosts", {}).values()
             ):
                 return
 
     cause = (
-        "it started but every host result skipped or failed"
+        "it started but every host result skipped, failed, or was unreachable"
         if task_name in observed
         else "it never started -- tag selection missed it, or it was renamed"
     )
