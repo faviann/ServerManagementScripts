@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -61,10 +62,23 @@ def run_isolated_playbook(
     playbook: Path, tags: str
 ) -> subprocess.CompletedProcess[str]:
     with tempfile.TemporaryDirectory(prefix="lxc-nvidia-repository-") as temp_root:
+        # ansible.cfg names a vault password file that must exist, but these
+        # fixtures decrypt nothing: a per-scenario placeholder keeps the run
+        # credential-free and independent of the caller's environment.
+        vault_placeholder = Path(temp_root) / "vault-pass"
+        vault_placeholder.write_text(
+            "unused-fixture-placeholder\n", encoding="utf-8"
+        )
+        fixture_inventory = Path(temp_root) / "inventory.ini"
+        fixture_inventory.write_text(
+            "[local]\nlocalhost ansible_connection=local\n", encoding="utf-8"
+        )
         repository_dir = Path(temp_root) / "repository"
         repository_dir.mkdir()
 
         env = os.environ.copy()
+        env["ANSIBLE_VAULT_PASSWORD_FILE"] = str(vault_placeholder)
+        env["ANSIBLE_INVENTORY"] = str(fixture_inventory)
         env["ANSIBLE_CACHE_PLUGIN_CONNECTION"] = str(Path(temp_root) / "fact-cache")
         env["ANSIBLE_LOCAL_TEMP"] = str(Path(temp_root) / "ansible-local-tmp")
         env["ANSIBLE_REMOTE_TEMP"] = str(Path(temp_root) / "ansible-tmp")
@@ -223,3 +237,13 @@ def test_lxc_nvidia_runtime_refreshes_apt_before_toolkit_install() -> None:
     assert_observation_completed(
         result, "Assert cache refresh completed before isolated install failure"
     )
+
+
+if __name__ == "__main__":
+    try:
+        test_lxc_nvidia_runtime_repository_publication_is_retryable()
+        test_lxc_nvidia_runtime_refreshes_apt_before_toolkit_install()
+    except AssertionError as error:
+        print(error, file=sys.stderr)
+        raise SystemExit(1) from error
+    print("ok: NVIDIA repository regression scenarios passed")
