@@ -27,12 +27,6 @@ entries:
     - username
     enrollment_flow: !Find [authentik_flows.flow, [slug, self-service-registration-approval]]
 - model: authentik_flows.flowstagebinding
-  state: absent
-  identifiers:
-    target: !Find [authentik_flows.flow, [slug, default-passwordless-flow]]
-    stage: !Find [authentik_stages_identification.identificationstage, [name, default-authentication-identification]]
-    order: 20
-- model: authentik_flows.flowstagebinding
   state: present
   identifiers:
     target: !Find [authentik_flows.flow, [slug, default-passwordless-flow]]
