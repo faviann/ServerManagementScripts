@@ -51,6 +51,22 @@ def test_only_selects_registered_launchers_in_supplied_order() -> None:
     assert launched == selected
 
 
+def test_nvidia_repository_launcher_is_registered_once_as_full_only() -> None:
+    runner = load_runner()
+    target = "test_lxc_nvidia_runtime_repository.py"
+    launched: list[str] = []
+
+    assert runner.FULL_ONLY_SCRIPTS.count(target) == 1
+    assert target not in runner.FAST_SCRIPTS
+    assert runner.REGISTERED_SCRIPTS.count(target) == 1
+
+    assert runner.main(
+        ["--only", target],
+        launcher=lambda script: launched.append(script) or passing_result(script),
+    ) == 0
+    assert launched == [target]
+
+
 def test_only_and_full_are_rejected_before_launch(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
