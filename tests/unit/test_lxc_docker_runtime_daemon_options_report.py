@@ -44,7 +44,7 @@ def report_with(
     return {"plays": [{"tasks": tasks}]}
 
 
-def test_all_daemon_option_observations_must_have_a_passing_host_result() -> None:
+def test_structurally_incomplete_observation_results_fail_closed() -> None:
     report = {
         "plays": [
             {
@@ -56,7 +56,8 @@ def test_all_daemon_option_observations_must_have_a_passing_host_result() -> Non
         ]
     }
 
-    launcher.assert_observations_completed(completed(report))
+    with pytest.raises(AssertionError, match="execution proof failed"):
+        launcher.assert_observations_completed(completed(report))
 
 
 @pytest.mark.parametrize(

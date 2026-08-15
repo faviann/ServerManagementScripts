@@ -143,6 +143,9 @@ def assert_observations_completed(result: subprocess.CompletedProcess[str]) -> N
             and not host_result.get("skipped", False)
             and not host_result.get("failed", False)
             and not host_result.get("unreachable", False)
+            and host_result.get("action") == "ansible.builtin.assert"
+            and host_result.get("changed") is False
+            and host_result.get("msg") == "All assertions passed"
             for host_result in host_results
         )
         if passed:
