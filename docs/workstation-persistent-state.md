@@ -4,7 +4,9 @@
 
 The workstation role bind-mounts selected home paths from `/ephemeral/workstation/home` so they survive an intentional LXC rebuild.
 
-**Status: all ten declared paths are migrated and mounted as of 2026-08-13.** The migration procedure below is kept because it is the procedure for any path added to the contract later, and because the post-rebuild validation at the end is still outstanding.
+**Status: all ten declared paths are migrated and mounted as of 2026-08-13, and rebuild persistence was validated 2026-08-15/16.** The migration procedure below is kept because it is the procedure for any path added to the contract later.
+
+Note that `~/.claude.json` is a sibling of the mounted `~/.claude` and is therefore *not* covered — see #157.
 
 The two paths migrated last were `~/.config/herdr` (herdr configuration, session snapshot, plugin registration, Collie's env file) and `~/.local/state/collie` (Collie runtime state). Read this runbook before the first `site.yml` run that enables any newly declared path.
 
@@ -134,12 +136,99 @@ Every declared path must appear. A missing row is an unmounted bind mount, and t
 
 Note that `~/.local/state/collie` is mounted, not `~/.local/state`. Mounting the parent is what would drag the herdr cache into the contract.
 
-## Post-Rebuild Validation
+## Rebuilding the LXC
 
-After rebuilding the LXC against the retained `/ephemeral` volume, confirm:
+**Status: validated 2026-08-15/16.** The procedure below is what was actually run; see #95 for the recorded observations.
 
-- herdr starts with its previous configuration, restores its session snapshot, and lists the same registered plugins.
-- Collie starts with its previous configuration and the same VAPID identity (subscriptions enrolled before the rebuild remain valid).
-- The enrolled Android device still receives a push notification.
+### The planner cannot be asked for a rebuild
+
+`proxmox_lxc_lifecycle/tasks/decide.yml` computes `rebuild_required` as a release mismatch **and** `proxmox_lxc_rebuild_on_release_mismatch`. There is no manual override. When the guest release already matches the ostemplate — the normal case — setting both destructive policy flags to `true` still yields a `provision` transition and destroys nothing.
+
+So destroy the container out-of-band, in the Proxmox web UI. With it absent, the planner emits the ordinary create path:
+
+```
+container_transition: provision
+destructive: false
+reason: "Container is absent from Proxmox, so it will be provisioned."
+```
+
+Both policy flags stay `false` and nothing needs authorizing or restoring afterwards.
+
+**`/ephemeral` is not at risk.** `mp2: "/ephemeral,mp=/ephemeral"` is a Proxmox host path, not a container-owned volume, so destroy cannot reclaim it. `mp0` belongs to container 200, so "Destroy unreferenced disks owned by guest" leaves it alone too. The safeguard that matters is confirming you are destroying **vmid 306 / `workstation`**.
+
+### Before destroying
+
+Record a "before" manifest. Once the container is gone, the only evidence of the prior state is what you wrote down, and the acceptance criteria ask that herdr restores the *same* plugins and Collie keeps the *same* identity:
+
+```bash
+sha256sum ~/.config/herdr/session.json ~/.config/herdr/plugins.json \
+          ~/.config/herdr/plugins/config/herdr.collie/.env \
+          ~/.local/state/collie/push-subscriptions.json
+```
+
+Hash the VAPID `.env`; never copy or print it. It is the one genuinely irreplaceable artifact — deliberately absent from Bitwarden, and existing only on `/ephemeral`.
+
+A graceful herdr/Collie shutdown is **not** required here. The migration procedure above needs one because `cp -a` reads the directory for seconds while herdr writes into it; a destroy interrupts at most one in-flight write. Testing the crash path is also the more honest test, since a real rebuild will not be preceded by a polite shutdown.
+
+Also bank `~/.ansible/ssh/proxmox_lxc` somewhere off the container — see the recovery table below for why.
+
+### Drive it from another machine
+
+Not from the workstation. The container is replaced, so anything running inside it dies with it — including the Ansible run.
+
+The manual destroy skips the cleanup that `provision.yml` performs on the planner's rebuild path, so do it yourself on the driving machine:
+
+```bash
+rm -f .ansible/cache/*_workstation
+ssh-keygen -R workstation && ssh-keygen -R workstation.faviann.vms
+```
+
+Then deploy. Skip `--check`: it is load-bearing when an existing container might report `restart_required`, but with no container to observe it cannot tell you anything.
+
+```bash
+uv run --locked ansible-playbook site.yml --limit workstation \
+  -e proxmox_skip_self=false -e lxc_base_system_reboot_enabled=false
+```
+
+`lxc_hwaddr` is pinned in `host_vars/workstation.yml`, so the container returns on the same MAC and address.
+
+### What does not come back on its own
+
+| Path | Recovery |
+|---|---|
+| `~/.local/share/chezmoi`, `~/.ssh/id_ed25519`, `~/.ssh/config`, `~/.ssh/allowed_signers`, `~/.ansible/vault-pass` | `workstation-setup`, one Bitwarden unlock |
+| `~/.config/gh` | Same unlock — the token is read from Bitwarden and piped to `gh auth login --with-token`. There is no interactive `gh` login. |
+| `~/.local/state/workstation-setup/complete` | Rewritten by `workstation-setup`, which is offered automatically on your first interactive SSH login |
+| `~/.ansible/ssh/proxmox_lxc` | **Manual copy.** Neither persisted nor chezmoi-managed, and `validate_environment` does not check it, so setup reports ready without it. |
+| `collie.service` | Regenerated by the herdr plugin's `start` action — see below |
+
+Do **not** recover `proxmox_lxc` by running `bootstrap.yml` on the rebuilt workstation. `control_node_bootstrap/tasks/ssh_key.yml` uses `openssh_keypair`, which generates when the file is absent, producing a new key that no LXC in the fleet trusts.
+
+`chezmoi apply` will not clobber the copied key: the source directories are `private_dot_ansible` and `private_dot_ssh`. `private_` only forces `0700` — it is not `exact_`, so unmanaged files inside are left alone.
+
+### Starting Collie
+
+Collie's bridge does not auto-start with the herdr server, and `collie.service` is deliberately not persisted (it embeds the plugin install hash and a nix profile path). After a rebuild the forwarder listens on 8788 with no backend, and connections fail with `Connection refused`. Start it through the plugin:
+
+```bash
+herdr plugin action invoke start --plugin herdr.collie
+```
+
+Note the argument order — the `--plugin` option must follow the action id. This regenerates and enables `collie.service` and launches the bridge on 8787.
+
+Tracked as faviann/dotfiles#84.
+
+### Post-Rebuild Validation
+
+Confirm:
+
+- Every declared path appears in `findmnt` (check one target per invocation; an unmounted bind mount is an empty directory, not an error, and the play recap will not flag it).
+- The four hashes from the before-manifest are unchanged.
+- herdr restores its session — `herdr-server.log` reports `session restore evaluated … workspaces=N`.
+- herdr lists the same registered plugins.
+- Collie starts with the same VAPID identity. An unchanged `.env` hash is the proof: had the identity been lost, Collie would have minted a new keypair and rewritten the file.
+- The enrolled Android device receives a push without re-enrollment.
 
 Live pane processes do **not** survive an LXC rebuild — the container is replaced, so every running process is gone. That is expected and is not a validation failure. herdr restores session state reconstructively from its snapshot; it does not resume the old processes.
+
+Stale unix sockets (`herdr.sock`, `herdr-client.sock`) persist on `/ephemeral` pointing at the destroyed server. herdr rebinds them cleanly on startup; they need no cleanup.
