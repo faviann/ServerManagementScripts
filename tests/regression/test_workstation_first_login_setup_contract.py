@@ -47,6 +47,7 @@ def _prepare_completed_workstation(temp_root: Path) -> tuple[Path, dict[str, str
     source = home / ".local" / "share" / "chezmoi"
     command_log = temp_root / "commands.log"
     bw_state = temp_root / "bw-state"
+    gh_auth_state = temp_root / "gh-auth-state"
     git_commit = temp_root / "git-commit"
     git_dirty = temp_root / "git-dirty"
     active_generation = temp_root / "active-generation"
@@ -71,11 +72,23 @@ def _prepare_completed_workstation(temp_root: Path) -> tuple[Path, dict[str, str
 
     mock = """#!/bin/sh
 name=$(basename "$0")
+# gh ships with the dotfiles, so it does not exist until home-manager switches.
+if [ "$name" = gh ] && [ -n "${GH_AVAILABLE_FLAG:-}" ] && [ ! -e "$GH_AVAILABLE_FLAG" ]; then
+  printf 'gh: command not found\n' >&2
+  exit 127
+fi
 printf '%s %s\n' "$name" "$*" >> "$COMMAND_LOG"
 case "$name:$1" in
   bw:status) printf '{"status":"%s"}\n' "$(cat "$BW_STATE")" ;;
   bw:unlock) printf 'unlocked' > "$BW_STATE"; printf 'test-session\n' ;;
   bw:login) printf 'locked' > "$BW_STATE" ;;
+  bw:get) printf 'test-github-token\n' ;;
+  gh:auth)
+    case "$2" in
+      status) test "$(cat "$GH_AUTH_STATE")" = "authenticated" || exit 1 ;;
+      login) printf 'authenticated' > "$GH_AUTH_STATE" ;;
+    esac
+    ;;
   ssh:*) printf "You've successfully authenticated\n" ;;
   git:-C)
     case "$3" in
@@ -134,7 +147,10 @@ case "$name:$1" in
     }
     printf '%s\n' "$4" > "$ACTIVE_GENERATION"
     ;;
-  home-manager:switch) cp "$BUILT_GENERATION" "$ACTIVE_GENERATION" ;;
+  home-manager:switch)
+    cp "$BUILT_GENERATION" "$ACTIVE_GENERATION"
+    if [ -n "${GH_AVAILABLE_FLAG:-}" ]; then : > "$GH_AVAILABLE_FLAG"; fi
+    ;;
 esac
 exit 0
 """
@@ -186,6 +202,7 @@ exit 0
         encoding="utf-8",
     )
     bw_state.write_text("locked", encoding="utf-8")
+    gh_auth_state.write_text("authenticated", encoding="utf-8")
     git_commit.write_text("commit-a\n", encoding="utf-8")
     git_dirty.write_text("", encoding="utf-8")
     active_generation.write_text(f"{generation_a}\n", encoding="utf-8")
@@ -193,6 +210,7 @@ exit 0
     env = os.environ | {
         "COMMAND_LOG": str(command_log),
         "BW_STATE": str(bw_state),
+        "GH_AUTH_STATE": str(gh_auth_state),
         "GIT_COMMIT": str(git_commit),
         "GIT_DIRTY": str(git_dirty),
         "ACTIVE_GENERATION": str(active_generation),
@@ -706,6 +724,44 @@ def test_workstation_configuration_freshness_contract() -> None:
             / "playbooks/roles/config/lxc_workstation_baseline/templates/workstation-setup.sh.j2"
         ).read_text(encoding="utf-8")
         assert "chezmoi status" not in setup_source
+
+
+def test_workstation_fresh_bootstrap_authenticates_git_before_cloning() -> None:
+    """A first-login clone must carry GitHub credentials without needing gh.
+
+    The dotfiles remote is HTTPS and the SSH key only arrives with the dotfiles,
+    so an unauthenticated `chezmoi init` falls back to an interactive git
+    credential prompt that GitHub always rejects. gh cannot supply those
+    credentials either: it ships with the dotfiles, so it is absent until Home
+    Manager switches, which cannot happen before the clone.
+    """
+    with tempfile.TemporaryDirectory(prefix="workstation-fresh-bootstrap-") as temp_root:
+        result = _render_setup(Path(temp_root))
+        assert result.returncode == 0, result.stdout
+
+        root = Path(temp_root)
+        home, env = _prepare_completed_workstation(root)
+
+        # Fresh workstation: no marker, no dotfiles checkout, gh not logged in.
+        (home / ".local" / "state" / "workstation-setup" / "complete").unlink()
+        (home / ".local" / "share" / "chezmoi" / ".git").rmdir()
+        (root / "gh-auth-state").write_text("unauthenticated", encoding="utf-8")
+        _write_executable(home / ".local" / "bin" / "workstation-update", "#!/bin/sh\nexit 0\n")
+        env = env | {"GH_AVAILABLE_FLAG": str(root / "gh-available")}
+
+        bootstrapped = _run_setup(root, env)
+        assert bootstrapped.returncode == 0, bootstrapped.stderr
+
+        commands = (root / "commands.log").read_text(encoding="utf-8").splitlines()
+        clone = commands.index("chezmoi init --apply https://github.com/faviann/dotfiles.git")
+        token_read = commands.index("bw get notes dotfiles/github-cli-token")
+        assert token_read < clone, "the clone must be credentialed from the vault"
+        assert not any(
+            line.startswith("gh ") for line in commands[:clone]
+        ), "the clone must not depend on gh, which the dotfiles themselves install"
+        # gh still gets authenticated once Home Manager has installed it.
+        assert "gh auth login --hostname github.com --with-token" in commands
+        assert "gh auth setup-git --hostname github.com" in commands
 
 
 def test_workstation_first_login_setup_contract() -> None:

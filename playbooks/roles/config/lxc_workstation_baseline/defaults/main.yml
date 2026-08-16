@@ -89,7 +89,7 @@ workstation_nix_install_url: https://install.determinate.systems/nix
 workstation_home_manager_flake_ref: "{{ workstation_home }}/.local/share/chezmoi#workstation"
 workstation_chezmoi_install_enabled: true
 workstation_enable_linger: true
-workstation_bw_version: "2025.12.0"
+workstation_bw_version: "2026.7.0"
 workstation_bw_download_url: >-
   https://github.com/bitwarden/clients/releases/download/cli-v{{
   workstation_bw_version }}/bw-linux-{{ workstation_bw_version }}.zip
