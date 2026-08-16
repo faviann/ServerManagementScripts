@@ -58,7 +58,7 @@
     name: infrastructure/proxmox_lxc_host_config
     apply:
       delegate_to: "{{ proxmox_pct_delegate_host }}"
-      become: true
+      become: "{{ proxmox_lxc_host_config_become | default(true) }}"
   vars:
     ansible_host: "{{ proxmox_pct_delegate_host }}"
     ansible_user: root
