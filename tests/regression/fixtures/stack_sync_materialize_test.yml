@@ -9,8 +9,8 @@
       stacks_source: "{{ temp_root }}/wrong-type/stacks-source"
       shared_owner: "{{ ansible_user_uid }}"
       shared_group: "{{ ansible_user_gid }}"
-      docker_uid: 12345
-      docker_gid: 12346
+      docker_uid: "{{ ansible_user_uid }}"
+      docker_gid: "{{ ansible_user_gid }}"
       path_ownership_overrides: []
     wrong_type_prereq_path: >-
       {{ lxc_docker_environment_internal.shared_mount_source }}/stacks/komf/data/uploads
@@ -81,8 +81,6 @@
         - name: Include materialize for wrong-type prereq fixture
           ansible.builtin.include_tasks:
             file: "../../../playbooks/roles/config/lxc_stack_sync/tasks/materialize.yml"
-            apply:
-              become: true
 
         - name: Fail when materialize accepts a wrong-type prereq path
           ansible.builtin.fail:
@@ -114,8 +112,8 @@
       stacks_source: "{{ temp_root }}/stacks-source"
       shared_owner: "{{ ansible_user_uid }}"
       shared_group: "{{ ansible_user_gid }}"
-      docker_uid: 12345
-      docker_gid: 12346
+      docker_uid: "{{ ansible_user_uid }}"
+      docker_gid: "{{ ansible_user_gid }}"
       path_ownership_overrides:
         - path: "{{ temp_root }}/shared/stacks/komf/data/cache"
           owner: "{{ ansible_user_uid }}"
@@ -228,8 +226,6 @@
     - name: Include materialize
       ansible.builtin.include_tasks:
         file: "../../../playbooks/roles/config/lxc_stack_sync/tasks/materialize.yml"
-        apply:
-          become: true
 
     - name: Inspect prereq directory metadata after materialization
       ansible.builtin.stat:
@@ -263,10 +259,10 @@
             or _prereq_dir_stats_after.results[1].stat.mode == '0755'
           - >-
             ansible_check_mode
-            or _prereq_dir_stats_after.results[1].stat.uid == 12345
+            or _prereq_dir_stats_after.results[1].stat.uid == ansible_user_uid
           - >-
             ansible_check_mode
-            or _prereq_dir_stats_after.results[1].stat.gid == 12346
+            or _prereq_dir_stats_after.results[1].stat.gid == ansible_user_gid
           - >-
             (lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/data/downloads')
             in (_lxc_docker_env_reconciliation.materialized.created_dirs | default([]))
@@ -403,8 +399,6 @@
     - name: Re-run materialize to verify synced files are idempotent
       ansible.builtin.include_tasks:
         file: "../../../playbooks/roles/config/lxc_stack_sync/tasks/materialize.yml"
-        apply:
-          become: true
 
     - name: Assert repeated materialization has no changes
       ansible.builtin.assert:
@@ -449,8 +443,8 @@
           ---
           x-managed-files:
             - path: ./declared.conf
-              owner: root
-              group: root
+              owner: {{ ansible_user_uid }}
+              group: {{ ansible_user_gid }}
               mode: "0600"
           services: {}
         dest: "{{ lxc_docker_environment_internal.stacks_source }}/metadata/compose.yaml"
@@ -497,14 +491,12 @@
     - name: Materialize synced files with planned metadata
       ansible.builtin.include_tasks:
         file: "../../../playbooks/roles/config/lxc_stack_sync/tasks/materialize.yml"
-        apply:
-          become: true
 
     - name: Assert declaration ownership wins only for its resolved destination
       ansible.builtin.assert:
         that:
-          - declared_entry.owner == 'root'
-          - declared_entry.group == 'root'
+          - declared_entry.owner == ansible_user_uid
+          - declared_entry.group == ansible_user_gid
           - declared_entry.mode == '0600'
           - undeclared_entry.owner == ansible_user_uid
           - undeclared_entry.group == ansible_user_gid
@@ -533,8 +525,8 @@
       ansible.builtin.assert:
         that:
           - _declared_materialized_file.stat.exists
-          - _declared_materialized_file.stat.uid == 0
-          - _declared_materialized_file.stat.gid == 0
+          - _declared_materialized_file.stat.uid == ansible_user_uid
+          - _declared_materialized_file.stat.gid == ansible_user_gid
           - _declared_materialized_file.stat.mode == '0600'
           - >-
             (_stack_sync_managed_file_create_results.results | default([])
@@ -561,15 +553,6 @@
           - _undeclared_materialized_file.stat.mode == '0644'
         fail_msg: >-
           The undeclared synced file did not retain the shared owner, group, or mode defaults
-
-    - name: Restore planner fixture ownership for temporary-directory cleanup
-      ansible.builtin.file:
-        path: "{{ planner_root }}"
-        state: directory
-        owner: "{{ ansible_user_uid }}"
-        group: "{{ ansible_user_gid }}"
-        recurse: true
-      become: true
 
 - name: Prepare exact repository stack file fixtures
   hosts: localhost
