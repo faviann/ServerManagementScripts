@@ -19,6 +19,9 @@ WORKSTATION_UPDATE_REQUIRES_BITWARDEN="{{ workstation_update_requires_bitwarden 
 MARKER_FINGERPRINT="{{ workstation_setup_version }}|{{ workstation_dotfiles_repo_url }}|{{ workstation_github_cli_token_item }}|{{ workstation_home_manager_flake_ref }}|{{ workstation_bw_bin_path }}"
 
 export HOME="$WORKSTATION_HOME"
+# Never let git fall back to an interactive credential prompt: GitHub rejects
+# password auth, so a prompt can only stall the login hook before failing.
+export GIT_TERMINAL_PROMPT=0
 export PATH="$WORKSTATION_HOME/.local/bin:$WORKSTATION_HOME/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
 if [ -r /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]; then
@@ -186,16 +189,36 @@ ensure_bitwarden_unlocked() {
   fi
 
   test "$status" = "unlocked" || fail "Bitwarden is not unlocked after login/unlock"
-  bw sync >/dev/null
+  # Without this guard a sync failure kills the script through set -e, leaving
+  # only the CLI's own message with nothing naming the step that produced it.
+  bw sync >/dev/null \
+    || fail "Bitwarden sync failed; $BW_BIN may be too old for this account"
+}
+
+# The dotfiles remote is HTTPS, the SSH key only arrives with the dotfiles
+# themselves, and gh is not installed until Home Manager runs — which needs the
+# dotfiles first. So the clone takes the token straight from Bitwarden through a
+# one-shot credential helper rather than through any tool that is not there yet.
+with_github_token() {
+  local token
+  token="$(bw get notes "$GITHUB_CLI_TOKEN_ITEM")" || fail "GitHub CLI token item is missing"
+  test -n "$token" || fail "GitHub CLI token item is empty"
+  test "$token" != "null" || fail "GitHub CLI token item notes are empty"
+
+  WORKSTATION_GITHUB_TOKEN="$token" \
+  GIT_CONFIG_COUNT=1 \
+  GIT_CONFIG_KEY_0=credential.https://github.com.helper \
+  GIT_CONFIG_VALUE_0='!f() { printf "username=x-access-token\npassword=%s\n" "$WORKSTATION_GITHUB_TOKEN"; }; f' \
+    "$@"
 }
 
 ensure_chezmoi() {
   if [ ! -d "$HOME/.local/share/chezmoi/.git" ]; then
-    chezmoi init --apply "$DOTFILES_REPO_URL"
+    with_github_token chezmoi init --apply "$DOTFILES_REPO_URL"
     return
   fi
 
-  chezmoi update
+  with_github_token chezmoi update
 }
 
 update_chezmoi_source_without_secrets() {
@@ -269,6 +292,10 @@ authenticate_gh() {
   test "$token" != "null" || fail "GitHub CLI token item notes are empty"
   printf '%s\n' "$token" | gh auth login --hostname github.com --with-token >/dev/null
   unset token
+  # Leaves git able to reach GitHub on its own, so later source pulls do not
+  # have to reopen the vault.
+  gh auth setup-git --hostname github.com \
+    || fail "could not configure git to use the GitHub CLI credential helper"
 }
 
 validate_local_tool_readiness() {

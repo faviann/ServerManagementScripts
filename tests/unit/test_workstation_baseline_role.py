@@ -340,6 +340,28 @@ class WorkstationBaselineRoleTests(unittest.TestCase):
             msg="workstation baseline still contains removed outbound GitHub SSH identity tasks",
         )
 
+        # Debian's locale-gen generates only the uncommented entries of
+        # /etc/locale.gen and can ignore a locale passed as an argument, so it
+        # exits 0 having generated nothing. The entry must be enabled first.
+        self.assertIn("Enable the en_US.UTF-8 locale entry", task_names)
+        locale_entry = next(
+            t for t in tasks if t.get("name") == "Enable the en_US.UTF-8 locale entry"
+        )
+        self.assertEqual(locale_entry["ansible.builtin.lineinfile"]["path"], "/etc/locale.gen")
+        self.assertEqual(locale_entry["ansible.builtin.lineinfile"]["line"], "en_US.UTF-8 UTF-8")
+        locale_gen = next(t for t in tasks if t.get("name") == "Generate enabled locales")
+        locale_gen_cmd = locale_gen["ansible.builtin.shell"]["cmd"]
+        self.assertNotIn(
+            "locale-gen en_US",
+            locale_gen_cmd,
+            msg="locale-gen must not rely on a locale argument; it is ignored on Debian images",
+        )
+        self.assertIn("locale-gen", locale_gen_cmd)
+        self.assertLess(
+            task_names.index("Enable the en_US.UTF-8 locale entry"),
+            task_names.index("Generate enabled locales"),
+        )
+
         rendered_tasks = yaml.safe_dump(tasks, sort_keys=True)
         self.assertIn("origin_firewall.yml", rendered_tasks)
         self.assertNotIn("aoe_proxy_firewall.yml", rendered_tasks)
