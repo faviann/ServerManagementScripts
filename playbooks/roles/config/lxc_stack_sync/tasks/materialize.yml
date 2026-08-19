@@ -4,6 +4,25 @@
 - name: Plan desired stack materialization inputs
   ansible.builtin.include_tasks: planner.yml
 
+- name: Check which stack prereq dirs already exist
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+  loop: "{{ lxc_stack_sync_manifest_plan.prereq_dirs | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
+  register: _stack_sync_prereq_dir_stats
+  when: (lxc_stack_sync_manifest_plan.prereq_dirs | default([])) | length > 0
+
+- name: Verify existing stack prereq paths are directories
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists or (item.stat.isdir | default(false))
+    fail_msg: >-
+      Stack prerequisite path is not a directory: {{ item.item.path }}
+  loop: "{{ ((_stack_sync_prereq_dir_stats | default({})).results | default([])) }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+
 - name: Check which per-host stack directories already exist
   ansible.builtin.stat:
     path: "{{ item }}"
@@ -30,9 +49,9 @@
   ansible.builtin.template:
     src: "{{ item.source_path }}"
     dest: "{{ item.dest_path }}"
-    owner: "{{ lxc_docker_environment_internal.shared_owner }}"
-    group: "{{ lxc_docker_environment_internal.shared_group }}"
-    mode: "0644"
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
   vars:
     stack_name: "{{ item.stack_name }}"
     stack_vars: "{{ (lxc_docker_env_stack_vars | default({}))[item.stack_name] | default({}) }}"
@@ -45,21 +64,31 @@
   ansible.builtin.copy:
     src: "{{ item.source_path }}"
     dest: "{{ item.dest_path }}"
-    owner: "{{ lxc_docker_environment_internal.shared_owner }}"
-    group: "{{ lxc_docker_environment_internal.shared_group }}"
-    mode: "0644"
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
   loop: "{{ lxc_stack_sync_manifest_plan.files_to_copy | default([]) }}"
   loop_control:
     label: "{{ item.relative_path }}"
   register: _stack_sync_copy_results
 
-- name: Check which stack prereq dirs already exist
-  ansible.builtin.stat:
-    path: "{{ item.path }}"
-  loop: "{{ lxc_stack_sync_manifest_plan.prereq_dirs | default([]) }}"
-  loop_control:
-    label: "{{ item.path }}"
-  register: _stack_sync_prereq_dir_stats
+- name: Limit stack prereq directory plan to missing paths
+  ansible.builtin.set_fact:
+    lxc_stack_sync_manifest_plan: >-
+      {{
+        lxc_stack_sync_manifest_plan
+        | combine(
+            {
+              'prereq_dirs': (
+                ((_stack_sync_prereq_dir_stats | default({})).results | default([]))
+                | rejectattr('stat.exists')
+                | map(attribute='item')
+                | list
+              )
+            },
+            recursive=True
+          )
+      }}
   when: (lxc_stack_sync_manifest_plan.prereq_dirs | default([])) | length > 0
 
 - name: Ensure stack prereq dirs exist
@@ -127,11 +156,27 @@
     owner: "{{ item.owner }}"
     group: "{{ item.group }}"
     mode: "{{ item.mode }}"
-  loop: "{{ lxc_stack_sync_manifest_plan.managed_files | default([]) }}"
+  loop: >-
+    {{
+      lxc_stack_sync_manifest_plan.managed_files
+      | default([])
+      | rejectattr('path', 'in', synced_file_paths)
+      | list
+    }}
   loop_control:
     label: "{{ item.path }}"
   register: _stack_sync_managed_file_create_results
   when: (lxc_stack_sync_manifest_plan.managed_files | default([])) | length > 0
+  vars:
+    synced_file_paths: >-
+      {{
+        (
+          lxc_stack_sync_manifest_plan.files_to_render
+          + lxc_stack_sync_manifest_plan.files_to_copy
+        )
+        | map(attribute='dest_path')
+        | list
+      }}
 
 - name: Ensure managed file permissions are correct
   ansible.builtin.file:
@@ -140,11 +185,27 @@
     owner: "{{ item.owner }}"
     group: "{{ item.group }}"
     mode: "{{ item.mode }}"
-  loop: "{{ lxc_stack_sync_manifest_plan.managed_files | default([]) }}"
+  loop: >-
+    {{
+      lxc_stack_sync_manifest_plan.managed_files
+      | default([])
+      | rejectattr('path', 'in', synced_file_paths)
+      | list
+    }}
   loop_control:
     label: "{{ item.path }}"
   register: _stack_sync_managed_file_permission_results
   when: (lxc_stack_sync_manifest_plan.managed_files | default([])) | length > 0
+  vars:
+    synced_file_paths: >-
+      {{
+        (
+          lxc_stack_sync_manifest_plan.files_to_render
+          + lxc_stack_sync_manifest_plan.files_to_copy
+        )
+        | map(attribute='dest_path')
+        | list
+      }}
 
 - name: Publish materialization slice into stack reconciliation
   ansible.builtin.set_fact:

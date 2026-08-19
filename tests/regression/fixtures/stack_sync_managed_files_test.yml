@@ -87,11 +87,17 @@
           - _managed_file_stat.stat.mode == '0600'
         fail_msg: "Expected mode 0600, got {{ _managed_file_stat.stat.mode }}"
 
+    - name: Assert newly created managed file is empty
+      ansible.builtin.assert:
+        that:
+          - _managed_file_stat.stat.size == 0
+        fail_msg: "Expected newly created managed file to be empty"
+
     - name: Place content in the managed file to test force:false
       ansible.builtin.copy:
         content: "existing-content"
         dest: "{{ lxc_docker_environment_internal.shared_mount_source }}/stacks/testapp/data/certs/secret.json"
-        mode: "0600"
+        mode: "0644"
 
     - name: Re-run materialize to verify existing files are not overwritten
       ansible.builtin.include_tasks: "../../../playbooks/roles/config/lxc_stack_sync/tasks/materialize.yml"
@@ -105,6 +111,16 @@
         that:
           - "'existing-content' in (_preserved_content.content | b64decode)"
         fail_msg: "Managed file content was overwritten — force:false not honoured"
+
+    - name: Inspect existing managed file permissions after enforcement
+      ansible.builtin.stat:
+        path: "{{ lxc_docker_environment_internal.shared_mount_source }}/stacks/testapp/data/certs/secret.json"
+      register: _preserved_file_stat
+
+    - name: Assert existing managed file permissions were enforced
+      ansible.builtin.assert:
+        that:
+          - _preserved_file_stat.stat.mode == '0600'
 
     - name: Assert planner output deduped managed file entries
       ansible.builtin.assert:

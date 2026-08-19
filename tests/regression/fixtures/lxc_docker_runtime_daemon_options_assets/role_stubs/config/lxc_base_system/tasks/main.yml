@@ -1,0 +1,4 @@
+---
+# The daemon-options fixture exercises lxc_docker_runtime's public role
+# entrypoint. Its base-system dependency is outside that seam and
+# intentionally inert here.

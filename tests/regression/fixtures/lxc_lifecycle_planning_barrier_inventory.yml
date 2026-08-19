@@ -6,6 +6,9 @@ all:
         ansible_connection: local
         proxmox_lxc_controller_pubkey_enabled: false
         proxmox_lxc_host_config_enabled: true
+        # The facade delegates host configuration to localhost, so escalation
+        # would prompt for the workstation's sudo password.
+        proxmox_lxc_host_config_become: false
         proxmox_pct_delegate_host: localhost
         proxmox_api_delegate_host: localhost
         proxmox_default_storage: local-lvm

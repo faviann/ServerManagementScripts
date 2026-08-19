@@ -1,4 +1,107 @@
 ---
+- name: Test materialize rejects a prereq path that is not a directory
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  vars:
+    lxc_docker_environment_internal:
+      shared_mount_source: "{{ temp_root }}/wrong-type/shared"
+      stacks_source: "{{ temp_root }}/wrong-type/stacks-source"
+      shared_owner: "{{ ansible_user_uid }}"
+      shared_group: "{{ ansible_user_gid }}"
+      docker_uid: "{{ ansible_user_uid }}"
+      docker_gid: "{{ ansible_user_gid }}"
+      path_ownership_overrides: []
+    wrong_type_prereq_path: >-
+      {{ lxc_docker_environment_internal.shared_mount_source }}/stacks/komf/data/uploads
+    wrong_type_target_stack_file: >-
+      {{ lxc_docker_environment_internal.shared_mount_source }}/stacks/komf/compose.yaml
+  tasks:
+    - name: Create wrong-type prereq fixture layout
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ lxc_docker_environment_internal.stacks_source }}/komf"
+        - "{{ lxc_docker_environment_internal.shared_mount_source }}/stacks/komf/data"
+      check_mode: false
+
+    - name: Seed a regular file at the declared prereq directory path
+      ansible.builtin.copy:
+        content: "not-a-directory"
+        dest: "{{ wrong_type_prereq_path }}"
+        mode: "0644"
+      check_mode: false
+
+    - name: Create compose file declaring the wrong-type prereq path
+      ansible.builtin.copy:
+        content: |
+          services: {}
+          x-prereq-dirs:
+            - ./data/uploads
+        dest: "{{ lxc_docker_environment_internal.stacks_source }}/komf/compose.yaml"
+        mode: "0644"
+      check_mode: false
+
+    - name: Run actual find ops for wrong-type prereq fixture
+      ansible.builtin.find:
+        paths: "{{ lxc_docker_environment_internal.stacks_source }}"
+        patterns: "*.j2"
+        hidden: true
+        recurse: true
+        file_type: file
+      register: _per_host_j2_files
+      delegate_to: localhost
+      become: false
+
+    - name: Find static stack files for wrong-type prereq fixture
+      ansible.builtin.find:
+        paths: "{{ lxc_docker_environment_internal.stacks_source }}"
+        patterns: "*"
+        excludes: "*.j2,.gitkeep"
+        hidden: true
+        recurse: true
+        file_type: file
+      register: _per_host_static_files
+      delegate_to: localhost
+      become: false
+
+    - name: Find stack directories for wrong-type prereq fixture
+      ansible.builtin.find:
+        paths: "{{ lxc_docker_environment_internal.stacks_source }}"
+        recurse: true
+        file_type: directory
+      register: _per_host_dirs
+      delegate_to: localhost
+      become: false
+
+    - name: Verify materialize fails closed for a wrong-type prereq path
+      block:
+        - name: Include materialize for wrong-type prereq fixture
+          ansible.builtin.include_tasks:
+            file: "../../../playbooks/roles/config/lxc_stack_sync/tasks/materialize.yml"
+
+        - name: Fail when materialize accepts a wrong-type prereq path
+          ansible.builtin.fail:
+            msg: "Materialize accepted a regular file as a prerequisite directory"
+      rescue:
+        - name: Inspect target stack file after wrong-type rejection
+          ansible.builtin.stat:
+            path: "{{ wrong_type_target_stack_file }}"
+          register: _wrong_type_target_stack_file_stat
+
+        - name: Verify wrong-type prereq failure is actionable
+          ansible.builtin.assert:
+            that:
+              - wrong_type_prereq_path in wrong_type_failure_messages
+              - "'not a directory' in wrong_type_failure_messages"
+              - not _wrong_type_target_stack_file_stat.stat.exists
+          vars:
+            wrong_type_failure_messages: >-
+              {{ ansible_failed_result.results | default([])
+                 | map(attribute='msg') | join(' ') }}
+
 - name: Test materialize renders templates and copies static files
   hosts: localhost
   connection: local
@@ -29,6 +132,17 @@
       loop:
         - "{{ lxc_docker_environment_internal.stacks_source }}/komf"
         - "{{ lxc_docker_environment_internal.shared_mount_source }}/stacks"
+        - "{{ lxc_docker_environment_internal.shared_mount_source }}/stacks/komf/data"
+      check_mode: false
+
+    - name: Seed an existing prereq directory with divergent metadata
+      ansible.builtin.file:
+        path: "{{ lxc_docker_environment_internal.shared_mount_source }}/stacks/komf/data/uploads"
+        state: directory
+        owner: "{{ ansible_user_uid }}"
+        group: "{{ ansible_user_gid }}"
+        mode: "0700"
+      check_mode: false
 
     - name: Create a templated Komf compose file (.j2)
       ansible.builtin.copy:
@@ -40,9 +154,16 @@
               image: "example.invalid/komf-{{ '{{' }} stack_vars.komga_user {{ '}}' }}:latest"
           x-prereq-dirs:
             - ./data/uploads
+            - ./data/downloads
             - ./data/cache
+          x-managed-files:
+            - path: ./agent-keys.yaml
+              mode: "0600"
+            - path: ./config.conf
+              mode: "0755"
         dest: "{{ lxc_docker_environment_internal.stacks_source }}/komf/compose.yaml.j2"
         mode: "0644"
+      check_mode: false
 
     - name: Create a templated Komf .env.j2
       ansible.builtin.copy:
@@ -53,12 +174,22 @@
           STACK_NAME={{ '{{' }} stack_name {{ '}}' }}
         dest: "{{ lxc_docker_environment_internal.stacks_source }}/komf/.env.j2"
         mode: "0644"
+      check_mode: false
+
+    - name: Create a templated managed file
+      ansible.builtin.copy:
+        content: |
+          agent: {{ '{{' }} stack_name {{ '}}' }}
+        dest: "{{ lxc_docker_environment_internal.stacks_source }}/komf/agent-keys.yaml.j2"
+        mode: "0644"
+      check_mode: false
 
     - name: Create a static config file
       ansible.builtin.copy:
         content: "static-config-content"
         dest: "{{ lxc_docker_environment_internal.stacks_source }}/komf/config.conf"
         mode: "0644"
+      check_mode: false
 
     - name: Run actual find ops to populate discover registers
       ansible.builtin.find:
@@ -93,7 +224,69 @@
       become: false
 
     - name: Include materialize
-      ansible.builtin.include_tasks: "../../../playbooks/roles/config/lxc_stack_sync/tasks/materialize.yml"
+      ansible.builtin.include_tasks:
+        file: "../../../playbooks/roles/config/lxc_stack_sync/tasks/materialize.yml"
+
+    - name: Inspect prereq directory metadata after materialization
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ lxc_docker_environment_internal.shared_mount_source }}/stacks/komf/data/uploads"
+        - "{{ lxc_docker_environment_internal.shared_mount_source }}/stacks/komf/data/downloads"
+      register: _prereq_dir_stats_after
+
+    - name: Verify existing prereq metadata is preserved
+      ansible.builtin.assert:
+        that:
+          - _prereq_dir_stats_after.results[0].stat.mode == '0700'
+          - _prereq_dir_stats_after.results[0].stat.uid == ansible_user_uid
+          - _prereq_dir_stats_after.results[0].stat.gid == ansible_user_gid
+          - >-
+            (lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/data/uploads')
+            not in (_lxc_docker_env_reconciliation.materialized.created_dirs | default([]))
+          - >-
+            (lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/data/uploads')
+            not in (_lxc_docker_env_reconciliation.materialized.updated_dirs | default([]))
+
+    - name: Verify missing prereq creation behavior
+      ansible.builtin.assert:
+        that:
+          - >-
+            ansible_check_mode
+            or _prereq_dir_stats_after.results[1].stat.exists
+          - >-
+            ansible_check_mode
+            or _prereq_dir_stats_after.results[1].stat.mode == '0755'
+          - >-
+            ansible_check_mode
+            or _prereq_dir_stats_after.results[1].stat.uid == ansible_user_uid
+          - >-
+            ansible_check_mode
+            or _prereq_dir_stats_after.results[1].stat.gid == ansible_user_gid
+          - >-
+            (lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/data/downloads')
+            in (_lxc_docker_env_reconciliation.materialized.created_dirs | default([]))
+          - >-
+            (lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/data/downloads')
+            not in (_lxc_docker_env_reconciliation.materialized.updated_dirs | default([]))
+          - >-
+            (_lxc_docker_env_reconciliation.materialized.changed_results | default([])
+            | selectattr('path', 'defined')
+            | selectattr('path', 'equalto', lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/data/uploads')
+            | list
+            | length) == 0
+          - >-
+            (_lxc_docker_env_reconciliation.materialized.changed_results | default([])
+            | selectattr('path', 'defined')
+            | selectattr('path', 'equalto', lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/data/downloads')
+            | selectattr('changed', 'defined')
+            | selectattr('changed')
+            | list
+            | length) == 1
+
+    - name: Finish after check-mode prereq verification
+      ansible.builtin.meta: end_play
+      when: ansible_check_mode
 
     - name: Assert templated files were rendered at target paths
       ansible.builtin.stat:
@@ -102,12 +295,14 @@
       loop:
         - "{{ lxc_docker_environment_internal.shared_mount_source }}/stacks/komf/compose.yaml"
         - "{{ lxc_docker_environment_internal.shared_mount_source }}/stacks/komf/.env"
+        - "{{ lxc_docker_environment_internal.shared_mount_source }}/stacks/komf/agent-keys.yaml"
 
     - name: Verify templated files exist
       ansible.builtin.assert:
         that:
-          - _rendered_file_stats.results | map(attribute='stat.exists') | select('equalto', true) | list | length == 2
-        fail_msg: "Rendered Komf compose.yaml and .env were not both created"
+          - _rendered_file_stats.results | map(attribute='stat.exists') | select('equalto', true) | list | length == 3
+          - _rendered_file_stats.results[2].stat.mode == '0600'
+        fail_msg: "Rendered files were not created at their effective declared modes"
 
     - name: Read rendered Komf compose file
       ansible.builtin.slurp:
@@ -138,7 +333,31 @@
       ansible.builtin.assert:
         that:
           - _static_file_stat.stat.exists
+          - _static_file_stat.stat.mode == '0755'
         fail_msg: "Static config.conf not found at target path"
+
+    - name: Assert an undeclared synced file keeps the default mode
+      ansible.builtin.assert:
+        that:
+          - _rendered_file_stats.results[0].stat.mode == '0644'
+
+    - name: Assert synced managed files bypass managed-only enforcement
+      ansible.builtin.assert:
+        that:
+          - >-
+            (_stack_sync_managed_file_create_results.results | default([])
+            | map(attribute='item.path')
+            | intersect([
+              lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/agent-keys.yaml',
+              lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/config.conf'
+            ]) | length) == 0
+          - >-
+            (_stack_sync_managed_file_permission_results.results | default([])
+            | map(attribute='item.path')
+            | intersect([
+              lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/agent-keys.yaml',
+              lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/config.conf'
+            ]) | length) == 0
 
     - name: Assert .j2 source files were NOT copied as static files
       ansible.builtin.stat:
@@ -161,11 +380,440 @@
           - "'komf/.env' in (lxc_stack_sync_manifest_plan.templated_outputs | default([]))"
           - "'example.invalid/komf-komf-user:latest' in (lxc_stack_sync_manifest_plan.source_compose_specs | first).content"
           - lxc_stack_sync_manifest_plan.stack_dirs_to_create | length > 0
-          - lxc_stack_sync_manifest_plan.files_to_render | length == 2
+          - lxc_stack_sync_manifest_plan.files_to_render | length == 3
+          - >-
+            (lxc_stack_sync_manifest_plan.files_to_render
+            | selectattr('relative_path', 'equalto', 'komf/agent-keys.yaml')
+            | first).mode == '0600'
           - lxc_stack_sync_manifest_plan.files_to_copy | length == 1
+          - (lxc_stack_sync_manifest_plan.files_to_copy | first).mode == '0755'
           - "(lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/data/uploads')
+            not in (lxc_stack_sync_manifest_plan.prereq_dirs | map(attribute='path') | list)"
+          - "(lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/data/downloads')
             in (lxc_stack_sync_manifest_plan.prereq_dirs | map(attribute='path') | list)"
           - "(lxc_docker_environment_internal.shared_mount_source ~ '/stacks/komf/data/cache')
             not in (lxc_stack_sync_manifest_plan.prereq_dirs | map(attribute='path') | list)"
           - lxc_stack_sync_manifest_plan.ownership_overrides | length == 1
         fail_msg: "Planner output did not capture the expected stack assets and prereq dirs"
+
+    - name: Re-run materialize to verify synced files are idempotent
+      ansible.builtin.include_tasks:
+        file: "../../../playbooks/roles/config/lxc_stack_sync/tasks/materialize.yml"
+
+    - name: Assert repeated materialization has no changes
+      ansible.builtin.assert:
+        that:
+          - >-
+            (_lxc_docker_env_reconciliation.materialized.changed_results | default([])
+            | selectattr('changed', 'defined')
+            | selectattr('changed')
+            | list
+            | length) == 0
+
+- name: Test planner applies declaration ownership by resolved destination
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  vars:
+    planner_root: "{{ temp_root }}/planner-metadata"
+    lxc_docker_environment_internal:
+      shared_mount_source: "{{ planner_root }}/shared"
+      stacks_source: "{{ planner_root }}/source"
+      shared_owner: "{{ ansible_user_uid }}"
+      shared_group: "{{ ansible_user_gid }}"
+      docker_uid: "{{ ansible_user_uid }}"
+      docker_gid: "{{ ansible_user_gid }}"
+      path_ownership_overrides: []
+    _per_host_stack_metadata_files:
+      files: []
+  tasks:
+    - name: Finish before planner metadata fixture in check mode
+      ansible.builtin.meta: end_play
+      when: ansible_check_mode
+
+    - name: Create planner metadata source layout
+      ansible.builtin.file:
+        path: "{{ lxc_docker_environment_internal.stacks_source }}/metadata"
+        state: directory
+        mode: "0755"
+
+    - name: Create planner metadata compose declaration
+      ansible.builtin.copy:
+        content: |
+          ---
+          x-managed-files:
+            - path: ./declared.conf
+              owner: {{ ansible_user_uid }}
+              group: {{ ansible_user_gid }}
+              mode: "0600"
+          services: {}
+        dest: "{{ lxc_docker_environment_internal.stacks_source }}/metadata/compose.yaml"
+        mode: "0644"
+
+    - name: Create declared planner source file
+      ansible.builtin.copy:
+        content: "declared"
+        dest: "{{ lxc_docker_environment_internal.stacks_source }}/metadata/declared.conf"
+        mode: "0644"
+
+    - name: Create undeclared planner source file
+      ansible.builtin.copy:
+        content: "undeclared"
+        dest: "{{ lxc_docker_environment_internal.stacks_source }}/metadata/undeclared.conf"
+        mode: "0644"
+
+    - name: Discover planner template files
+      ansible.builtin.find:
+        paths: "{{ lxc_docker_environment_internal.stacks_source }}"
+        patterns: "*.j2"
+        hidden: true
+        recurse: true
+        file_type: file
+      register: _per_host_j2_files
+
+    - name: Discover planner static files
+      ansible.builtin.find:
+        paths: "{{ lxc_docker_environment_internal.stacks_source }}"
+        patterns: "*"
+        excludes: "*.j2,.gitkeep"
+        hidden: true
+        recurse: true
+        file_type: file
+      register: _per_host_static_files
+
+    - name: Discover planner directories
+      ansible.builtin.find:
+        paths: "{{ lxc_docker_environment_internal.stacks_source }}"
+        recurse: true
+        file_type: directory
+      register: _per_host_dirs
+
+    - name: Materialize synced files with planned metadata
+      ansible.builtin.include_tasks:
+        file: "../../../playbooks/roles/config/lxc_stack_sync/tasks/materialize.yml"
+
+    - name: Assert declaration ownership wins only for its resolved destination
+      ansible.builtin.assert:
+        that:
+          - declared_entry.owner == ansible_user_uid
+          - declared_entry.group == ansible_user_gid
+          - declared_entry.mode == '0600'
+          - undeclared_entry.owner == ansible_user_uid
+          - undeclared_entry.group == ansible_user_gid
+          - undeclared_entry.mode == '0644'
+      vars:
+        declared_entry: >-
+          {{ lxc_stack_sync_manifest_plan.files_to_copy
+             | selectattr('dest_path', 'equalto', planner_root ~ '/shared/stacks/metadata/declared.conf')
+             | first }}
+        undeclared_entry: >-
+          {{ lxc_stack_sync_manifest_plan.files_to_copy
+             | selectattr('dest_path', 'equalto', planner_root ~ '/shared/stacks/metadata/undeclared.conf')
+             | first }}
+
+    - name: Inspect materialized declared file metadata
+      ansible.builtin.stat:
+        path: "{{ planner_root }}/shared/stacks/metadata/declared.conf"
+      register: _declared_materialized_file
+
+    - name: Inspect materialized undeclared file metadata
+      ansible.builtin.stat:
+        path: "{{ planner_root }}/shared/stacks/metadata/undeclared.conf"
+      register: _undeclared_materialized_file
+
+    - name: Assert declaration metadata is applied by the sync operation
+      ansible.builtin.assert:
+        that:
+          - _declared_materialized_file.stat.exists
+          - _declared_materialized_file.stat.uid == ansible_user_uid
+          - _declared_materialized_file.stat.gid == ansible_user_gid
+          - _declared_materialized_file.stat.mode == '0600'
+          - >-
+            (_stack_sync_managed_file_create_results.results | default([])
+            | map(attribute='item.path')
+            | select('equalto', planner_root ~ '/shared/stacks/metadata/declared.conf')
+            | list
+            | length) == 0
+          - >-
+            (_stack_sync_managed_file_permission_results.results | default([])
+            | map(attribute='item.path')
+            | select('equalto', planner_root ~ '/shared/stacks/metadata/declared.conf')
+            | list
+            | length) == 0
+        fail_msg: >-
+          The synced declaration-specific owner, group, or mode was not applied directly
+          by materialization
+
+    - name: Assert shared metadata defaults are applied to undeclared copy artifacts
+      ansible.builtin.assert:
+        that:
+          - _undeclared_materialized_file.stat.exists
+          - _undeclared_materialized_file.stat.uid == ansible_user_uid
+          - _undeclared_materialized_file.stat.gid == ansible_user_gid
+          - _undeclared_materialized_file.stat.mode == '0644'
+        fail_msg: >-
+          The undeclared synced file did not retain the shared owner, group, or mode defaults
+
+- name: Prepare exact repository stack file fixtures
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  vars:
+    exact_root: "{{ temp_root }}/exact-file-modes"
+    exact_source_root: "{{ exact_root }}/source"
+    actual_agent_keys_source: "{{ repo_root }}/stacks/overmind/overmind/agent-keys.yaml.j2"
+    actual_overmind_compose_source: "{{ repo_root }}/stacks/overmind/overmind/compose.yaml"
+    actual_beets_compose_source: >-
+      {{ repo_root }}/stacks/servarr/beets-flask/compose.override.yaml
+    actual_startup_source: "{{ repo_root }}/stacks/servarr/beets-flask/appdata/startup.sh"
+    actual_lidarr_compose_source: "{{ repo_root }}/stacks/servarr/lidarr/compose.yaml"
+    actual_post_import_source: >-
+      {{ repo_root }}/stacks/servarr/lidarr/appdata/lidarr/scripts/beets-post-import.sh
+    exact_agent_keys_source: "{{ exact_source_root }}/overmind/overmind/agent-keys.yaml.j2"
+    exact_overmind_compose_source: "{{ exact_source_root }}/overmind/overmind/compose.yaml"
+    exact_beets_compose_source: "{{ exact_source_root }}/servarr/beets-flask/compose.override.yaml"
+    exact_startup_source: "{{ exact_source_root }}/servarr/beets-flask/appdata/startup.sh"
+    exact_lidarr_compose_source: "{{ exact_source_root }}/servarr/lidarr/compose.yaml"
+    exact_post_import_source: >-
+      {{ exact_source_root }}/servarr/lidarr/appdata/lidarr/scripts/beets-post-import.sh
+  tasks:
+    - name: Finish before exact artifact fixture in check mode
+      ansible.builtin.meta: end_play
+      when: ansible_check_mode
+
+    - name: Create per-host exact artifact source layouts
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ exact_source_root }}/overmind/overmind"
+        - "{{ exact_source_root }}/servarr/beets-flask/appdata"
+        - "{{ exact_source_root }}/servarr/lidarr/appdata/lidarr/scripts"
+
+    - name: Mirror actual compose declarations without unrelated prereq directories
+      ansible.builtin.copy:
+        content: >-
+          {{ (lookup('file', item.source) | from_yaml)
+             | combine({'x-prereq-dirs': []})
+             | to_nice_yaml(indent=2, sort_keys=false) }}
+        dest: "{{ item.dest }}"
+        mode: "0644"
+      loop:
+        - source: "{{ actual_overmind_compose_source }}"
+          dest: "{{ exact_overmind_compose_source }}"
+        - source: "{{ actual_beets_compose_source }}"
+          dest: "{{ exact_beets_compose_source }}"
+        - source: "{{ actual_lidarr_compose_source }}"
+          dest: "{{ exact_lidarr_compose_source }}"
+      loop_control:
+        label: "{{ item.source }}"
+
+    - name: Mirror actual declared artifacts byte for byte
+      ansible.builtin.copy:
+        src: "{{ item.source }}"
+        dest: "{{ item.dest }}"
+        mode: "preserve"
+      loop:
+        - source: "{{ actual_agent_keys_source }}"
+          dest: "{{ exact_agent_keys_source }}"
+        - source: "{{ actual_startup_source }}"
+          dest: "{{ exact_startup_source }}"
+        - source: "{{ actual_post_import_source }}"
+          dest: "{{ exact_post_import_source }}"
+      loop_control:
+        label: "{{ item.source }}"
+
+    - name: Inspect actual and mirrored artifact sources
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: sha256
+      loop:
+        - "{{ actual_agent_keys_source }}"
+        - "{{ exact_agent_keys_source }}"
+        - "{{ actual_startup_source }}"
+        - "{{ exact_startup_source }}"
+        - "{{ actual_post_import_source }}"
+        - "{{ exact_post_import_source }}"
+      register: _exact_source_stats
+
+    - name: Assert mirror retains actual artifact bytes and managed declarations
+      ansible.builtin.assert:
+        that:
+          - _exact_source_stats.results[0].stat.checksum == _exact_source_stats.results[1].stat.checksum
+          - _exact_source_stats.results[2].stat.checksum == _exact_source_stats.results[3].stat.checksum
+          - _exact_source_stats.results[4].stat.checksum == _exact_source_stats.results[5].stat.checksum
+          - >-
+            (lookup('file', item.source) | from_yaml)['x-managed-files']
+            == (lookup('file', item.dest) | from_yaml)['x-managed-files']
+          - (lookup('file', item.dest) | from_yaml)['x-prereq-dirs'] == []
+      loop:
+        - source: "{{ actual_overmind_compose_source }}"
+          dest: "{{ exact_overmind_compose_source }}"
+        - source: "{{ actual_beets_compose_source }}"
+          dest: "{{ exact_beets_compose_source }}"
+        - source: "{{ actual_lidarr_compose_source }}"
+          dest: "{{ exact_lidarr_compose_source }}"
+      loop_control:
+        label: "{{ item.source }}"
+
+- name: Test exact Overmind artifacts through its production source topology
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    exact_root: "{{ temp_root }}/exact-file-modes"
+    exact_source_root: "{{ exact_root }}/source/overmind"
+    exact_agent_keys_source: "{{ exact_source_root }}/overmind/agent-keys.yaml.j2"
+    exact_overmind_compose_source: "{{ exact_source_root }}/overmind/compose.yaml"
+    exact_agent_keys_target: "{{ exact_root }}/shared/stacks/overmind/agent-keys.yaml"
+    lxc_docker_environment_internal:
+      shared_mount_source: "{{ exact_root }}/shared"
+      stacks_source: "{{ exact_source_root }}"
+      shared_owner: "{{ ansible_user_uid }}"
+      shared_group: "{{ ansible_user_gid }}"
+      docker_uid: "{{ ansible_user_uid }}"
+      docker_gid: "{{ ansible_user_gid }}"
+      path_ownership_overrides: []
+    lxc_docker_env_stack_vars:
+      overmind:
+        agent_key: "fixture-agent-key"
+    lxc_docker_env_desired_top_level_stack_dirs: []
+    _per_host_stack_metadata_files:
+      files: []
+  tasks:
+    - name: Finish before exact Overmind fixture in check mode
+      ansible.builtin.meta: end_play
+      when: ansible_check_mode
+
+    - name: Publish exact Overmind discovery results
+      ansible.builtin.set_fact:
+        _per_host_j2_files:
+          files:
+            - path: "{{ exact_agent_keys_source }}"
+        _per_host_static_files:
+          files:
+            - path: "{{ exact_overmind_compose_source }}"
+        _per_host_dirs:
+          files:
+            - path: "{{ exact_source_root }}/overmind"
+
+    - name: Materialize exact Overmind artifacts through production tasks
+      ansible.builtin.include_tasks: ../../../playbooks/roles/config/lxc_stack_sync/tasks/materialize.yml
+
+    - name: Inspect exact materialized Overmind artifact
+      ansible.builtin.stat:
+        path: "{{ exact_agent_keys_target }}"
+      register: _exact_agent_keys_stat
+
+    - name: Assert exact Overmind artifact retains its production contract
+      ansible.builtin.assert:
+        that:
+          - _exact_agent_keys_stat.stat.exists
+          - _exact_agent_keys_stat.stat.mode == '0600'
+          - exact_agent_keys_plan.stack_name == 'overmind'
+          - exact_agent_keys_plan.dest_path == exact_agent_keys_target
+          - >-
+            exact_agent_keys_target not in
+            (_stack_sync_managed_file_create_results.results | default([])
+            | map(attribute='item.path') | list)
+          - >-
+            exact_agent_keys_target not in
+            (_stack_sync_managed_file_permission_results.results | default([])
+            | map(attribute='item.path') | list)
+      vars:
+        exact_agent_keys_plan: >-
+          {{ lxc_stack_sync_manifest_plan.files_to_render
+             | selectattr('source_path', 'equalto', exact_agent_keys_source)
+             | first }}
+
+- name: Test exact Servarr artifacts through its production source topology
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    exact_root: "{{ temp_root }}/exact-file-modes"
+    exact_source_root: "{{ exact_root }}/source/servarr"
+    exact_beets_compose_source: "{{ exact_source_root }}/beets-flask/compose.override.yaml"
+    exact_startup_source: "{{ exact_source_root }}/beets-flask/appdata/startup.sh"
+    exact_lidarr_compose_source: "{{ exact_source_root }}/lidarr/compose.yaml"
+    exact_post_import_source: >-
+      {{ exact_source_root }}/lidarr/appdata/lidarr/scripts/beets-post-import.sh
+    exact_startup_target: "{{ exact_root }}/shared/stacks/beets-flask/appdata/startup.sh"
+    exact_post_import_target: >-
+      {{ exact_root }}/shared/stacks/lidarr/appdata/lidarr/scripts/beets-post-import.sh
+    lxc_docker_environment_internal:
+      shared_mount_source: "{{ exact_root }}/shared"
+      stacks_source: "{{ exact_source_root }}"
+      shared_owner: "{{ ansible_user_uid }}"
+      shared_group: "{{ ansible_user_gid }}"
+      docker_uid: "{{ ansible_user_uid }}"
+      docker_gid: "{{ ansible_user_gid }}"
+      path_ownership_overrides: []
+    lxc_docker_env_desired_top_level_stack_dirs: []
+    _per_host_stack_metadata_files:
+      files: []
+  tasks:
+    - name: Finish before exact Servarr fixture in check mode
+      ansible.builtin.meta: end_play
+      when: ansible_check_mode
+
+    - name: Publish exact Servarr discovery results
+      ansible.builtin.set_fact:
+        _per_host_j2_files:
+          files: []
+        _per_host_static_files:
+          files:
+            - path: "{{ exact_beets_compose_source }}"
+            - path: "{{ exact_startup_source }}"
+            - path: "{{ exact_lidarr_compose_source }}"
+            - path: "{{ exact_post_import_source }}"
+        _per_host_dirs:
+          files:
+            - path: "{{ exact_source_root }}/beets-flask"
+            - path: "{{ exact_source_root }}/beets-flask/appdata"
+            - path: "{{ exact_source_root }}/lidarr"
+            - path: "{{ exact_source_root }}/lidarr/appdata"
+            - path: "{{ exact_source_root }}/lidarr/appdata/lidarr"
+            - path: "{{ exact_source_root }}/lidarr/appdata/lidarr/scripts"
+
+    - name: Materialize exact Servarr artifacts through production tasks
+      ansible.builtin.include_tasks: ../../../playbooks/roles/config/lxc_stack_sync/tasks/materialize.yml
+
+    - name: Inspect exact materialized Servarr artifacts
+      ansible.builtin.stat:
+        path: "{{ item.path }}"
+      loop:
+        - path: "{{ exact_startup_target }}"
+          mode: "0755"
+          source: "{{ exact_startup_source }}"
+          stack_name: beets-flask
+        - path: "{{ exact_post_import_target }}"
+          mode: "0755"
+          source: "{{ exact_post_import_source }}"
+          stack_name: lidarr
+      register: _exact_servarr_artifact_stats
+
+    - name: Assert exact Servarr artifacts retain their production contracts
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.mode == item.item.mode
+          - exact_artifact_plan.stack_name == item.item.stack_name
+          - exact_artifact_plan.dest_path == item.item.path
+          - >-
+            item.item.path not in
+            (_stack_sync_managed_file_create_results.results | default([])
+            | map(attribute='item.path') | list)
+          - >-
+            item.item.path not in
+            (_stack_sync_managed_file_permission_results.results | default([])
+            | map(attribute='item.path') | list)
+      vars:
+        exact_artifact_plan: >-
+          {{ lxc_stack_sync_manifest_plan.files_to_copy
+             | selectattr('source_path', 'equalto', item.item.source)
+             | first }}
+      loop: "{{ _exact_servarr_artifact_stats.results }}"
+      loop_control:
+        label: "{{ item.item.path }}"

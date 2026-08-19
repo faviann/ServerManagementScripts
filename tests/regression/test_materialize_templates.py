@@ -16,22 +16,43 @@ ANSIBLE_PLAYBOOK = "uv run --locked ansible-playbook".split()
 
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="stack-sync-materialize-") as temp_root:
-        proc = subprocess.run(
-            [*ANSIBLE_PLAYBOOK, str(PLAYBOOK), "-e", f"temp_root={temp_root}"],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            env=os.environ.copy(),
-        )
+        runs = [
+            [
+                *ANSIBLE_PLAYBOOK,
+                str(PLAYBOOK),
+                "-e",
+                f"temp_root={temp_root}/apply",
+                "-e",
+                f"repo_root={REPO_ROOT}",
+            ],
+            [
+                *ANSIBLE_PLAYBOOK,
+                str(PLAYBOOK),
+                "--check",
+                "-e",
+                f"temp_root={temp_root}/check",
+                "-e",
+                f"repo_root={REPO_ROOT}",
+            ],
+        ]
+        results = [
+            subprocess.run(
+                command,
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                env=os.environ.copy(),
+            )
+            for command in runs
+        ]
 
-    output = f"{proc.stdout}\n{proc.stderr}"
+    for mode, result in zip(("apply", "check"), results, strict=True):
+        if result.returncode != 0:
+            print(f"{mode} playbook failed unexpectedly", file=sys.stderr)
+            print(f"{result.stdout}\n{result.stderr}", file=sys.stderr)
+            return 1
 
-    if proc.returncode != 0:
-        print("playbook failed unexpectedly", file=sys.stderr)
-        print(output, file=sys.stderr)
-        return 1
-
-    print("ok: materialize renders templates and copies static files")
+    print("ok: materialize preserves directory and exact stack-file metadata contracts")
     return 0
 
 

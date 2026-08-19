@@ -1,0 +1,118 @@
+---
+# Observes the daemon options the real config/lxc_docker_runtime role hands to
+# geerlingguy.docker, which writes them to /etc/docker/daemon.json verbatim.
+# Ansible must be the single writer of that file (issue #136): on a GPU host the
+# rendered options must already carry the NVIDIA runtime block, and on a non-GPU
+# host they must carry no runtimes key at all.
+#
+# Enters the role through its normal public entrypoint. The fixture replaces
+# systemd and Docker commands only at their external process boundary, keeping
+# the run hermetic while still covering main.yml's production wiring.
+- name: Observe rendered Docker daemon options
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  environment:
+    PATH: "{{ fixture_system_bin }}:{{ lookup('ansible.builtin.env', 'PATH') }}"
+  vars:
+    docker_user: fixture-docker-user
+    expected_daemon_options_without_gpu: |-
+      {
+          "log-driver": "json-file",
+          "log-opts": {
+              "max-file": "3",
+              "max-size": "10m"
+          }
+      }
+    expected_daemon_options_with_gpu: |-
+      {
+          "log-driver": "json-file",
+          "log-opts": {
+              "max-file": "3",
+              "max-size": "10m"
+          },
+          "runtimes": {
+              "nvidia": {
+                  "args": [],
+                  "path": "nvidia-container-runtime"
+              }
+          }
+      }
+  tasks:
+    - name: Observe daemon options across GPU states
+      block:
+        - name: Select the undefined-gpu observation
+          ansible.builtin.set_fact:
+            observation_case: gpu_undefined
+
+        - name: Render daemon options with gpu_enabled undefined
+          ansible.builtin.include_role:
+            name: config/lxc_docker_runtime
+
+        - name: Select the gpu-disabled observation
+          ansible.builtin.set_fact:
+            observation_case: gpu_false
+
+        - name: Render daemon options with gpu_enabled false
+          ansible.builtin.include_role:
+            name: config/lxc_docker_runtime
+          vars:
+            gpu_enabled: false
+
+        - name: Select the gpu-enabled observation
+          ansible.builtin.set_fact:
+            observation_case: gpu_true
+
+        - name: Render daemon options with gpu_enabled true
+          ansible.builtin.include_role:
+            name: config/lxc_docker_runtime
+          vars:
+            gpu_enabled: true
+
+        - name: Read observed daemon options
+          ansible.builtin.slurp:
+            src: "{{ temp_root }}/{{ item }}"
+          loop:
+            - gpu_undefined.json
+            - gpu_undefined.mapping
+            - gpu_false.json
+            - gpu_false.mapping
+            - gpu_true.json
+            - gpu_true.mapping
+          register: observed_daemon_options
+
+        - name: Index observed daemon options
+          ansible.builtin.set_fact:
+            observed:
+              "{{ dict(observed_daemon_options.results
+                       | map(attribute='item')
+                       | zip(observed_daemon_options.results
+                             | map(attribute='content')
+                             | map('b64decode'))) }}"
+
+        - name: Assert geerlingguy.docker receives a real mapping
+          ansible.builtin.assert:
+            that:
+              - observed['gpu_undefined.mapping'] == 'True'
+              - observed['gpu_false.mapping'] == 'True'
+              - observed['gpu_true.mapping'] == 'True'
+            fail_msg: >-
+              docker_daemon_options did not arrive as a mapping:
+              {{ observed }}
+
+        - name: Assert non-GPU hosts get daemon options with no runtimes key
+          ansible.builtin.assert:
+            that:
+              - observed['gpu_undefined.json'] == expected_daemon_options_without_gpu
+              - observed['gpu_false.json'] == expected_daemon_options_without_gpu
+            fail_msg: >-
+              Non-GPU daemon options changed:
+              {{ observed['gpu_undefined.json'] }} / {{ observed['gpu_false.json'] }}
+
+        - name: Assert GPU hosts get the NVIDIA runtime block in one pass
+          ansible.builtin.assert:
+            that:
+              - observed['gpu_true.json'] == expected_daemon_options_with_gpu
+            fail_msg: >-
+              GPU daemon options do not match the toolkit-written shape:
+              {{ observed['gpu_true.json'] }}

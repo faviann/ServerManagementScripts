@@ -20,11 +20,25 @@
     update_cache: true
   when: workstation_packages | length > 0
 
+# Debian's locale-gen only generates the uncommented entries of
+# /etc/locale.gen, and the image ships every entry commented out. Some builds
+# ignore a locale passed as an argument outright, so `locale-gen en_US.UTF-8`
+# exits 0 having generated nothing. Enable the entry first, then generate.
+- name: Enable the en_US.UTF-8 locale entry
+  ansible.builtin.lineinfile:
+    path: /etc/locale.gen
+    regexp: '^[#\s]*en_US\.UTF-8 UTF-8\s*$'
+    line: en_US.UTF-8 UTF-8
+    owner: root
+    group: root
+    mode: "0644"
+  when: workstation_locale_enabled | default(true) | bool
+
 # grep -q closes the pipe early, so pipefail would misfire on SIGPIPE; the
 # `||` fallback already handles a failed probe.
-- name: Generate en_US.UTF-8 locale # noqa: risky-shell-pipe
+- name: Generate enabled locales # noqa: risky-shell-pipe
   ansible.builtin.shell:
-    cmd: locale -a 2>/dev/null | grep -qi 'en_US.utf8' || locale-gen en_US.UTF-8
+    cmd: locale -a 2>/dev/null | grep -qix 'en_US.utf8' || locale-gen
   register: workstation_locale_gen
   changed_when: workstation_locale_gen.stdout | length > 0
   when: workstation_locale_enabled | default(true) | bool
