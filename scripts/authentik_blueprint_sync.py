@@ -1086,17 +1086,56 @@ def ensure_navidrome_password_change_sync_binding(client: AuthentikClient) -> di
     }
 
 
-def wait_for_instance(client: AuthentikClient, instance_pk: str, previous_last_applied: str | None) -> dict[str, Any]:
+def wait_for_instance(
+    client: AuthentikClient,
+    instance_pk: str,
+    instance_name: str,
+    previous_last_applied: str | None,
+    previous_last_applied_hash: str | None,
+    expected_hash: str | None,
+) -> dict[str, Any]:
     deadline = time.time() + 120
+    instance: dict[str, Any] | None = None
     while time.time() < deadline:
         instance = client.request_json("GET", f"/api/v3/managed/blueprints/{instance_pk}/")
         status = instance.get("status")
         if status == "error":
-            raise RuntimeError(f"Blueprint instance {instance['name']} entered error state")
+            message = (
+                f"Blueprint instance {instance['name']} entered error state with "
+                f"expected hash {expected_hash!r}, observed hash "
+                f"{instance.get('last_applied_hash')!r}"
+            )
+            api_detail = instance.get("detail")
+            if api_detail:
+                message += f": {api_detail}"
+            raise RuntimeError(message)
         if status == "successful" and instance.get("last_applied") != previous_last_applied:
+            observed_hash = instance.get("last_applied_hash")
+            if expected_hash is not None and observed_hash != expected_hash:
+                message = (
+                    f"Blueprint instance {instance['name']} reported successful with "
+                    f"expected hash {expected_hash!r}, observed hash {observed_hash!r}"
+                )
+                api_detail = instance.get("detail")
+                if api_detail:
+                    message += f": {api_detail}"
+                raise RuntimeError(message)
             return instance
         time.sleep(2)
-    raise RuntimeError(f"Timed out waiting for blueprint instance {instance_pk} to finish")
+    if instance is None:
+        raise RuntimeError(
+            f"Timed out waiting for blueprint instance {instance_name} to finish with "
+            f"expected hash {expected_hash!r}, observed hash {previous_last_applied_hash!r}"
+        )
+    message = (
+        f"Timed out waiting for blueprint instance {instance['name']} to finish with "
+        f"expected hash {expected_hash!r}, observed hash "
+        f"{instance.get('last_applied_hash')!r}"
+    )
+    api_detail = instance.get("detail")
+    if api_detail:
+        message += f": {api_detail}"
+    raise RuntimeError(message)
 
 
 def reconcile_blueprint_instances(client: AuthentikClient, flow_slugs: list[str]) -> dict[str, Any]:
@@ -1110,6 +1149,7 @@ def reconcile_blueprint_instances(client: AuthentikClient, flow_slugs: list[str]
     instances_by_path = {item.get("path"): item for item in instances if item.get("path")}
     applied = []
     changed = False
+    expected_hashes_by_name: dict[str, str] = {}
 
     for name, relative_path in plan:
         if name == NAVIDROME_PASSWORD_CHANGE_SYNC_BLUEPRINT_NAME:
@@ -1142,6 +1182,8 @@ def reconcile_blueprint_instances(client: AuthentikClient, flow_slugs: list[str]
         available_blueprint = matched[0]
         available_path = available_blueprint["path"]
         available_hash = available_blueprint.get("hash")
+        if available_hash is not None:
+            expected_hashes_by_name[name] = available_hash
         payload = {
             "name": name,
             "path": available_path,
@@ -1176,8 +1218,16 @@ def reconcile_blueprint_instances(client: AuthentikClient, flow_slugs: list[str]
 
         if needs_apply:
             previous_last_applied = instance.get("last_applied")
+            previous_last_applied_hash = instance.get("last_applied_hash")
             apply_instance(client, instance["pk"])
-            instance = wait_for_instance(client, instance["pk"], previous_last_applied)
+            instance = wait_for_instance(
+                client,
+                instance["pk"],
+                instance["name"],
+                previous_last_applied,
+                previous_last_applied_hash,
+                available_hash,
+            )
             changed = True
             action_parts.append("applied")
 
@@ -1203,6 +1253,31 @@ def reconcile_blueprint_instances(client: AuthentikClient, flow_slugs: list[str]
         raise RuntimeError(
             "Repo-managed blueprint instances missing after reconcile: " + ", ".join(missing_names)
         )
+    for instance in repo_instances:
+        expected_hash = expected_hashes_by_name.get(instance["name"])
+        observed_hash = instance.get("last_applied_hash")
+        if expected_hash is not None and instance.get("status") == "error":
+            message = (
+                f"Blueprint instance {instance['name']} entered error state during final verification with "
+                f"expected hash {expected_hash!r}, observed hash {observed_hash!r}"
+            )
+            api_detail = instance.get("detail")
+            if api_detail:
+                message += f": {api_detail}"
+            raise RuntimeError(message)
+        if (
+            expected_hash is not None
+            and instance.get("status") == "successful"
+            and observed_hash != expected_hash
+        ):
+            message = (
+                f"Blueprint instance {instance['name']} reported successful in final verification with "
+                f"expected hash {expected_hash!r}, observed hash {observed_hash!r}"
+            )
+            api_detail = instance.get("detail")
+            if api_detail:
+                message += f": {api_detail}"
+            raise RuntimeError(message)
     failures = [item for item in repo_instances if item.get("status") != "successful"]
     if failures:
         raise RuntimeError(
