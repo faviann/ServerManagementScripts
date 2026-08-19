@@ -243,7 +243,7 @@ Confirm:
 - Collie starts with the same VAPID identity. An unchanged `.env` hash is the proof: had the identity been lost, Collie would have minted a new keypair and rewritten the file.
 - The enrolled Android device receives a push without re-enrollment.
 
-Do not diagnose a missing push as lost VAPID material before checking that `8788` is listening. An unreachable device and a lost identity look identical from the phone, and the forwarder being down is much the likelier cause. Collie logs `[push] enabled (N saved subscription(s))` on startup — if N is non-zero, the subscriptions survived and any failure past that point is a routing problem, not a persistence one.
+Do not diagnose a missing push as lost VAPID material before checking that `8788` is listening. An unreachable device and a lost identity look identical from the phone, and the forwarder being down is much the likelier cause. Without a before-manifest to compare the `.env` hash against, Collie's startup line `[push] enabled (N saved subscription(s))` is the fallback proof: a non-zero N means the subscriptions survived.
 
 Live pane processes do **not** survive an LXC rebuild — the container is replaced, so every running process is gone. That is expected and is not a validation failure. herdr restores session state reconstructively from its snapshot; it does not resume the old processes.
 
