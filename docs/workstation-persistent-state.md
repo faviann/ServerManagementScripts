@@ -45,7 +45,7 @@ systemctl --user list-units --state=active | grep -E 'collie|herdr'   # expect n
 pgrep -af 'herdr|collie'                                              # expect no output
 ```
 
-Stopping herdr ends the processes running in its panes. That is a known and accepted property of the herdr cutover, not a surprise — schedule this migration when no important pane work is in flight. Start Collie again after the deploy, and relaunch herdr the way you normally do.
+Stopping herdr ends the processes running in its panes. That is a known and accepted property of the herdr cutover, not a surprise — schedule this migration when no important pane work is in flight. Restart both after the deploy, following [Restarting Afterwards](#restarting-afterwards).
 
 **herdr does not use tmux.** It runs its own panes as direct children of the `herdr server` process, so `tmux list-sessions` tells you nothing about what you are about to kill. List the real panes and what is running in them:
 
@@ -128,6 +128,18 @@ findmnt ~/.claude ~/.codex ~/.agents ~/.pi ~/.config/agent-of-empires \
 ```
 
 Every declared path must appear. A missing row is an unmounted bind mount, and the play recap will not have flagged it.
+
+## Restarting Afterwards
+
+Start herdr, then `systemctl --user start collie`. Collie pulls up its origin socket through `Wants=collie-origin-forwarder.socket`, so that is the whole sequence. Starting Collie first also works — its bridge polls for herdr and retries — but it logs a `cannot reach Herdr socket` line that looks like a failure and is not.
+
+`Wants` is soft, so a socket that fails to bind leaves Collie started and reporting healthy while nothing outside can reach it. Confirm the listener rather than the unit state:
+
+```bash
+ss -tln | grep 8788
+```
+
+Nothing there is the signature of an unreachable Collie: the phone gets no route and the PWA sits on "waiting for herdr", which reads like a herdr fault when herdr is fine.
 
 ## What Is Deliberately Not Persisted
 
@@ -216,6 +228,8 @@ herdr plugin action invoke start --plugin herdr.collie
 
 Note the argument order — the `--plugin` option must follow the action id. This regenerates and enables `collie.service` and launches the bridge on 8787.
 
+Then verify the origin forwarder the same way as after an ordinary deploy — `ss -tln | grep 8788`. See [Restarting Afterwards](#restarting-afterwards) for why the unit states alone do not tell you the bridge is reachable.
+
 Tracked as faviann/dotfiles#84.
 
 ### Post-Rebuild Validation
@@ -228,6 +242,8 @@ Confirm:
 - herdr lists the same registered plugins.
 - Collie starts with the same VAPID identity. An unchanged `.env` hash is the proof: had the identity been lost, Collie would have minted a new keypair and rewritten the file.
 - The enrolled Android device receives a push without re-enrollment.
+
+Do not diagnose a missing push as lost VAPID material before checking that `8788` is listening. An unreachable device and a lost identity look identical from the phone, and the forwarder being down is much the likelier cause. Without a before-manifest to compare the `.env` hash against, Collie's startup line `[push] enabled (N saved subscription(s))` is the fallback proof: a non-zero N means the subscriptions survived.
 
 Live pane processes do **not** survive an LXC rebuild — the container is replaced, so every running process is gone. That is expected and is not a validation failure. herdr restores session state reconstructively from its snapshot; it does not resume the old processes.
 
