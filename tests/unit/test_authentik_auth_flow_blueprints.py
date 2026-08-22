@@ -82,7 +82,7 @@ class DefaultAuthPoliciesBlueprintTests(unittest.TestCase):
             }
         ]
 
-        self.assertEqual(len(stale_identification_bindings), 1)
+        self.assertEqual(len(stale_identification_bindings), 0)
         self.assertEqual(len(replacement_login_bindings), 1)
 
 
