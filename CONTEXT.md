@@ -12,6 +12,46 @@ _Avoid_: Channel, version inferred from the current tag
 A read-only, schema-versioned record that authorizes the clone's current `HEAD` only when it equals GitHub's current default-branch commit, then fingerprints the checked-in policy, supported Compose inputs, and checked-in-policy-assisted runbook relevant to each operator-selected repo-managed stack. Unrelated worktree changes remain usable; changed relevant inputs make only their stack incomplete.
 _Avoid_: Image update plan, deployed-state snapshot, validation result
 
+**Repo-managed stack identity**:
+The pair of inventory hostname and Compose project name that uniquely identifies one repo-managed stack across scans and image update proposals.
+_Avoid_: Proposal title, image name
+
+**Stack update policy**:
+The operator-authored rules for detecting and preparing an image update proposal for one repo-managed stack. It identifies the upstream authority and update procedure for the stack, with optional per-image update-track and compatibility rules.
+_Avoid_: Global image policy, deployment policy
+
+**Stack tracking mode**:
+The stack update policy choice between following independently managed image references and following an official upstream Compose baseline.
+_Avoid_: Update ownership, portability owner
+
+**Image-tracked stack**:
+A repo-managed stack whose Compose definition is owned independently in this repository and whose update policy follows the container images referenced by that definition.
+_Avoid_: Vendor-tracked stack, unmanaged stack
+
+**Vendor-tracked stack**:
+A repo-managed stack whose base Compose file deliberately follows a suitable official upstream Compose file, while homelab-specific behavior is isolated in an override layer. Its image update proposals compare the upstream baseline and identify any override adaptations required.
+_Avoid_: Vendored stack, independently maintained stack
+
+**Image update scan request**:
+A Renovate-independent selection of validated stack and service identities, current image references, image update tracks, and candidate constraints. The Renovate adapter translates it into a scan projection and tool-specific configuration.
+_Avoid_: Renovate configuration, stack update policy
+
+**Image update scan projection**:
+A disposable, stack-identity-preserving Compose representation generated from validated effective Compose models and stack update policies for a Renovate adapter run. It is lookup input only and never repository desired state.
+_Avoid_: Generated stack, proposed Compose file, deployment manifest
+
+**Renovate adapter**:
+The pinned, read-only boundary that translates stack update policy into a local Renovate dry run and normalizes Renovate's results. Raw Renovate output and its version-specific shape do not cross this boundary.
+_Avoid_: Renovate integration, registry client
+
+**Image update candidate observation**:
+A normalized account of one Compose service's current image and Renovate-selected candidate, including comparable digests, update classification, proposed exact reference, available release context, and lookup limitations. It supplies facts to proposal readiness evaluation but does not assign an outcome or change repository files.
+_Avoid_: Renovate record, proposed patch, proposal readiness outcome
+
+**Core candidate evidence**:
+The minimum proof required before an image update candidate may produce or refresh a proposal: a valid effective policy and update track, comparable current and candidate digests, proof of a differing eligible candidate, and, for vendor-tracked stacks, an upstream Compose baseline resolved at a commit.
+_Avoid_: Release enrichment, confidence context
+
 **Targeted LXC set**:
 The managed LXCs selected for a lifecycle run. Safety checks and the pre-action planning barrier apply to this set, not automatically to every LXC in inventory.
 _Avoid_: Fleet, all LXCs
