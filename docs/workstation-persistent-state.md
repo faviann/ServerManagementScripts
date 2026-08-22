@@ -4,11 +4,11 @@
 
 The workstation role bind-mounts selected home paths from `/ephemeral/workstation/home` so they survive an intentional LXC rebuild.
 
-**Status: all ten declared paths are migrated and mounted as of 2026-08-13, and rebuild persistence was validated 2026-08-15/16.** The migration procedure below is kept because it is the procedure for any path added to the contract later.
+**Status: the original ten declared paths were migrated and mounted as of 2026-08-13, and their rebuild persistence was validated 2026-08-15/16.** Four paths now extend that contract for OpenCode and Oh My Pi (OMP): `~/.omp`, `~/.config/opencode`, `~/.local/share/opencode`, and `~/.local/state/opencode`. Migrate them before the first deploy that includes this change, then include them in the next rebuild validation.
 
 Note that `~/.claude.json` is a sibling of the mounted `~/.claude` and is therefore *not* covered — see #157.
 
-The two paths migrated last were `~/.config/herdr` (herdr configuration, session snapshot, plugin registration, Collie's env file) and `~/.local/state/collie` (Collie runtime state). Read this runbook before the first `site.yml` run that enables any newly declared path.
+`~/.pi` remains the Pi harness state root. OMP is a separate harness with separate state under `~/.omp`; neither path replaces or contains the other. OpenCode's three durable XDG roots preserve its configuration, authentication, and session state. Read this runbook before the first `site.yml` run that enables any newly declared path.
 
 ## The Fail-Closed Assert
 
@@ -25,6 +25,26 @@ This is deliberate. A bind mount hides whatever is underneath it, so mounting ov
 ## Pre-Deploy Migration
 
 Run these on the workstation, as the workstation user, before `site.yml --limit workstation`.
+
+Before enabling the OpenCode and OMP mappings, exit every OpenCode and OMP process so their state is not changing during the copy. Copy each existing durable root to the corresponding persistent target, preserving ownership, modes, ACLs, and xattrs:
+
+```bash
+mkdir -p /ephemeral/workstation/home/.config \
+         /ephemeral/workstation/home/.local/share \
+         /ephemeral/workstation/home/.local/state
+
+cp -a ~/.omp /ephemeral/workstation/home/.omp
+cp -a ~/.config/opencode /ephemeral/workstation/home/.config/opencode
+cp -a ~/.local/share/opencode /ephemeral/workstation/home/.local/share/opencode
+cp -a ~/.local/state/opencode /ephemeral/workstation/home/.local/state/opencode
+
+mv ~/.omp ~/.omp.pre-persist
+mv ~/.config/opencode ~/.config/opencode.pre-persist
+mv ~/.local/share/opencode ~/.local/share/opencode.pre-persist
+mv ~/.local/state/opencode ~/.local/state/opencode.pre-persist
+```
+
+The block assumes all four sources exist. Omit both the `cp` and matching `mv` line for any source that is absent; the role creates its persistent target and mount point. Keep the `.pre-persist` copies until the deploy and post-rebuild validation succeed. Do not copy `~/.cache/opencode`: it is reconstructible cache data and deliberately remains ephemeral.
 
 Stop both first. herdr keeps live Unix sockets in `~/.config/herdr` and rewrites `session.json` as panes change; Collie writes into `~/.local/state/collie`. Copying either directory while it is running captures a torn session snapshot, and a graceful stop is what makes herdr write its final one.
 
@@ -123,8 +143,10 @@ Detaching survives an SSH drop. It does not survive a container restart — noth
 Afterwards, confirm the mounts are actually live rather than trusting the play recap — an unmounted bind mount is an empty directory, not an error:
 
 ```bash
-findmnt ~/.claude ~/.codex ~/.agents ~/.pi ~/.config/agent-of-empires \
-        ~/.hermes ~/.openclaw ~/.config/herdr ~/.local/state/collie ~/repos
+findmnt ~/.claude ~/.codex ~/.agents ~/.pi ~/.omp \
+        ~/.config/opencode ~/.local/share/opencode ~/.local/state/opencode \
+        ~/.config/agent-of-empires ~/.hermes ~/.openclaw ~/.config/herdr \
+        ~/.local/state/collie ~/repos
 ```
 
 Every declared path must appear. A missing row is an unmounted bind mount, and the play recap will not have flagged it.
@@ -145,8 +167,9 @@ Nothing there is the signature of an unreachable Collie: the phone gets no route
 
 - `~/.config/systemd/user/collie.service` — Collie regenerates this unit, and it embeds checkout-specific paths. A persisted copy would pin stale paths across a rebuild.
 - `~/.local/state/herdr/agent-detection` — a herdr cache, rebuilt on demand. Persisting it keeps stale detection results alive.
+- `~/.cache/opencode` — OpenCode cache data is reconstructible and remains on the container-owned filesystem.
 
-Note that `~/.local/state/collie` is mounted, not `~/.local/state`. Mounting the parent is what would drag the herdr cache into the contract.
+Note that the specific `~/.local/state/collie` and `~/.local/state/opencode` children are mounted, not `~/.local/state`. Mounting the parent would drag unrelated reconstructible state into the contract. The same narrow-path rule keeps `~/.cache/opencode` outside the persistence contract.
 
 ## Rebuilding the LXC
 
@@ -179,6 +202,15 @@ sha256sum ~/.config/herdr/session.json ~/.config/herdr/plugins.json \
 ```
 
 Hash the VAPID `.env`; never copy or print it. It is the one genuinely irreplaceable artifact — deliberately absent from Bitwarden, and existing only on `/ephemeral`.
+
+Also capture the file list for each OpenCode and OMP durable root and keep that output on the driving machine. After the rebuild, compare it with a fresh listing to prove that the separate OMP state and all three OpenCode roots returned:
+
+```bash
+find ~/.omp ~/.config/opencode ~/.local/share/opencode ~/.local/state/opencode \
+  -type f -print | sort
+```
+
+`~/.cache/opencode` is intentionally absent from this manifest and is not a rebuild failure if empty or missing afterwards.
 
 A graceful herdr/Collie shutdown is **not** required here. The migration procedure above needs one because `cp -a` reads the directory for seconds while herdr writes into it; a destroy interrupts at most one in-flight write. Testing the crash path is also the more honest test, since a real rebuild will not be preceded by a polite shutdown.
 
@@ -238,6 +270,8 @@ Confirm:
 
 - Every declared path appears in `findmnt` (check one target per invocation; an unmounted bind mount is an empty directory, not an error, and the play recap will not flag it).
 - The four hashes from the before-manifest are unchanged.
+- The before/after OpenCode and OMP file lists match for `~/.omp` and all three durable OpenCode roots; `~/.pi` remains independently mounted.
+- `opencode --version` and `omp --version` succeed from the managed `~/.local/bin` command surface after `workstation-setup` completes.
 - herdr restores its session — `herdr-server.log` reports `session restore evaluated … workspaces=N`.
 - herdr lists the same registered plugins.
 - Collie starts with the same VAPID identity. An unchanged `.env` hash is the proof: had the identity been lost, Collie would have minted a new keypair and rewritten the file.

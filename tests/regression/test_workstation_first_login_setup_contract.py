@@ -171,7 +171,9 @@ exit 0
         "nix-env",
         "node",
         "npm",
+        "omp",
         "openclaw",
+        "opencode",
         "pi",
         "readlink",
         "rg",
@@ -254,6 +256,42 @@ def _render_setup(temp_root: Path) -> subprocess.CompletedProcess[str]:
         stderr=subprocess.STDOUT,
         check=False,
     )
+
+
+def test_workstation_agent_harness_readiness_contract() -> None:
+    with tempfile.TemporaryDirectory(prefix="workstation-agent-readiness-") as temp_root:
+        root = Path(temp_root)
+        rendered = _render_setup(root)
+        assert rendered.returncode == 0, rendered.stdout
+
+        home, env = _prepare_completed_workstation(root)
+        _write_executable(
+            home / ".local" / "bin" / "workstation-update", "#!/bin/sh\nexit 0\n"
+        )
+
+        healthy = _run_setup(root, env)
+
+        assert healthy.returncode == 0, healthy.stderr
+        readiness_commands = (root / "commands.log").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        assert "opencode --version" in readiness_commands
+        assert "omp --version" in readiness_commands
+
+        fallback_bin = root / "fallback-bin"
+        fallback_opencode = fallback_bin / "opencode"
+        fallback_bin.mkdir()
+        (home / ".local" / "bin" / "opencode").replace(fallback_opencode)
+        (root / "commands.log").write_text("", encoding="utf-8")
+
+        unmanaged = _run_setup(
+            root, env | {"PATH": f"{fallback_bin}:{env['PATH']}"}
+        )
+
+        assert unmanaged.returncode != 0
+        assert (
+            f"opencode must resolve from {home / '.local/bin'}" in unmanaged.stderr
+        )
 
 
 def test_workstation_configuration_freshness_contract() -> None:
