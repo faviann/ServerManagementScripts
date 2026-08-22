@@ -14,7 +14,6 @@ from __future__ import annotations
 import functools
 import http.server
 import json
-import os
 import tempfile
 import threading
 import zipfile
@@ -38,7 +37,6 @@ def _build_release_assets(asset_root: Path, *, digest_matches: bool) -> None:
     archive_path = asset_root / ARCHIVE_NAME
     binary_path = asset_root / "bw"
     binary_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    os.chmod(binary_path, 0o755)
 
     with zipfile.ZipFile(archive_path, "w") as archive:
         archive.write(binary_path, arcname="bw")
@@ -66,12 +64,16 @@ def _serve_directory(directory: Path) -> Iterator[str]:
         yield f"http://{host}:{port}"
     finally:
         server.shutdown()
+        server.server_close()
         thread.join()
 
 
 @contextmanager
-def bitwarden_release_boundary(*, digest_matches: bool = True) -> Iterator[dict[str, str]]:
-    """Serve a Bitwarden release over loopback and yield the role var overrides.
+def bitwarden_release_boundary(*, digest_matches: bool = True) -> Iterator[list[str]]:
+    """Serve a Bitwarden release over loopback and yield ansible-playbook extra-var args.
+
+    The yielded fragment overrides the role's two injection-seam variables and is
+    spliced straight into an ansible-playbook command line.
 
     With `digest_matches=False` the served archive no longer hashes to the digest
     the served metadata publishes, so the role's checksum validation must fail.
@@ -79,7 +81,9 @@ def bitwarden_release_boundary(*, digest_matches: bool = True) -> Iterator[dict[
     with tempfile.TemporaryDirectory(prefix="bitwarden-release-boundary-") as asset_root:
         _build_release_assets(Path(asset_root), digest_matches=digest_matches)
         with _serve_directory(Path(asset_root)) as base_url:
-            yield {
-                "workstation_bw_download_url": f"{base_url}/{ARCHIVE_NAME}",
-                "workstation_bw_release_api_url": f"{base_url}/{RELEASE_METADATA_NAME}",
-            }
+            yield [
+                "-e",
+                f"workstation_bw_download_url={base_url}/{ARCHIVE_NAME}",
+                "-e",
+                f"workstation_bw_release_api_url={base_url}/{RELEASE_METADATA_NAME}",
+            ]

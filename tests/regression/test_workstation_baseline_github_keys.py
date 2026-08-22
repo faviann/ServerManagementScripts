@@ -22,10 +22,16 @@ def run_playbook(
     *,
     digest_matches: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    with bitwarden_release_boundary(digest_matches=digest_matches) as bitwarden_vars:
-        command = [*ANSIBLE_PLAYBOOK, str(playbook), "-f", "1", "-e", f"temp_root={temp_root}"]
-        for key, value in bitwarden_vars.items():
-            command.extend(["-e", f"{key}={value}"])
+    with bitwarden_release_boundary(digest_matches=digest_matches) as bitwarden_args:
+        command = [
+            *ANSIBLE_PLAYBOOK,
+            str(playbook),
+            "-f",
+            "1",
+            "-e",
+            f"temp_root={temp_root}",
+            *bitwarden_args,
+        ]
         return subprocess.run(
             command,
             cwd=REPO_ROOT,

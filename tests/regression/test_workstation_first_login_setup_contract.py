@@ -242,7 +242,7 @@ def _assert_no_direct_home_manager_activation(commands: str) -> None:
 
 
 def _render_setup(temp_root: Path) -> subprocess.CompletedProcess[str]:
-    with bitwarden_release_boundary() as bitwarden_vars:
+    with bitwarden_release_boundary() as bitwarden_args:
         command = [
             "uv",
             "run",
@@ -251,9 +251,8 @@ def _render_setup(temp_root: Path) -> subprocess.CompletedProcess[str]:
             "tests/regression/fixtures/workstation_first_login_setup_contract.yml",
             "-e",
             f"temp_root={temp_root}",
+            *bitwarden_args,
         ]
-        for key, value in bitwarden_vars.items():
-            command.extend(["-e", f"{key}={value}"])
         return subprocess.run(
             command,
             cwd=REPO_ROOT,

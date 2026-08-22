@@ -27,10 +27,16 @@ def run_playbook(
     *,
     check_mode: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    with bitwarden_release_boundary() as bitwarden_vars:
-        command = [*ANSIBLE_PLAYBOOK, str(playbook), "-f", "1", "-e", f"temp_root={temp_root}"]
-        for key, value in bitwarden_vars.items():
-            command.extend(["-e", f"{key}={value}"])
+    with bitwarden_release_boundary() as bitwarden_args:
+        command = [
+            *ANSIBLE_PLAYBOOK,
+            str(playbook),
+            "-f",
+            "1",
+            "-e",
+            f"temp_root={temp_root}",
+            *bitwarden_args,
+        ]
         if check_mode:
             command.append("--check")
 
