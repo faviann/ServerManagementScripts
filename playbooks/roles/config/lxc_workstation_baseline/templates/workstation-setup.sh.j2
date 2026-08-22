@@ -318,6 +318,12 @@ validate_local_tool_readiness() {
   test "$(command -v pi)" = "$WORKSTATION_HOME/.local/bin/pi" \
     || fail "pi must resolve from $WORKSTATION_HOME/.local/bin"
   pi --version >/dev/null || fail "pi missing or not working"
+  test "$(command -v opencode)" = "$WORKSTATION_HOME/.local/bin/opencode" \
+    || fail "opencode must resolve from $WORKSTATION_HOME/.local/bin"
+  opencode --version >/dev/null || fail "opencode missing or not working"
+  test "$(command -v omp)" = "$WORKSTATION_HOME/.local/bin/omp" \
+    || fail "omp must resolve from $WORKSTATION_HOME/.local/bin"
+  omp --version >/dev/null || fail "omp missing or not working"
   required_managed_commands_ready || fail "$required_managed_command_error"
   hermes version >/dev/null || fail "hermes missing or not working"
   openclaw --version >/dev/null || fail "openclaw missing or not working"

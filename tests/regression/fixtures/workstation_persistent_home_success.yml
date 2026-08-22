@@ -23,57 +23,6 @@
     workstation_setup_profile_hook_path: "{{ temp_root }}/etc/profile.d/workstation-setup.sh"
     workstation_system_bin_owner: "{{ lookup('pipe', 'id -un') }}"
     workstation_system_bin_group: "{{ lookup('pipe', 'id -gn') }}"
-    workstation_persistent_home_links:
-      - name: claude
-        type: bind_mount
-        path: "{{ workstation_home }}/.claude"
-        target: "{{ workstation_persistent_home_root }}/.claude"
-        mode: "0700"
-      - name: codex
-        type: bind_mount
-        path: "{{ workstation_home }}/.codex"
-        target: "{{ workstation_persistent_home_root }}/.codex"
-        mode: "0700"
-      - name: agents
-        type: bind_mount
-        path: "{{ workstation_home }}/.agents"
-        target: "{{ workstation_persistent_home_root }}/.agents"
-        mode: "0700"
-      - name: pi
-        type: bind_mount
-        path: "{{ workstation_home }}/.pi"
-        target: "{{ workstation_persistent_home_root }}/.pi"
-        mode: "0700"
-      - name: agent_of_empires
-        type: bind_mount
-        path: "{{ workstation_home }}/.config/agent-of-empires"
-        target: "{{ workstation_persistent_home_root }}/.config/agent-of-empires"
-        mode: "0700"
-      - name: hermes
-        type: bind_mount
-        path: "{{ workstation_home }}/.hermes"
-        target: "{{ workstation_persistent_home_root }}/.hermes"
-        mode: "0700"
-      - name: openclaw
-        type: bind_mount
-        path: "{{ workstation_home }}/.openclaw"
-        target: "{{ workstation_persistent_home_root }}/.openclaw"
-        mode: "0700"
-      - name: herdr
-        type: bind_mount
-        path: "{{ workstation_home }}/.config/herdr"
-        target: "{{ workstation_persistent_home_root }}/.config/herdr"
-        mode: "0700"
-      - name: collie_state
-        type: bind_mount
-        path: "{{ workstation_home }}/.local/state/collie"
-        target: "{{ workstation_persistent_home_root }}/.local/state/collie"
-        mode: "0700"
-      - name: repos
-        type: bind_mount
-        path: "{{ workstation_home }}/repos"
-        target: "{{ workstation_persistent_home_root }}/repos"
-        mode: "0755"
     lxc_ssh_user: "{{ workstation_username }}"
     lxc_ssh_uid: "{{ lookup('pipe', 'id -u') | int }}"
     lxc_ssh_gid: "{{ lookup('pipe', 'id -g') | int }}"
@@ -161,6 +110,26 @@
         path: "{{ temp_root }}/ephemeral/workstation/home/.pi"
       register: pi_state_dir_stat
 
+    - name: Stat OMP persistent home directory
+      ansible.builtin.stat:
+        path: "{{ temp_root }}/ephemeral/workstation/home/.omp"
+      register: omp_state_dir_stat
+
+    - name: Stat OpenCode config persistent home directory
+      ansible.builtin.stat:
+        path: "{{ temp_root }}/ephemeral/workstation/home/.config/opencode"
+      register: opencode_config_dir_stat
+
+    - name: Stat OpenCode data persistent home directory
+      ansible.builtin.stat:
+        path: "{{ temp_root }}/ephemeral/workstation/home/.local/share/opencode"
+      register: opencode_data_dir_stat
+
+    - name: Stat OpenCode state persistent home directory
+      ansible.builtin.stat:
+        path: "{{ temp_root }}/ephemeral/workstation/home/.local/state/opencode"
+      register: opencode_state_dir_stat
+
     - name: Stat repos persistent home directory
       ansible.builtin.stat:
         path: "{{ temp_root }}/ephemeral/workstation/home/repos"
@@ -210,6 +179,26 @@
       ansible.builtin.stat:
         path: "{{ workstation_home }}/.pi"
       register: pi_home_path_stat
+
+    - name: Stat OMP home path
+      ansible.builtin.stat:
+        path: "{{ workstation_home }}/.omp"
+      register: omp_home_path_stat
+
+    - name: Stat OpenCode config home path
+      ansible.builtin.stat:
+        path: "{{ workstation_home }}/.config/opencode"
+      register: opencode_config_home_path_stat
+
+    - name: Stat OpenCode data home path
+      ansible.builtin.stat:
+        path: "{{ workstation_home }}/.local/share/opencode"
+      register: opencode_data_home_path_stat
+
+    - name: Stat OpenCode state home path
+      ansible.builtin.stat:
+        path: "{{ workstation_home }}/.local/state/opencode"
+      register: opencode_state_home_path_stat
 
     - name: Stat AoE home path
       ansible.builtin.stat:
@@ -268,6 +257,22 @@
           - pi_state_dir_stat.stat.uid == workstation_uid
           - pi_state_dir_stat.stat.gid == workstation_gid
           - pi_state_dir_stat.stat.mode == "0700"
+          - omp_state_dir_stat.stat.isdir
+          - omp_state_dir_stat.stat.uid == workstation_uid
+          - omp_state_dir_stat.stat.gid == workstation_gid
+          - omp_state_dir_stat.stat.mode == "0700"
+          - opencode_config_dir_stat.stat.isdir
+          - opencode_config_dir_stat.stat.uid == workstation_uid
+          - opencode_config_dir_stat.stat.gid == workstation_gid
+          - opencode_config_dir_stat.stat.mode == "0700"
+          - opencode_data_dir_stat.stat.isdir
+          - opencode_data_dir_stat.stat.uid == workstation_uid
+          - opencode_data_dir_stat.stat.gid == workstation_gid
+          - opencode_data_dir_stat.stat.mode == "0700"
+          - opencode_state_dir_stat.stat.isdir
+          - opencode_state_dir_stat.stat.uid == workstation_uid
+          - opencode_state_dir_stat.stat.gid == workstation_gid
+          - opencode_state_dir_stat.stat.mode == "0700"
           - repos_dir_stat.stat.isdir
           - repos_dir_stat.stat.uid == workstation_uid
           - repos_dir_stat.stat.gid == workstation_gid
@@ -300,6 +305,14 @@
           - not (agents_home_path_stat.stat.islnk | default(false))
           - pi_home_path_stat.stat.isdir
           - not (pi_home_path_stat.stat.islnk | default(false))
+          - omp_home_path_stat.stat.isdir
+          - not (omp_home_path_stat.stat.islnk | default(false))
+          - opencode_config_home_path_stat.stat.isdir
+          - not (opencode_config_home_path_stat.stat.islnk | default(false))
+          - opencode_data_home_path_stat.stat.isdir
+          - not (opencode_data_home_path_stat.stat.islnk | default(false))
+          - opencode_state_home_path_stat.stat.isdir
+          - not (opencode_state_home_path_stat.stat.islnk | default(false))
           - aoe_home_path_stat.stat.isdir
           - not (aoe_home_path_stat.stat.islnk | default(false))
           - hermes_home_path_stat.stat.isdir
