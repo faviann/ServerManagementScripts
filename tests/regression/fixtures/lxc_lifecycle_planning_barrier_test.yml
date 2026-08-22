@@ -363,6 +363,7 @@
           - proxmox_lxc_lifecycle_plan == {}
           - proxmox_lxc_lifecycle_observation_before == {}
           - proxmox_lxc_lifecycle_observation_after == {}
+          - proxmox_lifecycle_execution_failure_snapshot == {}
           - lxc_lifecycle_result == {}
           - hostvars.localhost.proxmox_lifecycle_target_hosts == []
           - hostvars.localhost.proxmox_lifecycle_compiled_target_hosts == []
