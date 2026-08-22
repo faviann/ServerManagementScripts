@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from bitwarden_release_boundary import bitwarden_release_boundary
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_ROOT = REPO_ROOT / "tests" / "regression" / "fixtures"
@@ -25,17 +27,20 @@ def run_playbook(
     *,
     check_mode: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    command = [*ANSIBLE_PLAYBOOK, str(playbook), "-f", "1", "-e", f"temp_root={temp_root}"]
-    if check_mode:
-        command.append("--check")
+    with bitwarden_release_boundary() as bitwarden_vars:
+        command = [*ANSIBLE_PLAYBOOK, str(playbook), "-f", "1", "-e", f"temp_root={temp_root}"]
+        for key, value in bitwarden_vars.items():
+            command.extend(["-e", f"{key}={value}"])
+        if check_mode:
+            command.append("--check")
 
-    return subprocess.run(
-        command,
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        env=os.environ.copy(),
-    )
+        return subprocess.run(
+            command,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            env=os.environ.copy(),
+        )
 
 
 def test_workstation_persistent_home_contract() -> None:
