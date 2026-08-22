@@ -104,6 +104,21 @@
         path: "{{ workstation_home }}/.ssh/known_hosts"
       register: workstation_known_hosts_stat
 
+    - name: Stat installed Bitwarden CLI binary
+      ansible.builtin.stat:
+        path: "{{ workstation_bw_bin_path }}"
+      register: workstation_bw_bin_stat
+
+    - name: Assert the Bitwarden CLI archive was extracted and installed
+      ansible.builtin.assert:
+        that:
+          - workstation_bw_bin_stat.stat.exists
+          - workstation_bw_bin_stat.stat.isreg
+          - workstation_bw_bin_stat.stat.executable
+        fail_msg: >-
+          Workstation baseline did not install an executable Bitwarden CLI at
+          {{ workstation_bw_bin_path }}.
+
     - name: Read workstation authorized_keys
       ansible.builtin.slurp:
         src: "{{ workstation_home }}/.ssh/authorized_keys"

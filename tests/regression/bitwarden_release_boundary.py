@@ -25,6 +25,10 @@ from pathlib import Path
 
 ARCHIVE_NAME = "bw-linux-test.zip"
 RELEASE_METADATA_NAME = "release.json"
+# A same-release asset the role must skip: only the entry whose name matches the
+# final path segment of workstation_bw_download_url supplies the expected digest.
+DECOY_ASSET_NAME = "bw-macos-test.zip"
+DECOY_ASSET_DIGEST = "sha256:" + "d0" * 32
 
 
 class _QuietHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
@@ -47,7 +51,12 @@ def _build_release_assets(asset_root: Path, *, digest_matches: bool) -> None:
         with zipfile.ZipFile(archive_path, "a") as archive:
             archive.comment = b"tampered"
 
-    release_payload = {"assets": [{"name": ARCHIVE_NAME, "digest": f"sha256:{digest}"}]}
+    release_payload = {
+        "assets": [
+            {"name": DECOY_ASSET_NAME, "digest": DECOY_ASSET_DIGEST},
+            {"name": ARCHIVE_NAME, "digest": f"sha256:{digest}"},
+        ]
+    }
     (asset_root / RELEASE_METADATA_NAME).write_text(
         json.dumps(release_payload), encoding="utf-8"
     )
