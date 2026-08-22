@@ -8,6 +8,15 @@
     - proxmox_skip_self | default(true) | bool
     - inventory_hostname == lookup('pipe', 'hostname')
 
+# Read the shared latch once. Both branch decisions below must see the same
+# value: another target can record a failure between them, and a target that
+# read an empty latch for one branch and a set latch for the other would publish
+# neither result and silently keep its planning outcome.
+- name: Resolve the fail-fast latch once for this target's execution decision
+  ansible.builtin.set_fact:
+    proxmox_lifecycle_execution_failure_snapshot: >-
+      {{ hostvars.localhost.proxmox_lifecycle_execution_failure }}
+
 - name: Publish fail-fast suppression after an earlier execution error
   ansible.builtin.set_fact:
     lxc_lifecycle_result:
@@ -17,7 +26,7 @@
         status: not_executed
         reason: >-
           Lifecycle execution stopped after the failure on
-          {{ hostvars.localhost.proxmox_lifecycle_execution_failure.host }}.
+          {{ proxmox_lifecycle_execution_failure_snapshot.host }}.
         rebuilt: false
       observations:
         before: "{{ lxc_lifecycle_result.observations.before }}"
@@ -25,13 +34,13 @@
   when:
     - not (proxmox_lifecycle_barrier_blocked | bool)
     - proxmox_lifecycle_intent != 'validate_only'
-    - hostvars.localhost.proxmox_lifecycle_execution_failure | length > 0
+    - proxmox_lifecycle_execution_failure_snapshot | length > 0
 
 - name: Execute the target's valid semantic lifecycle plan
   when:
     - not (proxmox_lifecycle_barrier_blocked | bool)
     - proxmox_lifecycle_intent != 'validate_only'
-    - hostvars.localhost.proxmox_lifecycle_execution_failure | length == 0
+    - proxmox_lifecycle_execution_failure_snapshot | length == 0
   block:
     - name: Execute host-side actions
       ansible.builtin.include_tasks: provision.yml

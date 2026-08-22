@@ -21,6 +21,7 @@
     proxmox_lifecycle_selected: false
     proxmox_lifecycle_planning_problem: ""
     proxmox_lifecycle_barrier_blocked: false
+    proxmox_lifecycle_execution_failure_snapshot: {}
     proxmox_lifecycle_rebuilt: false
     proxmox_lxc_rebuilt: false
     lxc_lifecycle_skip_host: false

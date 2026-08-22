@@ -1,0 +1,151 @@
+---
+# The shared fail-fast latch is read twice per target: once to decide whether to
+# publish a suppression result, and again to decide whether to execute. This
+# fixture runs concurrent isolated scenarios and forces the latch to flip inside
+# that window with a file rendezvous rather than with timing:
+#
+#   latch_in_window     enters the execution block while the latch is empty and
+#                       is held there until the sibling failure has latched. It
+#                       must finish the execution it committed to; it must never
+#                       retain its planning outcome.
+#   latch_failure       waits until a sibling is inside the block, then fails.
+#   latch_after_failure reaches execution only after the latch is set, so it is
+#                       suppressed before performing any lifecycle action.
+- name: Seed isolated observable state for the latch-transition scenarios
+  hosts: lifecycle_latch_scenarios
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Validate the isolated observable-state directory
+      ansible.builtin.assert:
+        that:
+          - lifecycle_test_state_dir is defined
+          - lifecycle_test_state_dir | length > 0
+
+    - name: Seed the observed runtime state
+      ansible.builtin.copy:
+        dest: "{{ lifecycle_test_state_dir }}/{{ lifecycle_vmid }}.state"
+        content: "{{ lifecycle_runtime_state }}"
+        mode: "0600"
+      delegate_to: localhost
+
+    - name: Seed the observed guest release
+      ansible.builtin.copy:
+        dest: "{{ lifecycle_test_state_dir }}/{{ lifecycle_vmid }}.release"
+        content: "{{ lifecycle_seed_release }}"
+        mode: "0600"
+      delegate_to: localhost
+
+    - name: Reset the lifecycle execution-event record
+      ansible.builtin.copy:
+        dest: "{{ lifecycle_test_state_dir }}/{{ lifecycle_vmid }}.events"
+        content: ""
+        mode: "0600"
+      delegate_to: localhost
+
+    - name: Reset the latch-transition rendezvous markers
+      ansible.builtin.file:
+        path: "{{ lifecycle_test_state_dir }}/{{ item }}"
+        state: absent
+      loop:
+        - execution_window.open
+        - execution_failure.latched
+      delegate_to: localhost
+      run_once: true
+
+- name: Plan every latch-transition scenario before execution begins
+  hosts: lifecycle_latch_scenarios
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Initialize the target-local planning contract
+      ansible.builtin.import_role:
+        name: provisioning/proxmox_lxc_lifecycle
+        tasks_from: initialize_planning
+
+    - name: Compile the target-local LXC contract
+      ansible.builtin.import_role:
+        name: provisioning/proxmox_lxc_lifecycle
+        tasks_from: compile_target
+
+    - name: Build the target-local semantic lifecycle plan
+      ansible.builtin.import_role:
+        name: provisioning/proxmox_lxc_lifecycle
+        tasks_from: plan_target
+
+    - name: Publish the semantic plan through the stable result interface
+      ansible.builtin.import_role:
+        name: provisioning/proxmox_lxc_lifecycle
+        tasks_from: publish_planning_result
+      vars:
+        proxmox_lifecycle_barrier_blocked: false
+
+    - name: Assert every scenario enters execution with a planning outcome
+      ansible.builtin.assert:
+        that:
+          - lxc_lifecycle_result.outcome.status == 'planned'
+
+- name: Execute concurrent scenarios across the fail-fast latch transition
+  hosts: lifecycle_latch_scenarios
+  connection: local
+  gather_facts: false
+  strategy: ansible.builtin.free
+  tasks:
+    - name: Hold the late target until the concurrent failure has latched
+      ansible.builtin.wait_for:
+        path: "{{ lifecycle_test_state_dir }}/execution_failure.latched"
+        timeout: 60
+      delegate_to: localhost
+      when: lifecycle_test_latch_wait_for_failure | default(false) | bool
+
+    - name: Execute through the split lifecycle facade
+      ansible.builtin.include_role:
+        name: provisioning/proxmox_lxc_lifecycle
+        tasks_from: execute
+
+    - name: Signal that the concurrent execution failure has latched
+      ansible.builtin.copy:
+        dest: "{{ lifecycle_test_state_dir }}/execution_failure.latched"
+        content: "{{ hostvars.localhost.proxmox_lifecycle_execution_failure.host }}\n"
+        mode: "0600"
+      delegate_to: localhost
+      when: lxc_lifecycle_result.outcome.status == 'execution_failed'
+
+- name: Assert the latch transition leaves no scenario without an outcome
+  hosts: lifecycle_latch_scenarios
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Assert every scenario published exactly one terminal execution outcome
+      ansible.builtin.assert:
+        that:
+          - lxc_lifecycle_result.outcome.status == lifecycle_expected_outcome
+        fail_msg: >-
+          {{ inventory_hostname }} published
+          '{{ lxc_lifecycle_result.outcome.status }}' instead of the expected
+          terminal outcome '{{ lifecycle_expected_outcome }}'.
+
+    - name: Assert a suppressed target names the failing sibling
+      ansible.builtin.assert:
+        that:
+          - lxc_lifecycle_result.outcome.reason is search('latch_failure')
+          - not (lxc_lifecycle_result.outcome.rebuilt | bool)
+      when: lifecycle_expected_outcome == 'not_executed'
+
+    - name: Read the lifecycle execution-event record
+      ansible.builtin.slurp:
+        src: "{{ lifecycle_test_state_dir }}/{{ lifecycle_vmid }}.events"
+      register: lifecycle_latch_event_record
+      delegate_to: localhost
+
+    - name: Assert each scenario performed exactly its expected lifecycle actions
+      ansible.builtin.assert:
+        that:
+          - lifecycle_expected_events | difference(lifecycle_latch_events) | length == 0
+          - lifecycle_latch_events | difference(lifecycle_expected_events) | length == 0
+        fail_msg: >-
+          Expected semantic execution event set {{ lifecycle_expected_events }}
+          for {{ inventory_hostname }}, observed {{ lifecycle_latch_events }}.
+      vars:
+        lifecycle_latch_events: >-
+          {{ (lifecycle_latch_event_record.content | b64decode).splitlines() }}

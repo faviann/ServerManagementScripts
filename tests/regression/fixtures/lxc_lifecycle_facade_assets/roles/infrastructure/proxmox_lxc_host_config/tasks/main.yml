@@ -9,11 +9,44 @@
     lifecycle_event_record_path: >-
       {{ lifecycle_test_state_dir }}/{{ proxmox_lxc_contract.api_spec.vmid }}.events
 
+# Latch-transition rendezvous. Concurrent scenarios must reproduce the shared
+# fail-fast latch flipping *between* a target's two execution branch decisions,
+# without depending on timing: the in-window target announces that it is already
+# inside the execution block, the failing target waits for that announcement
+# before failing, and the in-window target then waits for the failure to latch.
+- name: Announce that the in-window target is inside the execution block
+  ansible.builtin.copy:
+    dest: "{{ lifecycle_test_state_dir }}/execution_window.open"
+    content: "{{ inventory_hostname }}\n"
+    mode: "0600"
+  delegate_to: localhost
+  when:
+    - lifecycle_test_latch_rendezvous | default(false) | bool
+    - lifecycle_test_execution_failure_host | default('') != inventory_hostname
+
+- name: Hold the failing target until a sibling is inside the execution block
+  ansible.builtin.wait_for:
+    path: "{{ lifecycle_test_state_dir }}/execution_window.open"
+    timeout: 60
+  delegate_to: localhost
+  when:
+    - lifecycle_test_latch_rendezvous | default(false) | bool
+    - lifecycle_test_execution_failure_host | default('') == inventory_hostname
+
 - name: Model a controlled lifecycle execution failure
   ansible.builtin.fail:
     msg: Controlled host-configuration execution failure for {{ inventory_hostname }}
   when:
     - lifecycle_test_execution_failure_host | default('') == inventory_hostname
+
+- name: Hold the in-window target until the sibling failure has latched
+  ansible.builtin.wait_for:
+    path: "{{ lifecycle_test_state_dir }}/execution_failure.latched"
+    timeout: 60
+  delegate_to: localhost
+  when:
+    - lifecycle_test_latch_rendezvous | default(false) | bool
+    - lifecycle_test_execution_failure_host | default('') != inventory_hostname
 
 - name: Model successful host configuration reconciliation
   ansible.builtin.debug:

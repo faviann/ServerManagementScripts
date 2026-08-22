@@ -2,7 +2,7 @@
 all:
   children:
     lifecycle_scenarios:
-      vars:
+      vars: &lifecycle_scenario_defaults
         ansible_connection: local
         proxmox_skip_self: false
         proxmox_lxc_controller_pubkey_enabled: false
@@ -585,6 +585,74 @@ all:
           lifecycle_expected_planning_failure: >-
             Lifecycle plan requires destructive transition 'remove', but
             persistent lifecycle policy does not authorize destructive transitions.
+    # Concurrent execution scenarios for the shared fail-fast latch. These
+    # hosts stay out of lifecycle_scenarios: they deliberately fail during
+    # execution, so they would suppress the success matrix.
+    lifecycle_latch_scenarios:
+      vars:
+        <<: *lifecycle_scenario_defaults
+        lifecycle_test_execution_failure_host: latch_failure
+        proxmox_lifecycle_intent: configure_only
+        lifecycle_desired_state: present
+        lifecycle_runtime_state: running
+        lifecycle_actual_release: "12"
+        lifecycle_release_probe_state: probed
+        lifecycle_seed_release: "12"
+        proxmox_lxc:
+          state: "{{ lifecycle_desired_state }}"
+          hostname: "{{ inventory_hostname }}"
+          vmid: "{{ lifecycle_vmid }}"
+          node: pve-a
+          ostemplate: local:vztmpl/debian-12-standard_12.2-1_amd64.tar.zst
+          cores: 1
+          memory: 128
+          disk: 4
+          netif:
+            net0: name=eth0,bridge=vmbr0,ip=dhcp
+          start_on_create: true
+          pubkey: ssh-ed25519 AAAACONTRACT lifecycle@test
+        lxc_validation_results: >-
+          {{
+            {
+              inventory_hostname: {
+                'status': 'ok',
+                'type': 'match_ok',
+                'message': 'VMID and name match Proxmox state',
+                'runtime_state': lifecycle_runtime_state,
+                'actual_release': lifecycle_actual_release,
+                'release_probe_state': lifecycle_release_probe_state
+              }
+            }
+          }}
+      hosts:
+        latch_failure:
+          lifecycle_vmid: 4460
+          lifecycle_test_latch_rendezvous: true
+          lifecycle_expected_outcome: execution_failed
+          # Fails inside host-configuration reconciliation, so only that
+          # lifecycle action is ever recorded.
+          lifecycle_expected_events:
+            - host_reconciliation
+        # Already inside the execution block when the sibling failure latches:
+        # the reported window. It must finish the execution it committed to and
+        # publish that outcome, never retain its planning outcome.
+        latch_in_window:
+          lifecycle_vmid: 4461
+          lifecycle_test_latch_rendezvous: true
+          lifecycle_expected_outcome: configured
+          lifecycle_expected_events:
+            - host_reconciliation
+            - runtime_refresh
+            - release_refresh
+            - access_restoration
+            - guest_configuration
+        # Reaches execution only after the failure latched, so it is suppressed
+        # before performing any lifecycle action.
+        latch_after_failure:
+          lifecycle_vmid: 4462
+          lifecycle_test_latch_wait_for_failure: true
+          lifecycle_expected_outcome: not_executed
+          lifecycle_expected_events: []
     lifecycle_plan_failures:
       hosts:
         configure_absent:
