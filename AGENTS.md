@@ -26,7 +26,7 @@ Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root (created lazily 
 - Never request, paste, or print secrets (API token secret, vault passphrase, private keys). Use placeholders like `<REPLACE_ME>` in docs or examples.
 - Run Python and Ansible tools through `uv run --locked <tool>`. If `.venv/` does not exist, run `uv sync --locked`.
 - `ansible.cfg` expects the vault passphrase at `~/.ansible/vault-pass`.
-- Lifecycle playbooks skip any host whose `inventory_hostname` matches the controller's hostname (`proxmox_skip_self: true` by default). To manage the control node intentionally: `uv run --locked ansible-playbook site.yml -e proxmox_skip_self=false --limit workstation` (`--limit` targets the host, `-e` disables the guard).
+- Lifecycle playbooks skip any host whose `inventory_hostname` matches the controller's hostname (`proxmox_skip_self: true` by default). To manage the control node intentionally: `./run.sh -e proxmox_skip_self=false --limit workstation` (`--limit` targets the host, `-e` disables the guard).
 
 ## Standard Paths
 
@@ -60,6 +60,8 @@ Secrets are only in encrypted `inventory/group_vars/all/vault.yml` — never com
 
 `site.yml` runs three phases in sequence: **validate** → **provision** (LXC create/update via Proxmox API) → **configure** (in-container: packages, Docker, stacks). Two-tier host config: `proxmox_lxc_provision` handles API-allowed settings; `proxmox_lxc_host_config` handles restricted features (`keyctl=1`, `nesting=1`) via `pct` on the Proxmox host.
 
+Run lifecycle operations through `./run.sh`. It serializes lifecycle mutation with one machine-local lock shared by every worktree on the workstation; it does not coordinate runs from different control nodes.
+
 Roles live in `playbooks/roles/{base,infrastructure,provisioning,config}/`.
 
 ## Docker Stacks
@@ -72,11 +74,11 @@ Stacks live in `stacks/<hostname>/<stack-name>/compose.yaml`. Auto-discovered an
 
 | Command | Purpose |
 |---------|---------|
-| `uv run --locked ansible-playbook site.yml` | Full lifecycle — deploy/update all LXCs |
-| `uv run --locked ansible-playbook site.yml -e proxmox_skip_self=false --limit workstation` | Intentionally include the control node when running from `workstation` |
-| `uv run --locked ansible-playbook site.yml --limit <host>` | Target one host |
-| `uv run --locked ansible-playbook site.yml --limit <host> -e stack_filter=<stack>` | Deploy one stack on a host (skips all others) |
-| `uv run --locked ansible-playbook site.yml --check` | Dry run |
+| `./run.sh` | Full lifecycle — deploy/update all LXCs |
+| `./run.sh -e proxmox_skip_self=false --limit workstation` | Intentionally include the control node when running from `workstation` |
+| `./run.sh --limit <host>` | Target one host |
+| `./run.sh --limit <host> -e stack_filter=<stack>` | Deploy one stack on a host (skips all others) |
+| `./run.sh --check` | Dry run |
 | `uv run --locked ansible-playbook bootstrap.yml` | Recreate bootstrap artifacts after clean install |
 | `uv run --locked python tests/regression/run_lxc_lifecycle_regressions.py` | Fast lifecycle feedback (~1.5 min) — semantic lifecycle facade matrix + targeted planning barrier, controlled observations only. Run while iterating on LXC lifecycle changes |
 | `uv run --locked python tests/regression/run_lxc_lifecycle_regressions.py --only <launcher.py>` | Target one registered lifecycle launcher in the same credential-free fixture environment. Repeat `--only` to run several launchers in the supplied order |
@@ -92,13 +94,13 @@ For lifecycle-regression remediation, use repeatable `--only <launcher.py>` for 
 
 **Long-running output discipline**: For live deploys or other noisy commands, avoid streaming full output into chat context. Prefer redirecting to a temp log and polling only high-signal excerpts:
 ```bash
-uv run --locked ansible-playbook site.yml --limit <host> > /tmp/<task>.log 2>&1
+./run.sh --limit <host> > /tmp/<task>.log 2>&1
 tail -40 /tmp/<task>.log
 rg "failed=|unreachable=|FAILED|changed=|<relevant-resource>" /tmp/<task>.log
 ```
 Only read the full log when the summarized output is insufficient to diagnose a failure. Never print secrets from logs or vault output.
 
-Debug: `uv run --locked ansible-playbook site.yml -vvv` for verbose output, `uv run --locked ansible-inventory -i inventory/hosts.yml --host <name> --yaml` for merged vars, `uv run --locked ansible -i inventory/hosts.yml lxcs -m ping` for connectivity, delete `.ansible/cache/` for stale facts.
+Debug: `./run.sh -vvv` for verbose output, `uv run --locked ansible-inventory -i inventory/hosts.yml --host <name> --yaml` for merged vars, `uv run --locked ansible -i inventory/hosts.yml lxcs -m ping` for connectivity, delete `.ansible/cache/` for stale facts.
 
 ## Role Design Principles
 

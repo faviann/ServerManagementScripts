@@ -395,7 +395,7 @@ def run_regressions() -> int:
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
-        env=os.environ.copy(),
+        env={**os.environ, "HOMELAB_IAC_LIFECYCLE_WRAPPER": "1"},
     )
     missing_domain_output = f"{missing_domain.stdout}\n{missing_domain.stderr}"
     if (
@@ -408,6 +408,7 @@ def run_regressions() -> int:
         return 1
 
     env = os.environ.copy()
+    env["HOMELAB_IAC_LIFECYCLE_WRAPPER"] = "1"
     proc = subprocess.run(
         [
             *ANSIBLE_PLAYBOOK,

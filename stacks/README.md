@@ -247,13 +247,13 @@ uv run --locked pytest -q tests/unit/test_stack_update_policy_selection.py
 5. Deploy with:
 
 ```bash
-uv run --locked ansible-playbook site.yml --limit <host>
+./run.sh --limit <host>
 ```
 
 To iterate on a single stack without reconciling the others:
 
 ```bash
-uv run --locked ansible-playbook site.yml --limit <host> -e stack_filter=<stack>
+./run.sh --limit <host> -e stack_filter=<stack>
 ```
 
 No registration step is required; the role discovers everything under `stacks/<host>/` automatically.

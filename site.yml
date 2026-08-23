@@ -4,10 +4,10 @@
 # guest configuration.
 #
 # Usage:
-#   uv run --locked ansible-playbook site.yml                    # Run full lifecycle
+#   ./run.sh                                                     # Run full lifecycle
 #   uv run --locked ansible-playbook playbooks/validate-infrastructure.yml  # Just validation
-#   uv run --locked ansible-playbook playbooks/provision-lxcs.yml          # Just provisioning
-#   uv run --locked ansible-playbook playbooks/configure-lxcs.yml          # Just configuration
+#   ./run.sh provision                                           # Just provisioning
+#   ./run.sh configure                                           # Just configuration
 
 - name: Run standalone LXC lifecycle validation when explicitly tagged
   ansible.builtin.import_playbook: playbooks/validate-infrastructure.yml

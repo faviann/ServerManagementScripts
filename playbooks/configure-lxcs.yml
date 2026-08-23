@@ -2,8 +2,8 @@
 # Configure LXCs through the lifecycle facade without re-running provisioning.
 #
 # Usage:
-#   uv run --locked ansible-playbook playbooks/configure-lxcs.yml
-#   uv run --locked ansible-playbook playbooks/configure-lxcs.yml --limit portal
+#   ./run.sh configure
+#   ./run.sh configure --limit portal
 
 - name: Run the configure-only lifecycle
   ansible.builtin.import_playbook: lifecycle-lxcs.yml

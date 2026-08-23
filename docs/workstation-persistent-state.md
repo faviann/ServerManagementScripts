@@ -111,7 +111,7 @@ The workstation is the Ansible control node, and `proxmox_skip_self` defaults to
 **Check before applying.** This is the load-bearing step, not an optional dry run:
 
 ```bash
-uv run --locked ansible-playbook site.yml --check \
+./run.sh --check \
   -e proxmox_skip_self=false --limit workstation > /tmp/ws-check.log 2>&1
 rg "restart_required|failed=|unreachable=" /tmp/ws-check.log
 ```
@@ -125,7 +125,7 @@ Why the restart matters more than anything else: `proxmox_lxc_host_config/tasks/
 ```bash
 systemd-run --user --unit=ws-deploy --collect \
   bash -lc 'cd ~/repos/homelab-iac/<worktree> && \
-    uv run --locked ansible-playbook site.yml \
+    ./run.sh \
     -e proxmox_skip_self=false \
     -e lxc_base_system_reboot_enabled=false \
     --limit workstation > /tmp/ws-deploy.log 2>&1'
@@ -230,7 +230,7 @@ ssh-keygen -R workstation && ssh-keygen -R workstation.faviann.vms
 Then deploy. Skip `--check`: it is load-bearing when an existing container might report `restart_required`, but with no container to observe it cannot tell you anything.
 
 ```bash
-uv run --locked ansible-playbook site.yml --limit workstation \
+./run.sh --limit workstation \
   -e proxmox_skip_self=false -e lxc_base_system_reboot_enabled=false
 ```
 
