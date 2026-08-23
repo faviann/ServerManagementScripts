@@ -148,48 +148,35 @@ printf 'version: %s\\n' "$role_version" > "$install_path/$role_name/meta/.galaxy
     vault_pass.parent.mkdir(exist_ok=True)
     vault_pass.write_text("placeholder\n", encoding="utf-8")
 
+    bootstrap_extra_vars = {
+        "control_node_project_root": str(project_root),
+        "control_node_home_dir": str(home),
+        "control_node_collection_requirements": str(
+            project_root / "collections" / "requirements.yml"
+        ),
+        "control_node_collection_install_path": str(project_root / "collections"),
+        "control_node_ssh_private_key_path": str(private_key),
+        "control_node_ssh_public_key_path": str(public_key),
+        "control_node_vault_password_file": str(vault_pass),
+        "control_node_skip_system_packages": True,
+        "control_node_ansible_galaxy_executable": str(fake_galaxy),
+    }
+    bootstrap_env = {
+        "ANSIBLE_COLLECTIONS_PATH": str(project_root / "collections"),
+        "GALAXY_LOG": str(galaxy_log),
+    }
     result = run_playbook(
         REPO_ROOT / "tests" / "regression" / "fixtures" / "control_node_bootstrap_test.yml",
-        extra_vars={
-            "control_node_project_root": str(project_root),
-            "control_node_home_dir": str(home),
-            "control_node_collection_requirements": str(
-                project_root / "collections" / "requirements.yml"
-            ),
-            "control_node_collection_install_path": str(project_root / "collections"),
-            "control_node_ssh_private_key_path": str(private_key),
-            "control_node_ssh_public_key_path": str(public_key),
-            "control_node_vault_password_file": str(vault_pass),
-            "control_node_skip_system_packages": True,
-            "control_node_ansible_galaxy_executable": str(fake_galaxy),
-        },
-        env={
-            "ANSIBLE_COLLECTIONS_PATH": str(project_root / "collections"),
-            "GALAXY_LOG": str(galaxy_log),
-        },
+        extra_vars=bootstrap_extra_vars,
+        env=bootstrap_env,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert private_key.exists()
     assert public_key.exists()
     second_result = run_playbook(
         REPO_ROOT / "tests" / "regression" / "fixtures" / "control_node_bootstrap_test.yml",
-        extra_vars={
-            "control_node_project_root": str(project_root),
-            "control_node_home_dir": str(home),
-            "control_node_collection_requirements": str(
-                project_root / "collections" / "requirements.yml"
-            ),
-            "control_node_collection_install_path": str(project_root / "collections"),
-            "control_node_ssh_private_key_path": str(private_key),
-            "control_node_ssh_public_key_path": str(public_key),
-            "control_node_vault_password_file": str(vault_pass),
-            "control_node_skip_system_packages": True,
-            "control_node_ansible_galaxy_executable": str(fake_galaxy),
-        },
-        env={
-            "ANSIBLE_COLLECTIONS_PATH": str(project_root / "collections"),
-            "GALAXY_LOG": str(galaxy_log),
-        },
+        extra_vars=bootstrap_extra_vars,
+        env=bootstrap_env,
     )
     assert second_result.returncode == 0, second_result.stdout + second_result.stderr
     invocations = galaxy_log.read_text(encoding="utf-8").splitlines()
