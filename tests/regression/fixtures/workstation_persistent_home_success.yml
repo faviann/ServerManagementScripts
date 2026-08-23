@@ -150,6 +150,11 @@
         path: "{{ temp_root }}/ephemeral/workstation/home/.openclaw"
       register: openclaw_state_dir_stat
 
+    - name: Stat Moraine persistent home directory
+      ansible.builtin.stat:
+        path: "{{ temp_root }}/ephemeral/workstation/home/.moraine"
+      register: moraine_state_dir_stat
+
     - name: Stat herdr persistent home directory
       ansible.builtin.stat:
         path: "{{ temp_root }}/ephemeral/workstation/home/.config/herdr"
@@ -220,6 +225,11 @@
         path: "{{ workstation_home }}/.openclaw"
       register: openclaw_home_path_stat
 
+    - name: Stat Moraine home path
+      ansible.builtin.stat:
+        path: "{{ workstation_home }}/.moraine"
+      register: moraine_home_path_stat
+
     - name: Stat herdr home path
       ansible.builtin.stat:
         path: "{{ workstation_home }}/.config/herdr"
@@ -289,6 +299,10 @@
           - openclaw_state_dir_stat.stat.uid == workstation_uid
           - openclaw_state_dir_stat.stat.gid == workstation_gid
           - openclaw_state_dir_stat.stat.mode == "0700"
+          - moraine_state_dir_stat.stat.isdir
+          - moraine_state_dir_stat.stat.uid == workstation_uid
+          - moraine_state_dir_stat.stat.gid == workstation_gid
+          - moraine_state_dir_stat.stat.mode == "0700"
           - herdr_state_dir_stat.stat.isdir
           - herdr_state_dir_stat.stat.uid == workstation_uid
           - herdr_state_dir_stat.stat.gid == workstation_gid
@@ -319,6 +333,8 @@
           - not (hermes_home_path_stat.stat.islnk | default(false))
           - openclaw_home_path_stat.stat.isdir
           - not (openclaw_home_path_stat.stat.islnk | default(false))
+          - moraine_home_path_stat.stat.isdir
+          - not (moraine_home_path_stat.stat.islnk | default(false))
           - herdr_home_path_stat.stat.isdir
           - not (herdr_home_path_stat.stat.islnk | default(false))
           - collie_home_path_stat.stat.isdir

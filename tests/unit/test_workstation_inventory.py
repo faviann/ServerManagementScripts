@@ -103,6 +103,13 @@ class WorkstationInventoryTests(unittest.TestCase):
                 "target": "{{ workstation_persistent_home_root }}/.local/state/collie",
                 "mode": "0700",
             },
+            {
+                "name": "moraine",
+                "type": "bind_mount",
+                "path": "{{ workstation_home }}/.moraine",
+                "target": "{{ workstation_persistent_home_root }}/.moraine",
+                "mode": "0700",
+            },
         ):
             self.assertIn(expected, links)
 

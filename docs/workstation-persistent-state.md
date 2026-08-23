@@ -4,7 +4,7 @@
 
 The workstation role bind-mounts selected home paths from `/ephemeral/workstation/home` so they survive an intentional LXC rebuild.
 
-**Status: the original ten declared paths were migrated and mounted as of 2026-08-13, and their rebuild persistence was validated 2026-08-15/16.** Four paths now extend that contract for OpenCode and Oh My Pi (OMP): `~/.omp`, `~/.config/opencode`, `~/.local/share/opencode`, and `~/.local/state/opencode`. Migrate them before the first deploy that includes this change, then include them in the next rebuild validation.
+**Status: the original ten declared paths were migrated and mounted as of 2026-08-13, and their rebuild persistence was validated 2026-08-15/16.** Four paths now extend that contract for OpenCode and Oh My Pi (OMP): `~/.omp`, `~/.config/opencode`, `~/.local/share/opencode`, and `~/.local/state/opencode`. Moraine's complete local runtime root extends it at `~/.moraine`. Migrate newly declared paths before the first deploy that includes them, then include them in the next rebuild validation.
 
 Note that `~/.claude.json` is a sibling of the mounted `~/.claude` and is therefore *not* covered — see #157.
 
@@ -25,6 +25,20 @@ This is deliberate. A bind mount hides whatever is underneath it, so mounting ov
 ## Pre-Deploy Migration
 
 Run these on the workstation, as the workstation user, before `site.yml --limit workstation`.
+
+Before enabling the Moraine mapping, stop Moraine through the dotfiles-owned
+user-service lifecycle so its managed ClickHouse data and checkpoints are not
+changing during the copy. Preserve the complete runtime root and keep a
+recoverable pre-persistence copy until validation succeeds:
+
+```bash
+mkdir -p /ephemeral/workstation/home
+cp -a ~/.moraine /ephemeral/workstation/home/.moraine
+mv ~/.moraine ~/.moraine.pre-persist
+```
+
+Omit the copy and move when `~/.moraine` does not exist; the role creates the
+backing target and mount point during fresh convergence.
 
 Before enabling the OpenCode and OMP mappings, exit every OpenCode and OMP process so their state is not changing during the copy. Copy each existing durable root to the corresponding persistent target, preserving ownership, modes, ACLs, and xattrs:
 
@@ -143,7 +157,7 @@ Detaching survives an SSH drop. It does not survive a container restart — noth
 Afterwards, confirm the mounts are actually live rather than trusting the play recap — an unmounted bind mount is an empty directory, not an error:
 
 ```bash
-findmnt ~/.claude ~/.codex ~/.agents ~/.pi ~/.omp \
+findmnt ~/.claude ~/.codex ~/.agents ~/.pi ~/.omp ~/.moraine \
         ~/.config/opencode ~/.local/share/opencode ~/.local/state/opencode \
         ~/.config/agent-of-empires ~/.hermes ~/.openclaw ~/.config/herdr \
         ~/.local/state/collie ~/repos

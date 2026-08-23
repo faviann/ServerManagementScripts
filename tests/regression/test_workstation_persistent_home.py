@@ -18,6 +18,7 @@ DISABLED_PLAYBOOK = FIXTURE_ROOT / "workstation_persistent_home_disabled.yml"
 CONFLICT_PLAYBOOK = FIXTURE_ROOT / "workstation_persistent_home_conflict.yml"
 IDEMPOTENCY_PLAYBOOK = FIXTURE_ROOT / "workstation_persistent_home_idempotency.yml"
 SYMLINK_MIGRATION_PLAYBOOK = FIXTURE_ROOT / "workstation_persistent_home_symlink_migration.yml"
+DIRECTORY_MIGRATION_PLAYBOOK = FIXTURE_ROOT / "workstation_persistent_home_directory_migration.yml"
 ANSIBLE_PLAYBOOK = "uv run --locked ansible-playbook".split()
 
 
@@ -26,6 +27,7 @@ def run_playbook(
     temp_root: str,
     *,
     check_mode: bool = False,
+    extra_vars: tuple[str, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
     with bitwarden_release_boundary() as bitwarden_args:
         command = [
@@ -35,6 +37,7 @@ def run_playbook(
             "1",
             "-e",
             f"temp_root={temp_root}",
+            *(argument for extra_var in extra_vars for argument in ("-e", extra_var)),
             *bitwarden_args,
         ]
         if check_mode:
@@ -80,6 +83,22 @@ def test_workstation_persistent_home_contract() -> None:
 
     migration_output = f"{migration.stdout}\n{migration.stderr}"
     assert migration.returncode == 0, migration_output
+
+    with tempfile.TemporaryDirectory(prefix="workstation-persistent-home-directory-migration-") as temp_root:
+        directory_migration = run_playbook(DIRECTORY_MIGRATION_PLAYBOOK, temp_root)
+        second_directory_migration = run_playbook(
+            DIRECTORY_MIGRATION_PLAYBOOK,
+            temp_root,
+            extra_vars=("prepare_existing_moraine_runtime=false",),
+        )
+
+    directory_migration_output = f"{directory_migration.stdout}\n{directory_migration.stderr}"
+    assert directory_migration.returncode == 0, directory_migration_output
+    second_directory_migration_output = (
+        f"{second_directory_migration.stdout}\n{second_directory_migration.stderr}"
+    )
+    assert second_directory_migration.returncode == 0, second_directory_migration_output
+    assert "changed=0" in second_directory_migration_output, second_directory_migration_output
 
     with tempfile.TemporaryDirectory(prefix="workstation-persistent-home-check-mode-") as temp_root:
         check_mode = run_playbook(IDEMPOTENCY_PLAYBOOK, temp_root, check_mode=True)
