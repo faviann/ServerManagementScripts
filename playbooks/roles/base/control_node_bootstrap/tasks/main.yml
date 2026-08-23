@@ -70,7 +70,6 @@
   ansible.builtin.command:
     cmd: >-
       ansible-galaxy collection install -r "{{ control_node_collection_requirements }}"
-      {{ '--force' if control_node_collection_force else '' }}
       {{ control_node_collection_install_options }}
       -p "{{ control_node_collection_install_path }}"
     chdir: "{{ control_node_project_root }}"
@@ -136,7 +135,9 @@
 
 - name: Install external Ansible roles
   ansible.builtin.command:
-    cmd: ansible-galaxy role install -r {{ control_node_project_root }}/requirements/roles.yml -p {{ control_node_project_root
-      }}/.ansible/roles
+    cmd: >-
+      ansible-galaxy role install --force
+      -r {{ control_node_project_root }}/requirements/roles.yml
+      -p {{ control_node_project_root }}/.ansible/roles
   when: control_node_role_requirements_stat.stat.exists
   changed_when: false # Galaxy handles idempotency internally

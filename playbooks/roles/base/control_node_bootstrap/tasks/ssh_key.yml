@@ -35,13 +35,22 @@
     - "'RSA' in existing_key_type.stdout"
 
 - name: Generate control node SSH key pair
-  community.crypto.openssh_keypair:
-    path: "{{ control_node_ssh_private_key_path }}"
-    type: "{{ control_node_ssh_key_type | default('ed25519') }}"
-    size: "{{ control_node_ssh_key_size | default(omit) }}"
-    comment: "{{ control_node_ssh_key_comment | default('ansible-control') }}"
-    mode: "0600"
-    regenerate: never
+  ansible.builtin.command:
+    argv: >-
+      {{
+        ['ssh-keygen', '-q', '-t', control_node_ssh_key_type | default('ed25519')]
+        + (
+          ['-b', control_node_ssh_key_size | string]
+          if control_node_ssh_key_size | default(none) is not none
+          else []
+        )
+        + [
+          '-f', control_node_ssh_private_key_path,
+          '-N', '',
+          '-C', control_node_ssh_key_comment | default('ansible-control')
+        ]
+      }}
+    creates: "{{ control_node_ssh_private_key_path }}"
   register: control_node_keypair
   when: not ssh_key_stat.stat.exists
 
