@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from bitwarden_release_boundary import bitwarden_release_boundary
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -240,8 +242,8 @@ def _assert_no_direct_home_manager_activation(commands: str) -> None:
 
 
 def _render_setup(temp_root: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [
+    with bitwarden_release_boundary() as bitwarden_args:
+        command = [
             "uv",
             "run",
             "--locked",
@@ -249,13 +251,16 @@ def _render_setup(temp_root: Path) -> subprocess.CompletedProcess[str]:
             "tests/regression/fixtures/workstation_first_login_setup_contract.yml",
             "-e",
             f"temp_root={temp_root}",
-        ],
-        cwd=REPO_ROOT,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        check=False,
-    )
+            *bitwarden_args,
+        ]
+        return subprocess.run(
+            command,
+            cwd=REPO_ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
 
 
 def test_workstation_agent_harness_readiness_contract() -> None:

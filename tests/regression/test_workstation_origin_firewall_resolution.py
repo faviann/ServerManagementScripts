@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from bitwarden_release_boundary import bitwarden_release_boundary
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PLAYBOOK = REPO_ROOT / "tests" / "regression" / "fixtures" / "workstation_origin_firewall_resolution_failure.yml"
@@ -15,14 +17,23 @@ ANSIBLE_PLAYBOOK = "uv run --locked ansible-playbook".split()
 
 
 def run_playbook(playbook: Path, temp_root: str) -> subprocess.CompletedProcess[str]:
-    command = [*ANSIBLE_PLAYBOOK, str(playbook), "-f", "1", "-e", f"temp_root={temp_root}"]
-    return subprocess.run(
-        command,
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        env=os.environ.copy(),
-    )
+    with bitwarden_release_boundary() as bitwarden_args:
+        command = [
+            *ANSIBLE_PLAYBOOK,
+            str(playbook),
+            "-f",
+            "1",
+            "-e",
+            f"temp_root={temp_root}",
+            *bitwarden_args,
+        ]
+        return subprocess.run(
+            command,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            env=os.environ.copy(),
+        )
 
 
 def test_workstation_origin_firewall_fails_when_allowed_host_has_no_ipv4_resolution() -> None:
