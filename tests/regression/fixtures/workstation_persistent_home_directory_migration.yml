@@ -1,0 +1,102 @@
+---
+- name: Test workstation persistent home directory migration
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    workstation_username: "{{ lookup('pipe', 'id -un') }}"
+    workstation_uid: "{{ lookup('pipe', 'id -u') | int }}"
+    workstation_gid: "{{ lookup('pipe', 'id -g') | int }}"
+    workstation_home: "{{ temp_root }}/home/{{ workstation_username }}"
+    workstation_persistent_home_enabled: true
+    workstation_persistent_home_root: "{{ temp_root }}/ephemeral/workstation/home"
+    workstation_persistent_home_mount_state: present
+    workstation_persistent_home_fstab_path: "{{ temp_root }}/fstab"
+    workstation_persistent_home_links:
+      - name: moraine
+        type: bind_mount
+        path: "{{ workstation_home }}/.moraine"
+        target: "{{ workstation_persistent_home_root }}/.moraine"
+        mode: "0700"
+  tasks:
+    - name: Prepare existing Moraine runtime for migration
+      when: prepare_existing_moraine_runtime | default(true) | bool
+      block:
+        - name: Create existing Moraine managed ClickHouse directory
+          ansible.builtin.file:
+            path: "{{ workstation_home }}/.moraine/clickhouse/data"
+            state: directory
+            owner: "{{ workstation_uid }}"
+            group: "{{ workstation_gid }}"
+            mode: "0700"
+
+        - name: Create existing Moraine runtime data
+          ansible.builtin.copy:
+            dest: "{{ workstation_home }}/.moraine/clickhouse/data/evidence.jsonl"
+            content: preserved-runtime-evidence
+            owner: "{{ workstation_uid }}"
+            group: "{{ workstation_gid }}"
+            mode: "0600"
+
+        - name: Create persistent home root for pre-deploy migration
+          ansible.builtin.file:
+            path: "{{ workstation_persistent_home_root }}"
+            state: directory
+            owner: "{{ workstation_uid }}"
+            group: "{{ workstation_gid }}"
+            mode: "0700"
+
+        - name: Copy existing Moraine runtime to persistent backing
+          ansible.builtin.command:
+            argv:
+              - cp
+              - -a
+              - "{{ workstation_home }}/.moraine"
+              - "{{ workstation_persistent_home_root }}/.moraine"
+          changed_when: true
+
+        - name: Retain recoverable pre-persistence Moraine runtime copy
+          ansible.builtin.command:
+            argv:
+              - mv
+              - "{{ workstation_home }}/.moraine"
+              - "{{ workstation_home }}/.moraine.pre-persist"
+          changed_when: true
+
+    - name: Include focused workstation persistent home tasks
+      ansible.builtin.include_role:
+        name: config/lxc_workstation_baseline
+        tasks_from: persistent_home
+
+    - name: Read migrated Moraine runtime data
+      ansible.builtin.slurp:
+        src: "{{ workstation_persistent_home_root }}/.moraine/clickhouse/data/evidence.jsonl"
+      register: moraine_runtime_evidence
+
+    - name: Read recoverable Moraine runtime copy
+      ansible.builtin.slurp:
+        src: "{{ workstation_home }}/.moraine.pre-persist/clickhouse/data/evidence.jsonl"
+      register: moraine_recoverable_evidence
+
+    - name: Stat Moraine persistent backing directory
+      ansible.builtin.stat:
+        path: "{{ workstation_persistent_home_root }}/.moraine"
+      register: moraine_persistent_dir
+
+    - name: Read managed bind mount declaration
+      ansible.builtin.slurp:
+        src: "{{ workstation_persistent_home_fstab_path }}"
+      register: persistent_home_fstab
+
+    - name: Assert existing Moraine runtime data was adopted safely
+      ansible.builtin.assert:
+        that:
+          - moraine_runtime_evidence.content | b64decode == 'preserved-runtime-evidence'
+          - moraine_recoverable_evidence.content | b64decode == 'preserved-runtime-evidence'
+          - moraine_persistent_dir.stat.isdir
+          - moraine_persistent_dir.stat.uid == workstation_uid
+          - moraine_persistent_dir.stat.gid == workstation_gid
+          - moraine_persistent_dir.stat.mode == '0700'
+          - workstation_persistent_home_root ~ '/.moraine' in persistent_home_fstab.content | b64decode
+          - workstation_home ~ '/.moraine' in persistent_home_fstab.content | b64decode
+        fail_msg: Existing Moraine runtime data was not preserved in persistent home
