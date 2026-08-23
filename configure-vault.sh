@@ -135,7 +135,7 @@ echo -e "${GREEN}║  Credentials Updated Successfully!                        �
 echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
 echo
 echo "You can now test connectivity with:"
-echo -e "${BLUE}  uv run --locked ansible-playbook site.yml --tags validation${NC}"
+echo -e "${BLUE}  ./run.sh --tags validation${NC}"
 echo
 
 if [ "$CREATE_NEW" = false ]; then

@@ -86,7 +86,7 @@ ssh -l root -i ~/.ansible/ssh/proxmox_lxc <host> \
    chown -R <docker_uid>:<docker_gid> /shared/<host>/stacks/<new>'
 
 # Full-host deploy — NOT stack_filter (it suppresses stale detection and skips reconciliation).
-uv run --locked ansible-playbook site.yml --limit <host> > /tmp/rename-<new>.log 2>&1
+./run.sh --limit <host> > /tmp/rename-<new>.log 2>&1
 tail -40 /tmp/rename-<new>.log
 rg "failed=|unreachable=|quarantin|<new>" /tmp/rename-<new>.log
 ```

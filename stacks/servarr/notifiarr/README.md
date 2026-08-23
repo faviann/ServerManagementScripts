@@ -22,7 +22,7 @@ Host-owned:
 ## Deploy
 
 ```bash
-uv run --locked ansible-playbook site.yml --limit servarr -e stack_filter=notifiarr
+./run.sh --limit servarr -e stack_filter=notifiarr
 ```
 
 Expected result: Ansible renders `.env.j2`, copies deployable stack files only, leaves this README and `stack.yaml` out of `/conf/docker/stacks/notifiarr`, and runs `docker compose up -d` for `notifiarr`.

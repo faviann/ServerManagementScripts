@@ -57,6 +57,7 @@ FAST_SCRIPTS = (
 # idempotence sequence and wiring regression are heavyweight, and sequential
 # execution keeps their timing and failure attribution predictable.
 FULL_ONLY_SCRIPTS = (
+    "test_lifecycle_run_lock.py",
     "test_lxc_lifecycle_invalid_state.py",
     "test_lxc_lifecycle_guest_bootstrap_contract.py",
     "test_lxc_spec_contract.py",

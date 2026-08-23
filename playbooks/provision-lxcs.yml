@@ -2,8 +2,8 @@
 # Provision LXCs and apply host-side reconciliation without guest configuration.
 #
 # Usage:
-#   uv run --locked ansible-playbook playbooks/provision-lxcs.yml
-#   uv run --locked ansible-playbook playbooks/provision-lxcs.yml --limit portal
+#   ./run.sh provision
+#   ./run.sh provision --limit portal
 
 - name: Run the provision-only lifecycle
   ansible.builtin.import_playbook: lifecycle-lxcs.yml

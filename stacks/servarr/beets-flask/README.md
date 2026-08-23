@@ -146,19 +146,19 @@ uv run --locked python tests/regression/test_beets_flask_stack_contract.py
 Dry run one stack:
 
 ```bash
-uv run --locked ansible-playbook site.yml --limit servarr --check -e stack_filter=beets-flask
+./run.sh --limit servarr --check -e stack_filter=beets-flask
 ```
 
 Deploy one stack:
 
 ```bash
-uv run --locked ansible-playbook site.yml --limit servarr -e stack_filter=beets-flask
+./run.sh --limit servarr -e stack_filter=beets-flask
 ```
 
 For noisy live deploys, redirect to a temp log and inspect high-signal output:
 
 ```bash
-uv run --locked ansible-playbook site.yml --limit servarr -e stack_filter=beets-flask >/tmp/beets-flask-deploy.log 2>&1
+./run.sh --limit servarr -e stack_filter=beets-flask >/tmp/beets-flask-deploy.log 2>&1
 tail -40 /tmp/beets-flask-deploy.log
 rg "failed=|unreachable=|FAILED|beets-flask|config.yaml|changed=" /tmp/beets-flask-deploy.log
 ```

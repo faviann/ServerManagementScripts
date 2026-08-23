@@ -82,5 +82,5 @@ application bindings no longer reference it.
 ## Deploy
 
 ```bash
-uv run --locked ansible-playbook site.yml --limit auth -e stack_filter=auth
+./run.sh --limit auth -e stack_filter=auth
 ```

@@ -31,6 +31,7 @@ def main() -> int:
         env["PATH"] = f"{ASSETS / 'bin'}:{env['PATH']}"
         env["LIFECYCLE_TEST_STATE_DIR"] = str(state_dir)
         env["LIFECYCLE_WIRING_REAL_ROLES"] = "1"
+        env["HOMELAB_IAC_LIFECYCLE_WRAPPER"] = "1"
         env["ANSIBLE_ROLES_PATH"] = os.pathsep.join(
             [str(ASSETS / "roles"), str(REPO_ROOT / "playbooks" / "roles")]
         )

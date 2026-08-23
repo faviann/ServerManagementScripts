@@ -285,7 +285,7 @@ echo
 echo "Project is ready to use. Quick reference:"
 echo
 echo "  • Sync environment:       ${BLUE}uv sync --locked${NC}"
-echo "  • Test connectivity:      ${BLUE}uv run --locked ansible-playbook site.yml --tags validation${NC}"
+echo "  • Test connectivity:      ${BLUE}./run.sh --tags validation${NC}"
 echo "  • Update credentials:     ${BLUE}./configure-vault.sh${NC}"
 echo "  • Edit encrypted vault:   ${BLUE}uv run --locked ansible-vault edit inventory/group_vars/all/vault.yml${NC}"
 echo

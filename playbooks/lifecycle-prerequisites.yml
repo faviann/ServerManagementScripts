@@ -11,6 +11,15 @@
     control_node_required_collections:
       - community.proxmox
   tasks:
+    - name: Require the serialized lifecycle wrapper
+      ansible.builtin.assert:
+        that:
+          - lookup('ansible.builtin.env', 'HOMELAB_IAC_LIFECYCLE_WRAPPER') == '1'
+        fail_msg: >-
+          Lifecycle runs must use ./run.sh so machine-local lifecycle mutation is serialized.
+        quiet: true
+      run_once: true
+
     - name: Check for uv-managed control node virtual environment
       ansible.builtin.stat:
         path: "{{ control_node_uv_virtualenv }}"

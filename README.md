@@ -148,7 +148,7 @@ If you prefer manual setup or need to troubleshoot:
    default. To manage it intentionally, run:
 
    ```bash
-   uv run --locked ansible-playbook site.yml -e proxmox_skip_self=false --limit workstation
+   ./run.sh -e proxmox_skip_self=false --limit workstation
    ```
 
 5. **Configure Proxmox API credentials:**
@@ -189,7 +189,7 @@ Test connectivity:
 ```bash
 uv run --locked ansible-playbook playbooks/validate-credentials.yml
 # Or test full site validation
-uv run --locked ansible-playbook site.yml --tags validation
+./run.sh --tags validation
 ```
 
 ## Usage

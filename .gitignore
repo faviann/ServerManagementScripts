@@ -30,7 +30,6 @@ vault-pass.txt
 .ansible/ssh/
 .ansible/cp/
 .ansible/tmp/
-.ansible/.lock
 
 # Backup files
 *.bak
