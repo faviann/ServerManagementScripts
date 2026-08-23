@@ -7,6 +7,7 @@ import re
 import subprocess
 import tomllib
 
+import pytest
 import yaml
 
 
@@ -19,13 +20,12 @@ def run_playbook(
     extra_vars: dict[str, object],
     env: dict[str, str] | None = None,
     tags: str | None = None,
-    use_uv: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    command = (
-        ["uv", "run", "--locked", "ansible-playbook"]
-        if use_uv
-        else [str(REPO_ROOT / ".venv" / "bin" / "ansible-playbook")]
-    ) + [
+    command = [
+        "uv",
+        "run",
+        "--locked",
+        "ansible-playbook",
         "-i",
         "localhost,",
         "-c",
@@ -78,11 +78,12 @@ def test_dependency_manifests_define_one_exact_source_of_truth() -> None:
     )
     assert set(requirements) == {"collections"}
     declared = {item["name"]: str(item["version"]) for item in requirements["collections"]}
-    assert set(declared) == {
-        "ansible.posix",
-        "community.crypto",
-        "community.docker",
-        "community.proxmox",
+    assert declared == {
+        "ansible.posix": "2.2.2",
+        "community.crypto": "3.3.0",
+        "community.docker": "5.2.0",
+        "community.library_inventory_filtering_v1": "1.1.5",
+        "community.proxmox": "2.0.0",
     }
     assert all(re.fullmatch(r"\d+\.\d+\.\d+", version) for version in declared.values())
 
@@ -95,13 +96,32 @@ def test_dependency_manifests_define_one_exact_source_of_truth() -> None:
     ]
 
 
-def test_bootstrap_forces_external_role_pin(tmp_path: Path) -> None:
+def test_bootstrap_reconciles_external_role_pin_once(tmp_path: Path) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     galaxy_log = tmp_path / "galaxy.log"
     fake_galaxy = fake_bin / "ansible-galaxy"
     fake_galaxy.write_text(
-        "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$GALAXY_LOG\"\n",
+        """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$GALAXY_LOG"
+if [[ "$1 $2" != "role install" ]]; then
+  exit 0
+fi
+requirements=""
+install_path=""
+while (( "$#" )); do
+  case "$1" in
+    -r) requirements="$2"; shift 2 ;;
+    -p) install_path="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+role_name=$(awk '$2 == "name:" { print $3; exit }' "$requirements")
+role_version=$(awk '$1 == "version:" { print $2; exit }' "$requirements")
+mkdir -p "$install_path/$role_name/meta"
+printf 'version: %s\\n' "$role_version" > "$install_path/$role_name/meta/.galaxy_install_info"
+""",
         encoding="utf-8",
     )
     fake_galaxy.chmod(0o755)
@@ -141,30 +161,67 @@ def test_bootstrap_forces_external_role_pin(tmp_path: Path) -> None:
             "control_node_ssh_public_key_path": str(public_key),
             "control_node_vault_password_file": str(vault_pass),
             "control_node_skip_system_packages": True,
+            "control_node_ansible_galaxy_executable": str(fake_galaxy),
         },
         env={
             "ANSIBLE_COLLECTIONS_PATH": str(project_root / "collections"),
-            "PATH": f"{fake_bin}:{os.environ['PATH']}",
             "GALAXY_LOG": str(galaxy_log),
         },
-        use_uv=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert private_key.exists()
     assert public_key.exists()
+    second_result = run_playbook(
+        REPO_ROOT / "tests" / "regression" / "fixtures" / "control_node_bootstrap_test.yml",
+        extra_vars={
+            "control_node_project_root": str(project_root),
+            "control_node_home_dir": str(home),
+            "control_node_collection_requirements": str(
+                project_root / "collections" / "requirements.yml"
+            ),
+            "control_node_collection_install_path": str(project_root / "collections"),
+            "control_node_ssh_private_key_path": str(private_key),
+            "control_node_ssh_public_key_path": str(public_key),
+            "control_node_vault_password_file": str(vault_pass),
+            "control_node_skip_system_packages": True,
+            "control_node_ansible_galaxy_executable": str(fake_galaxy),
+        },
+        env={
+            "ANSIBLE_COLLECTIONS_PATH": str(project_root / "collections"),
+            "GALAXY_LOG": str(galaxy_log),
+        },
+    )
+    assert second_result.returncode == 0, second_result.stdout + second_result.stderr
     invocations = galaxy_log.read_text(encoding="utf-8").splitlines()
-    role_install = next(line for line in invocations if line.startswith("role install "))
-    assert "--force" in role_install.split()
+    role_installs = [line for line in invocations if line.startswith("role install ")]
+    assert len(role_installs) == 1
+    assert "--force" in role_installs[0].split()
 
 
-def test_lifecycle_preflight_reports_expected_and_installed_versions(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("installed_version", "expected_returncode", "expected_diagnostics"),
+    [
+        ("2.0.0", 0, ()),
+        (
+            "1.6.0",
+            2,
+            ("community.proxmox", "expected 2.0.0", "installed 1.6.0"),
+        ),
+    ],
+)
+def test_lifecycle_preflight_checks_exact_collection_versions(
+    tmp_path: Path,
+    installed_version: str,
+    expected_returncode: int,
+    expected_diagnostics: tuple[str, ...],
+) -> None:
     requirements = tmp_path / "requirements.yml"
     requirements.write_text(
         "collections:\n  - name: community.proxmox\n    version: 2.0.0\n",
         encoding="utf-8",
     )
     collections = tmp_path / "collections"
-    write_collection_manifest(collections, "community.proxmox", "1.6.0")
+    write_collection_manifest(collections, "community.proxmox", installed_version)
 
     result = run_playbook(
         REPO_ROOT / "playbooks" / "lifecycle-prerequisites.yml",
@@ -176,28 +233,5 @@ def test_lifecycle_preflight_reports_expected_and_installed_versions(tmp_path: P
         tags="control_node_prerequisites",
     )
     output = result.stdout + result.stderr
-    assert result.returncode != 0
-    assert "community.proxmox" in output
-    assert "expected 2.0.0" in output
-    assert "installed 1.6.0" in output
-
-
-def test_lifecycle_preflight_accepts_exact_collection_versions(tmp_path: Path) -> None:
-    requirements = tmp_path / "requirements.yml"
-    requirements.write_text(
-        "collections:\n  - name: community.proxmox\n    version: 2.0.0\n",
-        encoding="utf-8",
-    )
-    collections = tmp_path / "collections"
-    write_collection_manifest(collections, "community.proxmox", "2.0.0")
-
-    result = run_playbook(
-        REPO_ROOT / "playbooks" / "lifecycle-prerequisites.yml",
-        extra_vars={
-            "control_node_collection_requirements": str(requirements),
-            "control_node_collection_install_path": str(collections),
-        },
-        env={"HOMELAB_IAC_LIFECYCLE_WRAPPER": "1"},
-        tags="control_node_prerequisites",
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.returncode == expected_returncode, output
+    assert all(diagnostic in output for diagnostic in expected_diagnostics)

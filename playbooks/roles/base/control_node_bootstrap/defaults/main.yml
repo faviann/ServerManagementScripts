@@ -3,6 +3,7 @@ control_node_packages:
   - sshpass # Required for initial SSH key setup to Proxmox hosts
 control_node_package_become: true
 control_node_skip_system_packages: true # Skip by default; pre-install packages on workstation
+control_node_ansible_galaxy_executable: ansible-galaxy
 control_node_collection_install_options: ""
 control_node_ssh_key_type: ed25519
 control_node_ssh_key_size: # ed25519 has fixed size, no size parameter needed
