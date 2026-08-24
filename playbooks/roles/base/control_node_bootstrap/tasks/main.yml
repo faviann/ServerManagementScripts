@@ -69,8 +69,8 @@
 - name: Install required Ansible collections
   ansible.builtin.command:
     cmd: >-
-      ansible-galaxy collection install -r "{{ control_node_collection_requirements }}"
-      {{ '--force' if control_node_collection_force else '' }}
+      "{{ control_node_ansible_galaxy_executable }}"
+      collection install -r "{{ control_node_collection_requirements }}"
       {{ control_node_collection_install_options }}
       -p "{{ control_node_collection_install_path }}"
     chdir: "{{ control_node_project_root }}"
@@ -134,9 +134,59 @@
     path: "{{ control_node_project_root }}/requirements/roles.yml"
   register: control_node_role_requirements_stat
 
-- name: Install external Ansible roles
-  ansible.builtin.command:
-    cmd: ansible-galaxy role install -r {{ control_node_project_root }}/requirements/roles.yml -p {{ control_node_project_root
-      }}/.ansible/roles
+- name: Read external role requirements
+  ansible.builtin.include_vars:
+    file: "{{ control_node_project_root }}/requirements/roles.yml"
+    name: control_node_external_role_requirements
   when: control_node_role_requirements_stat.stat.exists
-  changed_when: false # Galaxy handles idempotency internally
+
+- name: Read installed external role metadata
+  ansible.builtin.slurp:
+    src: >-
+      {{
+        [
+          control_node_project_root,
+          '.ansible',
+          'roles',
+          item.name,
+          'meta',
+          '.galaxy_install_info'
+        ] | path_join
+      }}
+  loop: "{{ control_node_external_role_requirements.roles }}"
+  register: control_node_external_role_metadata
+  failed_when: false
+  when: control_node_role_requirements_stat.stat.exists
+
+- name: Initialize external role reconciliation decision
+  ansible.builtin.set_fact:
+    control_node_external_roles_require_reconciliation: false
+  when: control_node_role_requirements_stat.stat.exists
+
+- name: Detect external role version drift
+  ansible.builtin.set_fact:
+    control_node_external_roles_require_reconciliation: true
+  vars:
+    control_node_installed_role_version: >-
+      {{
+        ((item.content | b64decode | from_yaml).version | string)
+        if item.content is defined
+        else 'missing'
+      }}
+  loop: "{{ control_node_external_role_metadata.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when:
+    - control_node_role_requirements_stat.stat.exists
+    - control_node_installed_role_version != item.item.version | string
+
+- name: Reconcile external Ansible role versions
+  ansible.builtin.command:
+    cmd: >-
+      "{{ control_node_ansible_galaxy_executable }}" role install --force
+      -r {{ control_node_project_root }}/requirements/roles.yml
+      -p {{ control_node_project_root }}/.ansible/roles
+  changed_when: true
+  when:
+    - control_node_role_requirements_stat.stat.exists
+    - control_node_external_roles_require_reconciliation
