@@ -76,6 +76,8 @@ FULL_ONLY_SCRIPTS = (
     "test_lxc_nvidia_runtime_repository.py",
     "test_lxc_lifecycle_wiring.py",
     "test_proxmox_lxc_host_config_result.py",
+    "test_hawser_standard_remote_default.py",
+    "test_fixture_fact_cache_isolation.py",
 )
 REGISTERED_SCRIPTS = FAST_SCRIPTS + FULL_ONLY_SCRIPTS
 
@@ -198,8 +200,17 @@ def main(
         )
         previous_vault_password_file = os.environ.get("ANSIBLE_VAULT_PASSWORD_FILE")
         previous_inventory = os.environ.get("ANSIBLE_INVENTORY")
+        previous_cache_plugin_connection = os.environ.get(
+            "ANSIBLE_CACHE_PLUGIN_CONNECTION"
+        )
         os.environ["ANSIBLE_VAULT_PASSWORD_FILE"] = str(vault_placeholder)
         os.environ["ANSIBLE_INVENTORY"] = str(fixture_inventory)
+        # Fixtures add fake hosts (e.g. s1_portal) that fact caching would
+        # otherwise persist for up to the production TTL. Redirect the jsonfile
+        # cache per run instead of forcing memory so within-run caching
+        # semantics stay production-like while .ansible/cache stays untouched
+        # (issue #89).
+        os.environ["ANSIBLE_CACHE_PLUGIN_CONNECTION"] = str(temp_root / "fact-cache")
         try:
             return run_regressions(
                 full=args.full,
@@ -216,6 +227,12 @@ def main(
                 os.environ.pop("ANSIBLE_INVENTORY", None)
             else:
                 os.environ["ANSIBLE_INVENTORY"] = previous_inventory
+            if previous_cache_plugin_connection is None:
+                os.environ.pop("ANSIBLE_CACHE_PLUGIN_CONNECTION", None)
+            else:
+                os.environ["ANSIBLE_CACHE_PLUGIN_CONNECTION"] = (
+                    previous_cache_plugin_connection
+                )
 
 
 if __name__ == "__main__":

@@ -192,16 +192,20 @@ def test_targeted_launchers_use_and_restore_isolated_fixture_environment(
     runner = load_runner()
     original_vault = "/credential-that-must-not-be-read"
     original_inventory = "/inventory-that-must-not-be-read"
+    original_cache_connection = "/operator-cache-that-must-not-be-written"
     monkeypatch.setenv("ANSIBLE_VAULT_PASSWORD_FILE", original_vault)
     monkeypatch.setenv("ANSIBLE_INVENTORY", original_inventory)
+    monkeypatch.setenv("ANSIBLE_CACHE_PLUGIN_CONNECTION", original_cache_connection)
 
     def launch(script: str) -> tuple[str, int, float, str]:
         vault_path = Path(os.environ["ANSIBLE_VAULT_PASSWORD_FILE"])
         inventory_path = Path(os.environ["ANSIBLE_INVENTORY"])
+        cache_connection = os.environ["ANSIBLE_CACHE_PLUGIN_CONNECTION"]
         assert vault_path.read_text(encoding="utf-8") == "unused-fixture-placeholder\n"
         assert inventory_path.read_text(encoding="utf-8") == (
             "[local]\nlocalhost ansible_connection=local\n"
         )
+        assert cache_connection != original_cache_connection
         return passing_result(script)
 
     assert runner.main(
@@ -209,6 +213,7 @@ def test_targeted_launchers_use_and_restore_isolated_fixture_environment(
     ) == 0
     assert os.environ["ANSIBLE_VAULT_PASSWORD_FILE"] == original_vault
     assert os.environ["ANSIBLE_INVENTORY"] == original_inventory
+    assert os.environ["ANSIBLE_CACHE_PLUGIN_CONNECTION"] == original_cache_connection
 
 
 def test_targeted_runner_smoke_uses_isolated_ansible_environment() -> None:
