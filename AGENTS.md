@@ -74,6 +74,7 @@ Stacks live in `stacks/<hostname>/<stack-name>/compose.yaml`. Auto-discovered an
 
 | Command | Purpose |
 |---------|---------|
+| `./validate.sh` | Complete non-live verification — lint, full lifecycle regressions, and full pytest suite |
 | `./run.sh` | Full lifecycle — deploy/update all LXCs |
 | `./run.sh -e proxmox_skip_self=false --limit workstation` | Intentionally include the control node when running from `workstation` |
 | `./run.sh --limit <host>` | Target one host |
@@ -83,14 +84,16 @@ Stacks live in `stacks/<hostname>/<stack-name>/compose.yaml`. Auto-discovered an
 | `uv run --locked python tests/regression/run_lxc_lifecycle_regressions.py` | Fast lifecycle feedback (~1.5 min) — semantic lifecycle facade matrix + targeted planning barrier, controlled observations only. Run while iterating on LXC lifecycle changes |
 | `uv run --locked python tests/regression/run_lxc_lifecycle_regressions.py --only <launcher.py>` | Target one registered lifecycle launcher in the same credential-free fixture environment. Repeat `--only` to run several launchers in the supplied order |
 | `uv run --locked python tests/regression/run_lxc_lifecycle_regressions.py --full --fail-fast` | Remediation pass — finish the concurrent fast launchers, then stop scheduling after the first observed failure |
-| `uv run --locked python tests/regression/run_lxc_lifecycle_regressions.py --full` | Full lifecycle regression set (~6 min) — fast path plus host-config idempotence, real role-composition wiring, fleet preflight, and contract seams. Run before handing off lifecycle work |
-| `uv run --locked ansible-lint` | Repo-wide lint gate (production profile) — must exit 0. Only `var-naming[no-role-prefix]` and `role-name[path]` are exempted; rationale lives as comments in `.ansible-lint` |
+| `uv run --locked python tests/regression/run_lxc_lifecycle_regressions.py --full` | Full lifecycle regression set (~6 min) — fast path plus host-config idempotence, real role-composition wiring, fleet preflight, and contract seams. Prefer `./validate.sh` for handoff verification |
+| `uv run --locked ansible-lint` | Targeted repo-wide lint feedback (production profile). Prefer `./validate.sh` for handoff verification |
 | `./setup.sh` | Fresh workstation setup — extend here for new workstation config (editor, tooling, env) |
 | `ssh -l root -i ~/.ansible/ssh/proxmox_lxc <host>` | Direct SSH into an LXC |
 
 **Timing**: `uv run --locked ansible-playbook` runs against live hosts typically take 5–10 minutes. Do not assume a hang — wait for completion before acting on the result.
 
 For lifecycle-regression remediation, use repeatable `--only <launcher.py>` for the shortest targeted loop and add `--fail-fast` when later selected launchers cannot provide useful evidence after a failure. `--only` accepts the registered filenames reported by the runner's actionable error. Before handoff, always run the unchanged aggregate completion command with `--full` and without `--fail-fast` so every launcher reports a result.
+
+Run `./validate.sh` for complete deterministic handoff verification. It does not load live inventory or acquire the lifecycle lock. Route every operation that contacts managed hosts, including `--check`, through `./run.sh`.
 
 **Long-running output discipline**: For live deploys or other noisy commands, avoid streaming full output into chat context. Prefer redirecting to a temp log and polling only high-signal excerpts:
 ```bash
