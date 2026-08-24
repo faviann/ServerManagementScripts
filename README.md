@@ -385,6 +385,14 @@ The new API-driven approach provides:
 
 ## Contributing
 
+Run the complete non-live verification suite before handoff:
+
+```bash
+./validate.sh
+```
+
+This runs the production Ansible lint gate, full credential-free lifecycle regressions, and the full Python test suite. It does not load live inventory or acquire the lifecycle lock. Route all live operations, including check-mode runs, through `./run.sh`. In pull request descriptions, report `./validate.sh` as the verification command rather than listing its internal commands.
+
 When adding new playbooks or roles:
 - Use `community.proxmox` modules only (no shell commands)
 - Target the `proxmox_api` inventory group
