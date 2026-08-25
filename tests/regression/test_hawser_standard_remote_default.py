@@ -17,12 +17,17 @@ ANSIBLE_PLAYBOOK = "uv run --locked ansible-playbook".split()
 
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="hawser-standard-remote-default-") as temp_root:
+        env = os.environ.copy()
+        # Fake fixture hosts must not persist into a caller-selected fact cache
+        # (issue #89), including when the launcher is run outside the aggregate
+        # regression runner.
+        env["ANSIBLE_CACHE_PLUGIN_CONNECTION"] = str(Path(temp_root) / "fact-cache")
         proc = subprocess.run(
             [*ANSIBLE_PLAYBOOK, str(PLAYBOOK), "-e", f"temp_root={temp_root}"],
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,
-            env=os.environ.copy(),
+            env=env,
         )
 
     output = f"{proc.stdout}\n{proc.stderr}"
