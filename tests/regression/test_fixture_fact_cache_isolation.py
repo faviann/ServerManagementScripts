@@ -1,20 +1,14 @@
 #!/usr/bin/env python3
-"""Regression test: fixture runs cannot touch the live fact cache.
+"""Regression test: the Hawser fixture cannot touch the caller's fact cache.
 
 Issue #89: the jsonfile fact cache persists fake fixture hosts (ansible-core
 prefixes every add_host host with s1_) into the operator's .ansible/cache for
 up to the production TTL, where a workstation-only
 discovered_interpreter_python path breaks later live runs.
 
-Three checks:
-1. Guarded run: executing the Hawser launcher leaves the production
-   s1_portal cache entry untouched in existence, content, and metadata.
-2. Threat proof, initially-absent surrogate cache: the same Hawser launcher
-   aimed at an empty sandbox cache creates s1_portal there, so check 1
-   watches a demonstrated hazard rather than a hypothetical one.
-3. Write detection, initially-present surrogate cache: deleting and
-   recreating an entry with byte-identical content must still register as a
-   modification, so comparisons include size/mtime/inode, not only content.
+The launcher is exercised against production-cache surrogates with the target
+entry both absent and present. In both cases an inherited cache connection must
+be ignored, leaving the caller's cache unchanged.
 """
 
 from __future__ import annotations
@@ -29,7 +23,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TESTS = REPO_ROOT / "tests" / "regression"
-PRODUCTION_CACHE_ENTRY = REPO_ROOT / ".ansible" / "cache" / "s1_portal"
 HAWSER_LAUNCHER = TESTS / "test_hawser_standard_remote_default.py"
 
 EntryState = tuple[bool, int, int, int, str]
@@ -50,10 +43,9 @@ def describe(state: EntryState) -> str:
     return f"size={size} mtime_ns={mtime_ns} inode={inode} sha256={digest}"
 
 
-def run_hawser(cache_connection: str | None = None) -> subprocess.CompletedProcess[str]:
+def run_hawser(cache_connection: Path) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
-    if cache_connection is not None:
-        env["ANSIBLE_CACHE_PLUGIN_CONNECTION"] = cache_connection
+    env["ANSIBLE_CACHE_PLUGIN_CONNECTION"] = str(cache_connection)
     return subprocess.run(
         [sys.executable, str(HAWSER_LAUNCHER)],
         cwd=REPO_ROOT,
@@ -63,52 +55,38 @@ def run_hawser(cache_connection: str | None = None) -> subprocess.CompletedProce
     )
 
 
-def main() -> int:
-    failures: list[str] = []
-
-    before = snapshot(PRODUCTION_CACHE_ENTRY)
-    proc = run_hawser()
+def assert_untouched(
+    cache_entry: Path, expected: EntryState, failures: list[str]
+) -> None:
+    proc = run_hawser(cache_entry.parent)
     output = f"{proc.stdout}\n{proc.stderr}"
     if proc.returncode != 0:
         failures.append("Hawser fixture playbook failed unexpectedly")
         failures.append(output)
-    else:
-        after = snapshot(PRODUCTION_CACHE_ENTRY)
-        if after != before:
-            failures.append(
-                "isolated Hawser fixture run modified the production fact "
-                f"cache entry {PRODUCTION_CACHE_ENTRY}: "
-                f"{describe(before)} -> {describe(after)}"
-            )
-            failures.append(output)
+        return
+
+    actual = snapshot(cache_entry)
+    if actual != expected:
+        failures.append(
+            "isolated Hawser fixture run modified the inherited production "
+            f"fact cache entry {cache_entry}: "
+            f"{describe(expected)} -> {describe(actual)}"
+        )
+        failures.append(output)
+
+
+def main() -> int:
+    failures: list[str] = []
 
     with tempfile.TemporaryDirectory(prefix="fact-cache-isolation-") as temp_root:
-        surrogate_root = Path(temp_root)
+        production_cache = Path(temp_root) / "production-cache"
+        cache_entry = production_cache / "s1_portal"
 
-        absent_cache = surrogate_root / "initially-absent" / "cache"
-        proc_absent = run_hawser(str(absent_cache))
-        absent_output = f"{proc_absent.stdout}\n{proc_absent.stderr}"
-        if proc_absent.returncode != 0:
-            failures.append("surrogate Hawser run failed unexpectedly")
-            failures.append(absent_output)
-        elif not snapshot(absent_cache / "s1_portal")[0]:
-            failures.append(
-                "an unprotected cache connection no longer persists s1_portal; "
-                "the guarded production check may be watching a retired hazard"
-            )
+        assert_untouched(cache_entry, snapshot(cache_entry), failures)
 
-        present_entry = surrogate_root / "initially-present" / "cache" / "s1_portal"
-        present_entry.parent.mkdir(parents=True)
-        present_entry.write_bytes(b'{"sentinel":"issue-89"}\n')
-        seeded = snapshot(present_entry)
-        recreated = present_entry.with_name("s1_portal.recreated")
-        recreated.write_bytes(present_entry.read_bytes())
-        present_entry.unlink()
-        recreated.rename(present_entry)
-        if snapshot(present_entry) == seeded:
-            failures.append(
-                "detector missed a delete-and-recreate with identical bytes"
-            )
+        production_cache.mkdir(exist_ok=True)
+        cache_entry.write_bytes(b'{"sentinel":"issue-89"}\n')
+        assert_untouched(cache_entry, snapshot(cache_entry), failures)
 
     if failures:
         for line in failures:
@@ -116,9 +94,8 @@ def main() -> int:
         return 1
 
     print(
-        "ok: Hawser fixture leaves the production s1_portal fact cache entry "
-        f"untouched ({describe(before)}); detector proven on absent and "
-        "present surrogates"
+        "ok: Hawser fixture ignores inherited production cache connections "
+        "when s1_portal is initially absent or present"
     )
     return 0
 

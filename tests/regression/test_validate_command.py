@@ -43,6 +43,7 @@ if capture.exists():
     commands = json.loads(capture.read_text(encoding="utf-8"))
 commands.append({
     "argv": sys.argv[1:],
+    "cache_connection": os.environ.get("ANSIBLE_CACHE_PLUGIN_CONNECTION"),
     "lifecycle_marker": os.environ.get("HOMELAB_IAC_LIFECYCLE_WRAPPER"),
 })
 capture.write_text(json.dumps(commands), encoding="utf-8")
@@ -81,6 +82,16 @@ def captured_commands(tmp_path: Path) -> list[dict[str, object]]:
     return json.loads((tmp_path / "commands.json").read_text(encoding="utf-8"))
 
 
+def assert_validation_cache_was_shared_then_removed(
+    commands: list[dict[str, object]],
+) -> None:
+    cache_connections = {entry["cache_connection"] for entry in commands}
+    assert len(cache_connections) == 1
+    cache_connection = cache_connections.pop()
+    assert isinstance(cache_connection, str)
+    assert not Path(cache_connection).exists()
+
+
 def test_validate_runs_the_complete_non_live_suite_from_the_repository_root(
     tmp_path: Path,
 ) -> None:
@@ -89,10 +100,16 @@ def test_validate_runs_the_complete_non_live_suite_from_the_repository_root(
     result = run_validation(env, tmp_path)
 
     assert result.returncode == 0, result.stderr
-    assert captured_commands(tmp_path) == [
-        {"argv": command, "lifecycle_marker": None}
+    commands = captured_commands(tmp_path)
+    assert commands == [
+        {
+            "argv": command,
+            "cache_connection": commands[0]["cache_connection"],
+            "lifecycle_marker": None,
+        }
         for command in VALIDATION_COMMANDS
     ]
+    assert_validation_cache_was_shared_then_removed(commands)
     assert not (Path(env["HOME"]) / ".ansible/homelab-iac-lifecycle.lock").exists()
 
 
@@ -105,6 +122,6 @@ def test_validate_propagates_a_gate_failure_and_stops(
     result = run_validation(env, REPO_ROOT)
 
     assert result.returncode == 41
-    assert [entry["argv"] for entry in captured_commands(tmp_path)] == (
-        VALIDATION_COMMANDS[:fail_at]
-    )
+    commands = captured_commands(tmp_path)
+    assert [entry["argv"] for entry in commands] == VALIDATION_COMMANDS[:fail_at]
+    assert_validation_cache_was_shared_then_removed(commands)
