@@ -10,7 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from portal_traefik_recreation import AttemptScenario, run_attempt
+from portal_traefik_recreation import (
+    REMOTE_HOSTS,
+    AttemptScenario,
+    run_attempt,
+    run_compose_redis_replacement,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -43,9 +48,18 @@ def require_docker() -> None:
     ("attempt_name", "scenario"),
     [
         ("01-redis-ready-before-provider", AttemptScenario.REDIS_READY),
-        ("02-redis-recreated-during-start-1", AttemptScenario.REDIS_RECREATED),
-        ("03-redis-recreated-during-start-2", AttemptScenario.REDIS_RECREATED),
-        ("04-redis-recreated-during-start-3", AttemptScenario.REDIS_RECREATED),
+        (
+            "02-redis-recreated-during-start-1",
+            AttemptScenario.REDIS_RECREATED_DURING_START,
+        ),
+        (
+            "03-redis-recreated-during-start-2",
+            AttemptScenario.REDIS_RECREATED_DURING_START,
+        ),
+        (
+            "04-redis-recreated-during-start-3",
+            AttemptScenario.REDIS_RECREATED_DURING_START,
+        ),
         ("05-provider-input-after-startup", AttemptScenario.INPUT_AFTER_START),
     ],
     ids=lambda value: value.value if isinstance(value, AttemptScenario) else value,
@@ -54,6 +68,31 @@ def test_pinned_redis_routes_survive_portal_recreation(
     attempt_name: str,
     scenario: AttemptScenario,
 ) -> None:
+    if scenario is AttemptScenario.REDIS_RECREATED_DURING_START:
+        observation = run_compose_redis_replacement(attempt_name)
+
+        assert observation.redis_container_before != observation.redis_container_after
+        assert (
+            observation.traefik_container_before
+            == observation.traefik_container_after
+        )
+        assert observation.traefik_running_while_redis_suspended is True
+        assert observation.local_route_status == 200
+        assert observation.redis_route_statuses == dict.fromkeys(REMOTE_HOSTS, 200)
+        effective = json.loads(
+            (
+                Path(observation.evidence_directory) / "compose-config.json"
+            ).read_text(encoding="utf-8")
+        )
+        assert "healthcheck" not in effective["services"]["redis"]
+        assert effective["services"]["traefik"]["depends_on"] == {
+            "traefik-docker-socket-proxy": {
+                "condition": "service_started",
+                "required": True,
+            }
+        }
+        return
+
     observation = run_attempt(attempt_name, scenario)
 
     assert observation.local_route_status == 200
@@ -76,13 +115,6 @@ def test_pinned_redis_routes_survive_portal_recreation(
     }
     assert observation.tracked_static_config_loaded
     assert observation.tracked_dynamic_config_loaded
-    assert observation.redis_healthcheck_command == ["redis-cli", "ping"]
-    assert observation.traefik_redis_dependency_condition == "service_healthy"
-    if scenario is AttemptScenario.REDIS_RECREATED:
-        assert observation.traefik_running_before_redis_recreation is False
-        assert observation.redis_container_before
-        assert observation.redis_container_after
-        assert observation.redis_container_before != observation.redis_container_after
     if scenario is AttemptScenario.INPUT_AFTER_START:
         assert observation.redis_routes_before_input == {
             "bazarr.local.faviann.com": 404,

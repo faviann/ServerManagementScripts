@@ -21,10 +21,7 @@ services:
     container_name: traefik
     restart: unless-stopped
     depends_on:
-      traefik-docker-socket-proxy:
-        condition: service_started
-      redis:
-        condition: service_healthy
+      - traefik-docker-socket-proxy
     security_opt:
       - no-new-privileges:true
     networks:
@@ -50,12 +47,6 @@ services:
       - 6379:6379
     environment:
       - ALLOW_EMPTY_PASSWORD=yes
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 2s
-      timeout: 1s
-      retries: 15
-      start_period: 1s
     networks:
       - shared
 networks:
