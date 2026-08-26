@@ -79,6 +79,7 @@ def test_pinned_redis_routes_survive_portal_recreation(
     assert observation.redis_healthcheck_command == ["redis-cli", "ping"]
     assert observation.traefik_redis_dependency_condition == "service_healthy"
     if scenario is AttemptScenario.REDIS_RECREATED:
+        assert observation.traefik_running_before_redis_recreation is False
         assert observation.redis_container_before
         assert observation.redis_container_after
         assert observation.redis_container_before != observation.redis_container_after
