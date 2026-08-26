@@ -17,7 +17,6 @@ import subprocess
 import tempfile
 import time
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -65,21 +64,25 @@ class AttemptObservation:
 
 @dataclasses.dataclass(frozen=True)
 class ComposeTransitionObservation:
-    attempt_name: str
+    arm: str
     compose_project: str
     redis_container_before: str
     redis_container_after: str
     traefik_container_before: str
     traefik_container_after: str
-    traefik_running_while_redis_suspended: bool
-    redis_seeded_at: str
-    redis_suspended_at: str
-    redis_resumed_at: str
-    traefik_started_at: str
+    traefik_started_before: str
+    traefik_started_after: str
+    redis_healthy_at: str | None
     local_route_status: int | None
     redis_route_statuses: dict[str, int | None]
     closed_watch_tree: bool
     image_ids: dict[str, str]
+
+
+@dataclasses.dataclass(frozen=True)
+class ComposeRecreationExperiment:
+    candidate: ComposeTransitionObservation
+    control: ComposeTransitionObservation | None
     tracked_compose_sha256: str
     docker_server_version: str
     evidence_directory: str
@@ -320,10 +323,15 @@ def _contract() -> dict[str, str]:
     assert static["providers"]["docker"]["endpoint"] == (
         "tcp://traefik-docker-socket-proxy:2375"
     )
-    assert compose["services"]["traefik"]["depends_on"] == [
-        "traefik-docker-socket-proxy"
+    assert compose["services"]["redis"]["healthcheck"]["test"] == [
+        "CMD",
+        "redis-cli",
+        "ping",
     ]
-    assert "healthcheck" not in compose["services"]["redis"]
+    assert compose["services"]["traefik"]["depends_on"] == {
+        "traefik-docker-socket-proxy": {"condition": "service_started"},
+        "redis": {"condition": "service_healthy", "restart": True},
+    }
     return images
 
 
@@ -338,17 +346,21 @@ def _evidence_directory(attempt_name: str) -> Path:
     return Path(tempfile.mkdtemp(prefix=f"portal-traefik-{attempt_name}-"))
 
 
-def run_compose_redis_replacement(
-    attempt_name: str,
+def _run_compose_recreation_arm(
+    evidence: Path,
+    arm: str,
+    uncorrected: bool,
 ) -> ComposeTransitionObservation:
-    """Run one pinned-Compose Redis replacement during Traefik startup."""
-    evidence = _evidence_directory(attempt_name)
     token = uuid.uuid4().hex[:12]
-    project = f"portal-traefik-recreation-{token}"
-    runtime = Path(tempfile.mkdtemp(prefix=f"portal-traefik-recreation-{token}-"))
+    project = f"portal-traefik-{arm}-{token}"
+    runtime = Path(tempfile.mkdtemp(prefix=f"portal-traefik-{arm}-{token}-"))
     logs_directory = runtime / "logs"
     certificates_directory = runtime / "certificates"
     override = runtime / "compose.runtime.yaml"
+    uncorrected_override = runtime / "compose.uncorrected.yaml"
+    redis_update_override = runtime / "compose.redis-update.yaml"
+    arm_evidence = evidence / arm
+    arm_evidence.mkdir(mode=0o700)
     logs_directory.mkdir(mode=0o700)
     certificates_directory.mkdir(mode=0o700)
     _write_disposable_acme_storage(
@@ -401,97 +413,132 @@ def run_compose_redis_replacement(
     )
     override.chmod(0o600)
     overrides = (override,)
-    shutil.copyfile(override, evidence / override.name)
-    (evidence / override.name).chmod(0o600)
+    if uncorrected:
+        uncorrected_override.write_text(
+            """services:
+  redis:
+    healthcheck: !reset null
+  traefik:
+    depends_on: !override
+      traefik-docker-socket-proxy:
+        condition: service_started
+""",
+            encoding="utf-8",
+        )
+        uncorrected_override.chmod(0o600)
+        overrides += (uncorrected_override,)
+    redis_update_override.write_text(
+        """services:
+  redis:
+    labels:
+      issue-88.recreation: "true"
+""",
+        encoding="utf-8",
+    )
+    redis_update_override.chmod(0o600)
+    for source in overrides:
+        destination = arm_evidence / source.name
+        shutil.copyfile(source, destination)
+        destination.chmod(0o600)
+    shutil.copyfile(
+        redis_update_override,
+        arm_evidence / redis_update_override.name,
+    )
+    (arm_evidence / redis_update_override.name).chmod(0o600)
 
-    redis_suspended = False
     try:
         effective_result = _compose(
             project, overrides, "config", "--format", "json"
         )
-        (evidence / "compose-config.json").write_text(
+        (arm_evidence / "compose-config.json").write_text(
             effective_result.stdout,
             encoding="utf-8",
         )
-        _compose(project, overrides, "create")
-        traefik_id_before = _compose(
-            project, overrides, "ps", "--all", "--quiet", "traefik"
-        ).stdout.strip()
-        redis_id_before = _compose(
-            project, overrides, "ps", "--all", "--quiet", "redis"
-        ).stdout.strip()
-        _docker("start", redis_id_before)
-        _wait_for_redis(redis_id_before)
-        _seed_remote_routes(redis_id_before)
-        redis_seeded_at = datetime.now(timezone.utc).isoformat()
-        _docker("kill", "--signal", "STOP", redis_id_before)
-        redis_suspended_at = datetime.now(timezone.utc).isoformat()
-        redis_suspended = True
-
-        command = [
-            "docker",
-            "compose",
-            "--project-name",
-            project,
-            "--file",
-            str(COMPOSE_PATH),
-        ]
-        for compose_override in overrides:
-            command.extend(("--file", str(compose_override)))
-        command.extend(("up", "--detach"))
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env={
-                **os.environ,
-                "CF_DNS_API_TOKEN": "<REPLACE_ME>",
-                "TRAEFIK_DASHBOARD_CREDENTIALS": "<REPLACE_ME>",
-            },
+        initial_wait_args = () if uncorrected else (
+            "--wait",
+            "--wait-timeout",
+            "60",
         )
-        deadline = time.monotonic() + 10
-        running = "false"
-        while time.monotonic() < deadline:
-            running = _docker(
-                "inspect", "--format", "{{.State.Running}}", traefik_id_before
-            ).stdout.strip()
-            if running == "true":
-                break
-            time.sleep(0.1)
-        traefik_running_while_suspended = running == "true"
-        provider_deadline = time.monotonic() + 15
-        while time.monotonic() < provider_deadline:
-            tracked_log = logs_directory / "traefik-container.log"
-            if tracked_log.exists() and "Starting provider *redis.Provider" in (
-                tracked_log.read_text(encoding="utf-8")
-            ):
-                break
-            time.sleep(0.1)
-        _docker("kill", "--signal", "CONT", redis_id_before)
-        redis_resumed_at = datetime.now(timezone.utc).isoformat()
-        redis_suspended = False
-        _docker("rm", "-f", redis_id_before)
-        _compose(project, overrides, "create", "redis")
-        redis_id_after = _compose(
-            project, overrides, "ps", "--all", "--quiet", "redis"
-        ).stdout.strip()
-        _docker("start", redis_id_after)
-        _wait_for_redis(redis_id_after)
-        _seed_remote_routes(redis_id_after)
-        redis_seeded_at = datetime.now(timezone.utc).isoformat()
-        stdout, stderr = process.communicate(timeout=60)
-        (evidence / "compose-up.log").write_text(
-            stdout + stderr,
+        initial_result = _compose(
+            project,
+            overrides,
+            "up",
+            "--detach",
+            *initial_wait_args,
+        )
+        (arm_evidence / "compose-initial-up.log").write_text(
+            initial_result.stdout + initial_result.stderr,
             encoding="utf-8",
         )
-        if process.returncode != 0:
-            raise AssertionError(f"docker compose up failed: {stderr}")
+        traefik_id_before = _compose(
+            project, overrides, "ps", "--quiet", "traefik"
+        ).stdout.strip()
+        redis_id_before = _compose(
+            project, overrides, "ps", "--quiet", "redis"
+        ).stdout.strip()
+        _wait_for_redis(redis_id_before)
+        _seed_remote_routes(redis_id_before)
+        initial_port = int(
+            _docker(
+                "inspect",
+                "--format",
+                '{{(index (index .NetworkSettings.Ports "443/tcp") 0).HostPort}}',
+                traefik_id_before,
+            ).stdout.strip()
+        )
+        assert _observe_statuses(initial_port, (LOCAL_HOST,), 15)[LOCAL_HOST] == 200
+        assert all(
+            status == 200
+            for status in _observe_statuses(initial_port, REMOTE_HOSTS, 15).values()
+        )
+        traefik_started_before = json.loads(
+            _docker("inspect", traefik_id_before).stdout
+        )[0]["State"]["StartedAt"]
+
+        updated_overrides = overrides + (redis_update_override,)
+        updated_config = _compose(
+            project, updated_overrides, "config", "--format", "json"
+        )
+        (arm_evidence / "compose-update-config.json").write_text(
+            updated_config.stdout,
+            encoding="utf-8",
+        )
+        recreate_result = _compose(
+            project,
+            updated_overrides,
+            "up",
+            "--detach",
+            "redis",
+            "traefik",
+        )
+        (arm_evidence / "compose-redis-recreate.log").write_text(
+            recreate_result.stdout + recreate_result.stderr,
+            encoding="utf-8",
+        )
+        redis_id_after = _compose(
+            project, updated_overrides, "ps", "--quiet", "redis"
+        ).stdout.strip()
+        _wait_for_redis(redis_id_after)
+        _seed_remote_routes(redis_id_after)
 
         redis_inspect = json.loads(_docker("inspect", redis_id_after).stdout)[0]
         traefik_inspect = json.loads(
             _docker("inspect", traefik_id_before).stdout
         )[0]
+        health = redis_inspect["State"].get("Health")
+        successful_health = (
+            []
+            if health is None
+            else [
+                entry
+                for entry in health["Log"]
+                if entry["ExitCode"] == 0
+                and entry["Output"].strip() == "PONG"
+            ]
+        )
+        redis_healthy_at = (
+            successful_health[0]["End"] if successful_health else None
+        )
         port = int(
             _docker(
                 "inspect",
@@ -510,21 +557,17 @@ def run_compose_redis_replacement(
             traefik_id_before,
             logs_directory / "traefik-container.log",
         )
-        (evidence / "traefik.log").write_text(logs, encoding="utf-8")
+        (arm_evidence / "traefik.log").write_text(logs, encoding="utf-8")
         observation = ComposeTransitionObservation(
-            attempt_name=attempt_name,
+            arm=arm,
             compose_project=project,
             redis_container_before=redis_id_before,
             redis_container_after=redis_id_after,
             traefik_container_before=traefik_id_before,
             traefik_container_after=traefik_inspect["Id"],
-            traefik_running_while_redis_suspended=(
-                traefik_running_while_suspended
-            ),
-            redis_seeded_at=redis_seeded_at,
-            redis_suspended_at=redis_suspended_at,
-            redis_resumed_at=redis_resumed_at,
-            traefik_started_at=traefik_inspect["State"]["StartedAt"],
+            traefik_started_before=traefik_started_before,
+            traefik_started_after=traefik_inspect["State"]["StartedAt"],
+            redis_healthy_at=redis_healthy_at,
             local_route_status=local_status,
             redis_route_statuses=redis_statuses,
             closed_watch_tree="watchtree channel is closed" in logs.lower(),
@@ -532,23 +575,14 @@ def run_compose_redis_replacement(
                 "redis": redis_inspect["Image"],
                 "traefik": traefik_inspect["Image"],
             },
-            tracked_compose_sha256=hashlib.sha256(
-                COMPOSE_PATH.read_bytes()
-            ).hexdigest(),
-            docker_server_version=_docker(
-                "version", "--format", "{{.Server.Version}}"
-            ).stdout.strip(),
-            evidence_directory=str(evidence),
         )
-        (evidence / "observation.json").write_text(
+        (arm_evidence / "observation.json").write_text(
             json.dumps(dataclasses.asdict(observation), indent=2, sort_keys=True)
             + "\n",
             encoding="utf-8",
         )
         return observation
     finally:
-        if redis_suspended:
-            _docker("kill", "--signal", "CONT", redis_id_before, check=False)
         down_result = _compose(
             project,
             overrides,
@@ -557,11 +591,39 @@ def run_compose_redis_replacement(
             "--remove-orphans",
             check=False,
         )
-        (evidence / "compose-down.log").write_text(
+        (arm_evidence / "compose-down.log").write_text(
             down_result.stdout + down_result.stderr,
             encoding="utf-8",
         )
         shutil.rmtree(runtime, ignore_errors=True)
+
+
+def run_compose_redis_replacement(
+    attempt_name: str,
+    include_control: bool = False,
+) -> ComposeRecreationExperiment:
+    """Run tracked Compose recreation and an optional uncorrected control."""
+    evidence = _evidence_directory(attempt_name)
+    candidate = _run_compose_recreation_arm(evidence, "candidate", False)
+    control = (
+        _run_compose_recreation_arm(evidence, "uncorrected", True)
+        if include_control
+        else None
+    )
+    experiment = ComposeRecreationExperiment(
+        candidate=candidate,
+        control=control,
+        tracked_compose_sha256=hashlib.sha256(COMPOSE_PATH.read_bytes()).hexdigest(),
+        docker_server_version=_docker(
+            "version", "--format", "{{.Server.Version}}"
+        ).stdout.strip(),
+        evidence_directory=str(evidence),
+    )
+    (evidence / "observation.json").write_text(
+        json.dumps(dataclasses.asdict(experiment), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return experiment
 
 
 def run_attempt(

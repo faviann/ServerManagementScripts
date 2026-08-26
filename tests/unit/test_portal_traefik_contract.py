@@ -39,13 +39,20 @@ def test_portal_recreation_harness_uses_the_repository_provider_contract() -> No
     }
 
 
-def test_traefik_keeps_the_pinned_socket_proxy_startup_dependency() -> None:
+def test_traefik_restarts_after_redis_recreation_and_readiness() -> None:
     compose = load_yaml(TRAEFIK_STACK / "compose.yaml")
 
-    assert "healthcheck" not in compose["services"]["redis"]
-    assert compose["services"]["traefik"]["depends_on"] == [
-        "traefik-docker-socket-proxy"
-    ]
+    assert compose["services"]["redis"]["healthcheck"] == {
+        "test": ["CMD", "redis-cli", "ping"],
+        "interval": "2s",
+        "timeout": "1s",
+        "retries": 15,
+        "start_period": "1s",
+    }
+    assert compose["services"]["traefik"]["depends_on"] == {
+        "traefik-docker-socket-proxy": {"condition": "service_started"},
+        "redis": {"condition": "service_healthy", "restart": True},
+    }
 
 
 def test_representative_local_and_remote_routes_preserve_access_tiers() -> None:

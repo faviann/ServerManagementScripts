@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -69,28 +70,69 @@ def test_pinned_redis_routes_survive_portal_recreation(
     scenario: AttemptScenario,
 ) -> None:
     if scenario is AttemptScenario.REDIS_RECREATED_DURING_START:
-        observation = run_compose_redis_replacement(attempt_name)
+        experiment = run_compose_redis_replacement(
+            attempt_name,
+            include_control=attempt_name == "04-redis-recreated-during-start-3",
+        )
+        observation = experiment.candidate
 
         assert observation.redis_container_before != observation.redis_container_after
         assert (
             observation.traefik_container_before
             == observation.traefik_container_after
         )
-        assert observation.traefik_running_while_redis_suspended is True
+        assert observation.traefik_started_before != observation.traefik_started_after
+        assert observation.redis_healthy_at is not None
+        assert datetime.fromisoformat(observation.redis_healthy_at) <= (
+            datetime.fromisoformat(observation.traefik_started_after)
+        )
+        assert not observation.closed_watch_tree
         assert observation.local_route_status == 200
         assert observation.redis_route_statuses == dict.fromkeys(REMOTE_HOSTS, 200)
         effective = json.loads(
             (
-                Path(observation.evidence_directory) / "compose-config.json"
+                Path(experiment.evidence_directory)
+                / "candidate/compose-config.json"
             ).read_text(encoding="utf-8")
         )
-        assert "healthcheck" not in effective["services"]["redis"]
+        assert effective["services"]["redis"]["healthcheck"]["test"] == [
+            "CMD",
+            "redis-cli",
+            "ping",
+        ]
         assert effective["services"]["traefik"]["depends_on"] == {
             "traefik-docker-socket-proxy": {
                 "condition": "service_started",
                 "required": True,
-            }
+            },
+            "redis": {
+                "condition": "service_healthy",
+                "restart": True,
+                "required": True,
+            },
         }
+        if experiment.control is not None:
+            control = experiment.control
+            assert control.redis_container_before != control.redis_container_after
+            assert control.traefik_container_before == control.traefik_container_after
+            assert control.traefik_started_before == control.traefik_started_after
+            assert control.local_route_status == 200
+            assert any(
+                status != 200 for status in control.redis_route_statuses.values()
+            )
+            control_config = json.loads(
+                (
+                    Path(experiment.evidence_directory)
+                    / "uncorrected/compose-config.json"
+                ).read_text(encoding="utf-8")
+            )
+            assert "healthcheck" not in control_config["services"]["redis"]
+            assert control_config["services"]["traefik"]["depends_on"] == {
+                "traefik-docker-socket-proxy": {
+                    "condition": "service_started",
+                    "required": True,
+                }
+            }
         return
 
     observation = run_attempt(attempt_name, scenario)
