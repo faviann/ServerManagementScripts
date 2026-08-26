@@ -13,7 +13,6 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from collections.abc import Mapping
 from pathlib import Path
 
 import yaml
@@ -46,21 +45,10 @@ class AttemptObservation:
     redis_container_after: str | None
     redis_routes_before_input: dict[str, int | None] | None
     closed_watch_tree: bool
-    historical_incident: bool
     evidence_directory: str
     route_timeout_seconds: float
     docker_server_version: str
     images: dict[str, str]
-
-
-def historical_incident_observed(
-    *,
-    closed_watch_tree: bool,
-    redis_route_statuses: Mapping[str, int | None],
-) -> bool:
-    return closed_watch_tree and any(
-        status != 200 for status in redis_route_statuses.values()
-    )
 
 
 def _docker(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -324,10 +312,6 @@ def run_attempt(
             redis_container_after=redis_container_after,
             redis_routes_before_input=redis_routes_before_input,
             closed_watch_tree=closed_watch_tree,
-            historical_incident=historical_incident_observed(
-                closed_watch_tree=closed_watch_tree,
-                redis_route_statuses=redis_statuses,
-            ),
             evidence_directory=str(evidence),
             route_timeout_seconds=route_timeout_seconds,
             docker_server_version=_docker(

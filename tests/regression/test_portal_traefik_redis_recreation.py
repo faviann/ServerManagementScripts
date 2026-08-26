@@ -10,11 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from portal_traefik_recreation import (
-    AttemptScenario,
-    historical_incident_observed,
-    run_attempt,
-)
+from portal_traefik_recreation import AttemptScenario, run_attempt
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -41,25 +37,6 @@ def require_docker() -> None:
 
 
 @pytest.mark.parametrize(
-    ("closed_watch_tree", "route_statuses", "expected"),
-    [
-        (True, {"bazarr.test": 404, "jellyfin.test": 200}, True),
-        (True, {"bazarr.test": 200, "jellyfin.test": 200}, False),
-        (False, {"bazarr.test": 404, "jellyfin.test": 200}, False),
-    ],
-)
-def test_historical_incident_requires_diagnostic_and_missing_route(
-    closed_watch_tree: bool,
-    route_statuses: dict[str, int],
-    expected: bool,
-) -> None:
-    assert historical_incident_observed(
-        closed_watch_tree=closed_watch_tree,
-        redis_route_statuses=route_statuses,
-    ) is expected
-
-
-@pytest.mark.parametrize(
     ("attempt_name", "scenario"),
     [
         ("01-redis-ready-before-provider", AttemptScenario.REDIS_READY),
@@ -77,7 +54,7 @@ def test_pinned_redis_routes_survive_portal_recreation(
     observation = run_attempt(attempt_name, scenario)
 
     assert observation.local_route_status == 200
-    assert not observation.historical_incident
+    assert not observation.closed_watch_tree
     assert observation.redis_route_statuses == {
         "bazarr.test": 200,
         "jellyfin.test": 200,
@@ -131,5 +108,4 @@ def test_missing_redis_routes_still_write_complete_observation(
     }
     assert all(recorded["images"].values())
     assert isinstance(recorded["closed_watch_tree"], bool)
-    assert recorded["historical_incident"] is False
     assert (evidence / "traefik.log").read_text(encoding="utf-8")
