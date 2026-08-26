@@ -13,6 +13,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 
 import yaml
@@ -41,11 +42,25 @@ class AttemptObservation:
     redis_route_statuses: dict[str, int | None]
     traefik_container_before: str
     traefik_container_after: str
+    redis_container_before: str | None
+    redis_container_after: str | None
+    redis_routes_before_input: dict[str, int | None] | None
     closed_watch_tree: bool
+    historical_incident: bool
     evidence_directory: str
     route_timeout_seconds: float
     docker_server_version: str
     images: dict[str, str]
+
+
+def historical_incident_observed(
+    *,
+    closed_watch_tree: bool,
+    redis_route_statuses: Mapping[str, int | None],
+) -> bool:
+    return closed_watch_tree and any(
+        status != 200 for status in redis_route_statuses.values()
+    )
 
 
 def _docker(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -181,6 +196,9 @@ def run_attempt(
     socket_proxy = f"portal-traefik-socket-{token}"
     traefik = f"portal-traefik-edge-{token}"
     evidence = _evidence_directory(attempt_name)
+    redis_container_before: str | None = None
+    redis_container_after: str | None = None
+    redis_routes_before_input: dict[str, int | None] | None = None
 
     _docker("network", "create", network)
     try:
@@ -253,8 +271,14 @@ def run_attempt(
         container_before = _docker("inspect", "--format", "{{.Id}}", traefik).stdout.strip()
 
         if scenario is AttemptScenario.REDIS_RECREATED:
+            redis_container_before = _docker(
+                "inspect", "--format", "{{.Id}}", redis
+            ).stdout.strip()
             _docker("rm", "-f", redis)
             _start_redis(redis, network, images["redis"])
+            redis_container_after = _docker(
+                "inspect", "--format", "{{.Id}}", redis
+            ).stdout.strip()
             _seed_remote_routes(redis)
 
         port = int(
@@ -272,6 +296,11 @@ def run_attempt(
         )["portal-entry.test"]
 
         if scenario is AttemptScenario.INPUT_AFTER_START:
+            redis_routes_before_input = _observe_statuses(
+                port,
+                REMOTE_HOSTS,
+                route_timeout_seconds,
+            )
             _seed_remote_routes(redis)
 
         redis_statuses = _observe_statuses(
@@ -281,6 +310,7 @@ def run_attempt(
         )
         container_after = _docker("inspect", "--format", "{{.Id}}", traefik).stdout.strip()
         logs = _container_logs(traefik)
+        closed_watch_tree = "watchtree channel is closed" in logs.lower()
         (evidence / "traefik.log").write_text(logs, encoding="utf-8")
 
         observation = AttemptObservation(
@@ -290,7 +320,14 @@ def run_attempt(
             redis_route_statuses=redis_statuses,
             traefik_container_before=container_before,
             traefik_container_after=container_after,
-            closed_watch_tree="watchtree channel is closed" in logs.lower(),
+            redis_container_before=redis_container_before,
+            redis_container_after=redis_container_after,
+            redis_routes_before_input=redis_routes_before_input,
+            closed_watch_tree=closed_watch_tree,
+            historical_incident=historical_incident_observed(
+                closed_watch_tree=closed_watch_tree,
+                redis_route_statuses=redis_statuses,
+            ),
             evidence_directory=str(evidence),
             route_timeout_seconds=route_timeout_seconds,
             docker_server_version=_docker(
