@@ -13,6 +13,9 @@ import pytest
 from portal_traefik_recreation import AttemptScenario, run_attempt
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
 @pytest.fixture(scope="module", autouse=True)
 def require_docker() -> None:
     docker = shutil.which("docker")
@@ -56,21 +59,34 @@ def test_pinned_redis_routes_survive_portal_recreation(
     assert observation.local_route_status == 200
     assert not observation.closed_watch_tree
     assert observation.redis_route_statuses == {
-        "bazarr.test": 200,
-        "jellyfin.test": 200,
-        "immich.test": 200,
+        "bazarr.local.faviann.com": 200,
+        "jellyfin.local.faviann.com": 200,
+        "immich.local.faviann.com": 200,
     }
     assert observation.traefik_container_before == observation.traefik_container_after
     assert observation.docker_server_version
+    assert observation.tracked_config_mounts == {
+        "/etc/traefik/traefik.yaml": str(
+            REPO_ROOT
+            / "stacks/portal/traefik3/appdata/traefik3/config/traefik.yaml"
+        ),
+        "/etc/traefik/conf.d": str(
+            REPO_ROOT / "stacks/portal/traefik3/appdata/traefik3/config/conf.d"
+        ),
+    }
+    assert observation.tracked_static_config_loaded
+    assert observation.tracked_dynamic_config_loaded
+    assert observation.redis_healthcheck_command == ["redis-cli", "ping"]
+    assert observation.traefik_redis_dependency_condition == "service_healthy"
     if scenario is AttemptScenario.REDIS_RECREATED:
         assert observation.redis_container_before
         assert observation.redis_container_after
         assert observation.redis_container_before != observation.redis_container_after
     if scenario is AttemptScenario.INPUT_AFTER_START:
         assert observation.redis_routes_before_input == {
-            "bazarr.test": 404,
-            "jellyfin.test": 404,
-            "immich.test": 404,
+            "bazarr.local.faviann.com": 404,
+            "jellyfin.local.faviann.com": 404,
+            "immich.local.faviann.com": 404,
         }
 
 
@@ -92,9 +108,9 @@ def test_missing_redis_routes_still_write_complete_observation(
 
     assert observation.local_route_status == 200
     assert observation.redis_route_statuses == {
-        "bazarr.test": 404,
-        "jellyfin.test": 404,
-        "immich.test": 404,
+        "bazarr.local.faviann.com": 404,
+        "jellyfin.local.faviann.com": 404,
+        "immich.local.faviann.com": 404,
     }
     assert recorded["redis_route_statuses"] == observation.redis_route_statuses
     assert recorded["traefik_container_before"]

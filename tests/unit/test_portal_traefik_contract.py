@@ -39,6 +39,22 @@ def test_portal_recreation_harness_uses_the_repository_provider_contract() -> No
     }
 
 
+def test_traefik_waits_for_credential_free_redis_readiness() -> None:
+    compose = load_yaml(TRAEFIK_STACK / "compose.yaml")
+
+    assert compose["services"]["redis"]["healthcheck"] == {
+        "test": ["CMD", "redis-cli", "ping"],
+        "interval": "2s",
+        "timeout": "1s",
+        "retries": 15,
+        "start_period": "1s",
+    }
+    assert compose["services"]["traefik"]["depends_on"] == {
+        "traefik-docker-socket-proxy": {"condition": "service_started"},
+        "redis": {"condition": "service_healthy"},
+    }
+
+
 def test_representative_local_and_remote_routes_preserve_access_tiers() -> None:
     portal_entry = load_yaml(REPO_ROOT / "stacks/portal/portal-entry/compose.yaml")
     bazarr = load_yaml(REPO_ROOT / "stacks/servarr/bazarr/compose.yaml")
