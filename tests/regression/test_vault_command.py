@@ -57,6 +57,11 @@ from pathlib import Path
 args = sys.argv[1:]
 if args[:2] != ["run", "--locked"]:
     raise SystemExit(90)
+if (
+    os.environ.get("VAULT_TEST_REQUIRE_PROJECT_CWD") == "1"
+    and Path.cwd() != Path(os.environ["VAULT_TEST_REPO"])
+):
+    raise SystemExit(89)
 command = args[2:]
 tracked = Path(os.environ["VAULT_TEST_REPO"]) / "inventory/group_vars/all/vault.yml"
 if not tracked.exists():
@@ -342,6 +347,34 @@ def test_vault_requires_an_operation_and_advertises_its_complete_interface() -> 
     assert missing.returncode == 2
     assert help_result.returncode == 0
     assert {"configure", "edit", "check"} <= set(help_result.stdout.split())
+
+
+def test_vault_uses_its_project_when_invoked_from_an_unrelated_directory(
+    vault_repo: tuple[Path, dict[str, str]], tmp_path: Path
+) -> None:
+    repo, env = vault_repo
+    (repo / "inventory/group_vars/all/vault.yml").write_text(
+        HEADER + VALID_YAML, encoding="utf-8"
+    )
+    pass_file = Path(env["ANSIBLE_VAULT_PASSWORD_FILE"])
+    pass_file.write_text("synthetic-passphrase-marker\n", encoding="utf-8")
+    pass_file.chmod(0o600)
+    unrelated_directory = tmp_path / "unrelated"
+    unrelated_directory.mkdir()
+    env["VAULT_TEST_REQUIRE_PROJECT_CWD"] = "1"
+
+    result = subprocess.run(
+        [str(repo / "vault.sh"), "check"],
+        cwd=unrelated_directory,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0
+    assert "decryptability: PASS" in result.stdout
+    assert "YAML mapping: PASS" in result.stdout
 
 
 @pytest.mark.parametrize(

@@ -4,6 +4,7 @@
 set -uo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$PROJECT_ROOT" || exit 1
 VAULT_FILE="$PROJECT_ROOT/inventory/group_vars/all/vault.yml"
 PASS_FILE="${ANSIBLE_VAULT_PASSWORD_FILE:-$HOME/.ansible/vault-pass}"
 TRANSACTION_WORKSPACE=""
