@@ -130,6 +130,14 @@ confirm_plaintext_conversion() {
     [[ "$answer" == y || "$answer" == Y || "$answer" == yes || "$answer" == YES ]]
 }
 
+required_credential_valid() {
+    local value="$1"
+    [[ "$value" =~ [^[:space:]] ]] \
+        && [[ "$value" != "REPLACE_ME" ]] \
+        && [[ "$value" != "<REPLACE_ME>" ]] \
+        && [[ "$value" != REPLACE_WITH_* ]]
+}
+
 stage_existing_vault() {
     local plaintext="$1"
     if [[ ! -e "$VAULT_FILE" ]]; then
@@ -205,7 +213,9 @@ run_mutation() {
         printf 'Proxmox API token secret: ' >&3
         IFS= read -rs token_secret <&3 || { rm -rf -- "$workspace"; return 1; }
         printf '\n' >&3
-        if [[ -z "$api_user" || -z "$token_id" || -z "$token_secret" ]]; then
+        if ! required_credential_valid "$api_user" \
+            || ! required_credential_valid "$token_id" \
+            || ! required_credential_valid "$token_secret"; then
             rm -rf -- "$workspace"
             return 1
         fi
