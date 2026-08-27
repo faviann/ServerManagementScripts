@@ -16,6 +16,7 @@ import termios
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -422,10 +423,13 @@ def test_check_treats_yaml_validation_tool_failure_as_a_failed_check(
         )
         for replacement in (
             None,
-            "''",
+            "",
             "REPLACE_ME",
             "<REPLACE_ME>",
             "REPLACE_WITH_SYNTHETIC",
+            "  REPLACE_ME\t",
+            "\t<REPLACE_ME>  ",
+            "  REPLACE_WITH_SYNTHETIC  ",
         )
     ],
 )
@@ -438,7 +442,7 @@ def test_check_rejects_every_missing_empty_or_placeholder_required_key(
     for line in lines:
         if line.startswith(f"{key}:"):
             if replacement is not None:
-                content_lines.append(f"{key}: {replacement}")
+                content_lines.append(f"{key}: {json.dumps(replacement)}")
         else:
             content_lines.append(line)
     (repo / "inventory/group_vars/all/vault.yml").write_text(
@@ -452,6 +456,31 @@ def test_check_rejects_every_missing_empty_or_placeholder_required_key(
 
     assert result.returncode == 1
     assert f"{key}: FAIL" in result.stdout
+
+
+def test_check_accepts_ordinary_padded_values_without_changing_them(
+    vault_repo: tuple[Path, dict[str, str]],
+) -> None:
+    repo, env = vault_repo
+    values = {
+        "vault_proxmox_api_user": "  ordinary@pve  ",
+        "vault_proxmox_api_token_id": "\tordinary-id  ",
+        "vault_proxmox_api_token_secret": "  ordinary-secret\t",
+    }
+    body = "---\n" + "".join(
+        f"{key}: {json.dumps(value)}\n" for key, value in values.items()
+    )
+    vault = repo / "inventory/group_vars/all/vault.yml"
+    original = (HEADER + body).encode()
+    vault.write_bytes(original)
+    pass_file = Path(env["ANSIBLE_VAULT_PASSWORD_FILE"])
+    pass_file.write_text("pass\n", encoding="utf-8")
+    pass_file.chmod(0o600)
+
+    result = run_vault(repo, env, "check")
+
+    assert result.returncode == 0
+    assert vault.read_bytes() == original
 
 
 def test_configure_replaces_only_credentials_through_a_tty_transaction(
@@ -527,7 +556,15 @@ def configure_interactions(
 @pytest.mark.parametrize("key_index", range(3))
 @pytest.mark.parametrize(
     "invalid_value",
-    ["   ", "REPLACE_ME", "<REPLACE_ME>", "REPLACE_WITH_SYNTHETIC"],
+    [
+        "   ",
+        "REPLACE_ME",
+        "<REPLACE_ME>",
+        "REPLACE_WITH_SYNTHETIC",
+        "  REPLACE_ME\t",
+        "\t<REPLACE_ME>  ",
+        "  REPLACE_WITH_SYNTHETIC  ",
+    ],
 )
 def test_configure_rejects_every_value_that_check_rejects(
     vault_repo: tuple[Path, dict[str, str]], key_index: int, invalid_value: str
@@ -550,19 +587,70 @@ def test_configure_rejects_every_value_that_check_rejects(
     assert "keep-me" not in output
 
 
+def test_configure_preserves_ordinary_credential_whitespace_exactly(
+    vault_repo: tuple[Path, dict[str, str]],
+) -> None:
+    repo, env = vault_repo
+    values = ("  ordinary@pve  ", "\tordinary-id  ", "  ordinary-secret\t")
+
+    returncode, output = run_vault_tty(
+        repo, env, configure_interactions(*values), "configure"
+    )
+
+    assert returncode == 0, output
+    plaintext = (
+        repo / "inventory/group_vars/all/vault.yml"
+    ).read_text(encoding="utf-8").removeprefix(HEADER)
+    parsed = yaml.safe_load(plaintext)
+    assert tuple(
+        parsed[key]
+        for key in (
+            "vault_proxmox_api_user",
+            "vault_proxmox_api_token_id",
+            "vault_proxmox_api_token_secret",
+        )
+    ) == values
+
+
 def install_editor(tmp_path: Path, env: dict[str, str], *, fail: bool = False) -> Path:
     capture = tmp_path / "editor-capture"
     editor = Path(env["PATH"].split(":", 1)[0]) / "editor"
     editor.write_text(
-        f"""#!/bin/bash
-set -eu
-test "$(dirname "$1")" = /dev/shm/homelab-vault.*
-test "$(stat -c %a "$(dirname "$1")")" = 700
-grep -q 'vault_proxmox_api_token_secret' "$1"
-grep -q 'unrelated_mapping' "$1"
-printf 'complete' > {capture}
-printf '\neditor_added: editor-secret-marker\n' >> "$1"
-{'exit 97' if fail else ':'}
+        f"""#!/usr/bin/env python3
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+plaintext = Path(sys.argv[1])
+workspace = plaintext.parent
+assert str(plaintext).startswith("/dev/shm/homelab-vault.")
+assert workspace.stat().st_mode & 0o777 == 0o700
+content = plaintext.read_text(encoding="utf-8")
+assert "vault_proxmox_api_token_secret" in content
+assert "unrelated_mapping" in content
+tracked = Path(os.environ["VAULT_TEST_REPO"]) / "inventory/group_vars/all/vault.yml"
+if tracked.exists():
+    tracked_bytes = tracked.read_bytes()
+    tracked_state = (
+        "ciphertext" if tracked_bytes.startswith(b"$ANSIBLE_VAULT;") else "plaintext"
+    )
+    tracked_digest = hashlib.sha256(tracked_bytes).hexdigest()
+else:
+    tracked_state = "absent"
+    tracked_digest = None
+event = {{
+    "boundary": "editor",
+    "command": ["editor"],
+    "tracked_state": tracked_state,
+    "tracked_digest": tracked_digest,
+}}
+with Path(os.environ["VAULT_TEST_BOUNDARY_CAPTURE"]).open("a", encoding="utf-8") as stream:
+    stream.write(json.dumps(event) + "\\n")
+Path({str(capture)!r}).write_text("complete", encoding="utf-8")
+plaintext.write_text(content + "\\neditor_added: editor-secret-marker\\n", encoding="utf-8")
+raise SystemExit({97 if fail else 0})
 """,
         encoding="utf-8",
     )
@@ -664,6 +752,8 @@ def test_mutations_keep_the_tracked_path_safe_at_every_external_boundary(
     assert move["source_ciphertext"] is True
     assert Path(str(move["destination"])) == vault
     assert Path(str(move["source"])).parent == vault.parent
+    editor_events = [event for event in events if event["boundary"] == "editor"]
+    assert len(editor_events) == (1 if operation == "edit" else 0)
     assert vault.read_text(encoding="utf-8").startswith(HEADER)
     assert_no_transaction_artifacts(repo, env, before_workspaces)
 

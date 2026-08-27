@@ -95,11 +95,12 @@ for key in (
     "vault_proxmox_api_token_secret",
 ):
     item = value.get(key) if is_mapping else None
+    classification = item.strip() if isinstance(item, str) else None
     valid = (
         isinstance(item, str)
         and bool(item.strip())
-        and item not in ("REPLACE_ME", "<REPLACE_ME>")
-        and not item.startswith("REPLACE_WITH_")
+        and classification not in ("REPLACE_ME", "<REPLACE_ME>")
+        and not classification.startswith("REPLACE_WITH_")
     )
     print(f"{key}|{'PASS' if valid else 'FAIL'}")
 PY
@@ -132,10 +133,13 @@ confirm_plaintext_conversion() {
 
 required_credential_valid() {
     local value="$1"
+    local classification
+    classification="${value#"${value%%[![:space:]]*}"}"
+    classification="${classification%"${classification##*[![:space:]]}"}"
     [[ "$value" =~ [^[:space:]] ]] \
-        && [[ "$value" != "REPLACE_ME" ]] \
-        && [[ "$value" != "<REPLACE_ME>" ]] \
-        && [[ "$value" != REPLACE_WITH_* ]]
+        && [[ "$classification" != "REPLACE_ME" ]] \
+        && [[ "$classification" != "<REPLACE_ME>" ]] \
+        && [[ "$classification" != REPLACE_WITH_* ]]
 }
 
 stage_existing_vault() {
