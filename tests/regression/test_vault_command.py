@@ -100,6 +100,18 @@ if command[:2] == ["ansible-vault", "view"]:
     if not data.startswith("$ANSIBLE_VAULT;"):
         raise SystemExit(92)
     sys.stdout.write(data.split("\\n", 1)[1])
+    if os.environ.get("VAULT_TEST_VIEW_SIGNAL"):
+        sys.stdout.flush()
+        output_path = Path(os.readlink("/proc/self/fd/1"))
+        with Path(os.environ["VAULT_TEST_BOUNDARY_CAPTURE"]).open(
+            "a", encoding="utf-8"
+        ) as stream:
+            stream.write(json.dumps({
+                "boundary": "view-plaintext",
+                "workspace": str(output_path.parent),
+            }) + "\\n")
+        import signal
+        os.kill(os.getppid(), int(os.environ["VAULT_TEST_VIEW_SIGNAL"]))
     raise SystemExit(0)
 if command[:2] == ["ansible-vault", "decrypt"]:
     output = Path(command[command.index("--output") + 1])
@@ -533,6 +545,51 @@ def test_check_accepts_ordinary_padded_values_without_changing_them(
 
     assert result.returncode == 0
     assert vault.read_bytes() == original
+
+
+@pytest.mark.parametrize("signal_number", [signal.SIGINT, signal.SIGTERM])
+def test_interrupted_check_removes_its_exact_plaintext_workspace(
+    vault_repo: tuple[Path, dict[str, str]], signal_number: int
+) -> None:
+    repo, env = vault_repo
+    (repo / "inventory/group_vars/all/vault.yml").write_text(
+        HEADER + VALID_YAML, encoding="utf-8"
+    )
+    pass_file = Path(env["ANSIBLE_VAULT_PASSWORD_FILE"])
+    pass_file.write_text("synthetic-passphrase-marker\n", encoding="utf-8")
+    pass_file.chmod(0o600)
+    env["VAULT_TEST_VIEW_SIGNAL"] = str(signal_number)
+    before_workspaces = transaction_workspaces()
+
+    result = run_vault(repo, env, "check")
+
+    plaintext_event = next(
+        event
+        for event in boundary_events(env)
+        if event["boundary"] == "view-plaintext"
+    )
+    workspace = Path(str(plaintext_event["workspace"]))
+    workspace_was_removed = not workspace.exists()
+    if not workspace_was_removed:
+        shutil.rmtree(workspace)
+
+    assert result.returncode != 0
+    assert workspace_was_removed
+    cleanup_targets = [
+        Path(str(event["workspace"]))
+        for event in boundary_events(env)
+        if event["boundary"] == "cleanup"
+    ]
+    assert cleanup_targets == [workspace]
+    assert transaction_workspaces() == before_workspaces
+    output = result.stdout + result.stderr
+    for marker in (
+        "synthetic-passphrase-marker",
+        "synthetic-token-marker",
+        "operator@pve",
+        "keep-me",
+    ):
+        assert marker not in output
 
 
 def test_configure_replaces_only_credentials_through_a_tty_transaction(

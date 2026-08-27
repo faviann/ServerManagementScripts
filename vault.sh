@@ -73,6 +73,7 @@ check_vault() {
         report_content_failures
         return 1
     }
+    arm_transaction_cleanup "$workspace"
     chmod 700 "$workspace"
     plaintext="$workspace/vault.yml"
     if uv run --locked ansible-vault view "$VAULT_FILE" >"$plaintext" 2>/dev/null; then
@@ -117,8 +118,11 @@ PY
         check_line "decryptability" FAIL
         report_content_failures
     fi
-    rm -rf -- "$workspace"
-    (( CHECK_FAILED == 0 ))
+    local status=0
+    (( CHECK_FAILED == 0 )) || status=1
+    cleanup_transaction || status=1
+    disarm_transaction_cleanup
+    return "$status"
 }
 
 open_tty() {
@@ -209,6 +213,13 @@ interrupt_transaction() {
     exit 1
 }
 
+arm_transaction_cleanup() {
+    TRANSACTION_WORKSPACE="$1"
+    TRANSACTION_PUBLISH_TMP=""
+    trap cleanup_transaction_on_exit EXIT
+    trap interrupt_transaction HUP INT TERM
+}
+
 validate_plaintext() {
     uv run --locked python - "$1" >/dev/null 2>&1 <<'PY'
 import sys
@@ -246,10 +257,7 @@ run_mutation() {
     local operation="$1"
     local workspace plaintext encrypted credentials editor_command
     workspace="$(mktemp -d /dev/shm/homelab-vault.XXXXXX)" || return 1
-    TRANSACTION_WORKSPACE="$workspace"
-    TRANSACTION_PUBLISH_TMP=""
-    trap cleanup_transaction_on_exit EXIT
-    trap interrupt_transaction HUP INT TERM
+    arm_transaction_cleanup "$workspace"
     chmod 700 "$workspace"
     plaintext="$workspace/vault.yml"
     encrypted="$workspace/vault.encrypted"
