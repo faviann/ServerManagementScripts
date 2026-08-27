@@ -6,6 +6,8 @@ set -uo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VAULT_FILE="$PROJECT_ROOT/inventory/group_vars/all/vault.yml"
 PASS_FILE="${ANSIBLE_VAULT_PASSWORD_FILE:-$HOME/.ansible/vault-pass}"
+TRANSACTION_WORKSPACE=""
+TRANSACTION_PUBLISH_TMP=""
 
 usage() {
     cat <<'EOF'
@@ -148,13 +150,63 @@ stage_existing_vault() {
         printf '%s\n' '---' >"$plaintext"
     elif IFS= read -r first_line <"$VAULT_FILE" \
         && [[ "$first_line" == '$ANSIBLE_VAULT;'* ]]; then
-        uv run --locked ansible-vault decrypt --output "$plaintext" "$VAULT_FILE" \
-            >/dev/null 2>&1
+        if ! uv run --locked ansible-vault decrypt \
+            --output "$plaintext" "$VAULT_FILE" >/dev/null 2>&1; then
+            return 1
+        fi
     else
         confirm_plaintext_conversion || return 1
         cp -- "$VAULT_FILE" "$plaintext"
     fi
     chmod 600 "$plaintext"
+}
+
+cleanup_transaction() {
+    local target="$TRANSACTION_WORKSPACE"
+    local status=0
+    [[ -n "$target" ]] || return 0
+    [[ "$(dirname "$target")" == /dev/shm \
+        && "$(basename "$target")" == homelab-vault.* ]] || return 1
+    rm -rf -- "$target" || status=1
+    if [[ ! -e "$target" ]]; then
+        TRANSACTION_WORKSPACE=""
+    else
+        status=1
+    fi
+    return "$status"
+}
+
+discard_pending_ciphertext() {
+    local target="$TRANSACTION_PUBLISH_TMP"
+    local status=0
+    [[ -n "$target" ]] || return 0
+    [[ "$(dirname "$target")" == "$(dirname "$VAULT_FILE")" \
+        && "$(basename "$target")" == vault.yml.tmp.* ]] || return 1
+    rm -f -- "$target" || status=1
+    if [[ ! -e "$target" ]]; then
+        TRANSACTION_PUBLISH_TMP=""
+    else
+        status=1
+    fi
+    return "$status"
+}
+
+disarm_transaction_cleanup() {
+    if [[ -z "$TRANSACTION_WORKSPACE" && -z "$TRANSACTION_PUBLISH_TMP" ]]; then
+        trap - EXIT HUP INT TERM
+    fi
+}
+
+cleanup_transaction_on_exit() {
+    local status=$?
+    trap - EXIT HUP INT TERM
+    cleanup_transaction || status=1
+    discard_pending_ciphertext || status=1
+    exit "$status"
+}
+
+interrupt_transaction() {
+    exit 1
 }
 
 validate_plaintext() {
@@ -172,10 +224,9 @@ raise SystemExit(0 if isinstance(value, dict) else 1)
 PY
 }
 
-publish_plaintext() {
+stage_ciphertext_for_publication() {
     local plaintext="$1"
     local encrypted="$2"
-    local publish_tmp
 
     validate_plaintext "$plaintext" || return 1
     cp -- "$plaintext" "$encrypted" || return 1
@@ -184,13 +235,9 @@ publish_plaintext() {
     uv run --locked ansible-vault view "$encrypted" >/dev/null 2>&1 || return 1
 
     mkdir -p "$(dirname "$VAULT_FILE")"
-    publish_tmp="$(mktemp "${VAULT_FILE}.tmp.XXXXXX")" || return 1
-    if ! install -m 600 -- "$encrypted" "$publish_tmp"; then
-        rm -f -- "$publish_tmp"
-        return 1
-    fi
-    if ! mv -f -- "$publish_tmp" "$VAULT_FILE"; then
-        rm -f -- "$publish_tmp"
+    TRANSACTION_PUBLISH_TMP="$(mktemp "${VAULT_FILE}.tmp.XXXXXX")" || return 1
+    if ! install -m 600 -- "$encrypted" "$TRANSACTION_PUBLISH_TMP"; then
+        discard_pending_ciphertext || true
         return 1
     fi
 }
@@ -199,28 +246,32 @@ run_mutation() {
     local operation="$1"
     local workspace plaintext encrypted credentials editor_command
     workspace="$(mktemp -d /dev/shm/homelab-vault.XXXXXX)" || return 1
+    TRANSACTION_WORKSPACE="$workspace"
+    TRANSACTION_PUBLISH_TMP=""
+    trap cleanup_transaction_on_exit EXIT
+    trap interrupt_transaction HUP INT TERM
     chmod 700 "$workspace"
     plaintext="$workspace/vault.yml"
     encrypted="$workspace/vault.encrypted"
 
     if ! stage_existing_vault "$plaintext"; then
-        rm -rf -- "$workspace"
+        cleanup_transaction || true
         return 1
     fi
 
     if [[ "$operation" == configure ]]; then
         local api_user token_id token_secret
         printf 'Proxmox API user: ' >&3
-        IFS= read -r api_user <&3 || { rm -rf -- "$workspace"; return 1; }
+        IFS= read -r api_user <&3 || { cleanup_transaction || true; return 1; }
         printf 'Proxmox API token ID: ' >&3
-        IFS= read -r token_id <&3 || { rm -rf -- "$workspace"; return 1; }
+        IFS= read -r token_id <&3 || { cleanup_transaction || true; return 1; }
         printf 'Proxmox API token secret: ' >&3
-        IFS= read -rs token_secret <&3 || { rm -rf -- "$workspace"; return 1; }
+        IFS= read -rs token_secret <&3 || { cleanup_transaction || true; return 1; }
         printf '\n' >&3
         if ! required_credential_valid "$api_user" \
             || ! required_credential_valid "$token_id" \
             || ! required_credential_valid "$token_secret"; then
-            rm -rf -- "$workspace"
+            cleanup_transaction || true
             return 1
         fi
         credentials="$workspace/credentials"
@@ -256,7 +307,7 @@ for key, credential in zip(
 vault_path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
 PY
         then
-            rm -rf -- "$workspace"
+            cleanup_transaction || true
             return 1
         fi
     else
@@ -264,17 +315,29 @@ PY
         local -a editor_argv
         read -r -a editor_argv <<<"$editor_command"
         if (( ${#editor_argv[@]} == 0 )) || ! "${editor_argv[@]}" "$plaintext"; then
-            rm -rf -- "$workspace"
+            cleanup_transaction || true
             return 1
         fi
     fi
 
-    if publish_plaintext "$plaintext" "$encrypted"; then
-        rm -rf -- "$workspace"
-        printf '%s: PASS\n' "$operation"
-        return 0
+    if stage_ciphertext_for_publication "$plaintext" "$encrypted"; then
+        if ! cleanup_transaction; then
+            discard_pending_ciphertext || true
+            return 1
+        fi
+        if mv -f -- "$TRANSACTION_PUBLISH_TMP" "$VAULT_FILE"; then
+            TRANSACTION_PUBLISH_TMP=""
+            disarm_transaction_cleanup
+            printf '%s: PASS\n' "$operation"
+            return 0
+        fi
+        discard_pending_ciphertext || true
+        disarm_transaction_cleanup
+    else
+        cleanup_transaction || true
+        discard_pending_ciphertext || true
+        disarm_transaction_cleanup
     fi
-    rm -rf -- "$workspace"
     printf '%s: FAIL\n' "$operation" >&2
     return 1
 }
