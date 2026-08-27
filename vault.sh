@@ -325,12 +325,14 @@ PY
             discard_pending_ciphertext || true
             return 1
         fi
+        trap '' HUP INT TERM
         if mv -f -- "$TRANSACTION_PUBLISH_TMP" "$VAULT_FILE"; then
             TRANSACTION_PUBLISH_TMP=""
             disarm_transaction_cleanup
             printf '%s: PASS\n' "$operation"
             return 0
         fi
+        trap interrupt_transaction HUP INT TERM
         discard_pending_ciphertext || true
         disarm_transaction_cleanup
     else

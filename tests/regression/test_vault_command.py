@@ -157,7 +157,11 @@ with Path(os.environ["VAULT_TEST_BOUNDARY_CAPTURE"]).open("a", encoding="utf-8")
     stream.write(json.dumps(event) + "\\n")
 if os.environ.get("VAULT_TEST_MOVE_FAIL") == "1":
     raise SystemExit(99)
-raise SystemExit(subprocess.run(["/usr/bin/mv", *sys.argv[1:]]).returncode)
+move_status = subprocess.run(["/usr/bin/mv", *sys.argv[1:]]).returncode
+if move_status == 0 and os.environ.get("VAULT_TEST_MOVE_SIGNAL_AFTER") == "1":
+    import signal
+    os.kill(os.getppid(), signal.SIGTERM)
+raise SystemExit(move_status)
 """,
         encoding="utf-8",
     )
@@ -1024,5 +1028,27 @@ def test_signal_between_cleanup_and_publication_preserves_the_original(
     assert returncode == 1
     assert "configure: PASS" not in output
     assert vault.read_bytes() == original
+    assert transaction_workspaces() == before_workspaces
+    assert not list(repo.rglob("vault.yml.tmp.*"))
+
+
+def test_signal_after_atomic_rename_reports_the_committed_success(
+    vault_repo: tuple[Path, dict[str, str]],
+) -> None:
+    repo, env = vault_repo
+    vault = repo / "inventory/group_vars/all/vault.yml"
+    original = (HEADER + VALID_YAML).encode()
+    vault.write_bytes(original)
+    env["VAULT_TEST_MOVE_SIGNAL_AFTER"] = "1"
+    before_workspaces = transaction_workspaces()
+
+    returncode, output = run_vault_tty(
+        repo, env, configure_interactions(), "configure"
+    )
+
+    assert returncode == 0
+    assert "configure: PASS" in output
+    assert vault.read_bytes() != original
+    assert vault.read_text(encoding="utf-8").startswith(HEADER)
     assert transaction_workspaces() == before_workspaces
     assert not list(repo.rglob("vault.yml.tmp.*"))
