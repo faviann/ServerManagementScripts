@@ -186,31 +186,17 @@ def main(
             f"registered launchers: {', '.join(REGISTERED_SCRIPTS)}"
         )
 
-    with tempfile.TemporaryDirectory(prefix="lxc-lifecycle-fixtures-") as temp_dir:
-        temp_root = Path(temp_dir)
-        # ansible.cfg names a vault password file that must exist, but the
-        # fixtures decrypt nothing: a placeholder keeps the run credential-free.
-        vault_placeholder = temp_root / "vault-pass"
-        vault_placeholder.write_text(
-            "unused-fixture-placeholder\n", encoding="utf-8"
-        )
-        fixture_inventory = temp_root / "inventory.ini"
-        fixture_inventory.write_text(
-            "[local]\nlocalhost ansible_connection=local\n", encoding="utf-8"
-        )
-        previous_vault_password_file = os.environ.get("ANSIBLE_VAULT_PASSWORD_FILE")
-        previous_inventory = os.environ.get("ANSIBLE_INVENTORY")
+    with tempfile.TemporaryDirectory(prefix="lxc-lifecycle-cache-") as temp_dir:
+        cache_root = Path(temp_dir)
         previous_cache_plugin_connection = os.environ.get(
             "ANSIBLE_CACHE_PLUGIN_CONNECTION"
         )
-        os.environ["ANSIBLE_VAULT_PASSWORD_FILE"] = str(vault_placeholder)
-        os.environ["ANSIBLE_INVENTORY"] = str(fixture_inventory)
         # Fixtures add fake hosts (e.g. s1_portal) that fact caching would
         # otherwise persist for up to the production TTL. Redirect the jsonfile
         # cache per run instead of forcing memory so within-run caching
         # semantics stay production-like while .ansible/cache stays untouched
         # (issue #89).
-        os.environ["ANSIBLE_CACHE_PLUGIN_CONNECTION"] = str(temp_root / "fact-cache")
+        os.environ["ANSIBLE_CACHE_PLUGIN_CONNECTION"] = str(cache_root / "fact-cache")
         try:
             return run_regressions(
                 full=args.full,
@@ -219,14 +205,6 @@ def main(
                 launcher=launcher,
             )
         finally:
-            if previous_vault_password_file is None:
-                os.environ.pop("ANSIBLE_VAULT_PASSWORD_FILE", None)
-            else:
-                os.environ["ANSIBLE_VAULT_PASSWORD_FILE"] = previous_vault_password_file
-            if previous_inventory is None:
-                os.environ.pop("ANSIBLE_INVENTORY", None)
-            else:
-                os.environ["ANSIBLE_INVENTORY"] = previous_inventory
             if previous_cache_plugin_connection is None:
                 os.environ.pop("ANSIBLE_CACHE_PLUGIN_CONNECTION", None)
             else:

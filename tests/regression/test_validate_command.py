@@ -44,7 +44,9 @@ if capture.exists():
 commands.append({
     "argv": sys.argv[1:],
     "cache_connection": os.environ.get("ANSIBLE_CACHE_PLUGIN_CONNECTION"),
+    "inventory": os.environ.get("ANSIBLE_INVENTORY"),
     "lifecycle_marker": os.environ.get("HOMELAB_IAC_LIFECYCLE_WRAPPER"),
+    "vault_password_file": os.environ.get("ANSIBLE_VAULT_PASSWORD_FILE"),
 })
 capture.write_text(json.dumps(commands), encoding="utf-8")
 if len(commands) == int(os.environ.get("VALIDATE_TEST_FAIL_AT", "0")):
@@ -58,6 +60,10 @@ if len(commands) == int(os.environ.get("VALIDATE_TEST_FAIL_AT", "0")):
     env.pop("HOMELAB_IAC_LIFECYCLE_WRAPPER", None)
     env.update(
         {
+            "ANSIBLE_INVENTORY": "/operator/inventory-that-must-not-be-read",
+            "ANSIBLE_VAULT_PASSWORD_FILE": (
+                "/operator/vault-password-that-must-not-be-read"
+            ),
             "HOME": str(tmp_path / "home"),
             "PATH": f"{bin_dir}:{env['PATH']}",
             "VALIDATE_TEST_CAPTURE": str(tmp_path / "commands.json"),
@@ -105,7 +111,11 @@ def test_validate_runs_the_complete_non_live_suite_from_the_repository_root(
         {
             "argv": command,
             "cache_connection": commands[0]["cache_connection"],
+            "inventory": str(REPO_ROOT / "tests/fixtures/ansible/inventory.yml"),
             "lifecycle_marker": None,
+            "vault_password_file": str(
+                REPO_ROOT / "tests/fixtures/ansible/vault-pass"
+            ),
         }
         for command in VALIDATION_COMMANDS
     ]
