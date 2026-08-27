@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -344,32 +343,11 @@ BlueprintDumper.add_representer(FindRef, _represent_find)
 BlueprintDumper.add_representer(KeyOfRef, _represent_keyof)
 
 
-VAULT_FILE = REPO_ROOT / "inventory" / "group_vars" / "all" / "vault.yml"
-VAULT_PASS_FILE = Path.home() / ".ansible" / "vault-pass"
-VAULT_TOKEN_VAR = "vault_auth_blueprint_api_token"
-ANSIBLE_VAULT_COMMAND = "uv run --locked ansible-vault".split()
-
-
 def _extract_vault_token(yaml_str: str, var_name: str) -> str:
     data = yaml.safe_load(yaml_str)
     if var_name not in data:
         raise KeyError(f"{var_name} not found in vault")
     return str(data[var_name]).strip()
-
-
-def token_from_vault(
-    vault_file: Path = VAULT_FILE,
-    vault_pass_file: Path = VAULT_PASS_FILE,
-    var_name: str = VAULT_TOKEN_VAR,
-) -> str:
-    result = subprocess.run(
-        [*ANSIBLE_VAULT_COMMAND, "view", str(vault_file), "--vault-password-file", str(vault_pass_file)],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return _extract_vault_token(result.stdout, var_name)
 
 
 class AuthentikClient:
@@ -380,12 +358,6 @@ class AuthentikClient:
     @classmethod
     def from_token_file(cls, token_file: Path, base_url: str | None = None) -> "AuthentikClient":
         token = token_file.read_text(encoding="utf-8").strip()
-        resolved_base = base_url or choose_base_url(token)
-        return cls(token=token, base_url=resolved_base)
-
-    @classmethod
-    def from_vault(cls, base_url: str | None = None) -> "AuthentikClient":
-        token = token_from_vault()
         resolved_base = base_url or choose_base_url(token)
         return cls(token=token, base_url=resolved_base)
 
@@ -1300,8 +1272,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--token-file",
-        default=None,
-        help="Path to an Authentik API token file. If omitted, the token is read from the Ansible vault.",
+        required=True,
+        help="Path to an Authentik API token file.",
     )
     parser.add_argument(
         "--base-url",
@@ -1313,10 +1285,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    if args.token_file is not None:
-        client = AuthentikClient.from_token_file(Path(args.token_file), base_url=args.base_url)
-    else:
-        client = AuthentikClient.from_vault(base_url=args.base_url)
+    client = AuthentikClient.from_token_file(Path(args.token_file), base_url=args.base_url)
 
     if args.command == "export":
         result = export_blueprints(client)

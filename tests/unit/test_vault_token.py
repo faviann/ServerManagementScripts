@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for vault-based token resolution in authentik_blueprint_sync."""
+"""Tests for token handling in authentik_blueprint_sync."""
 
 from __future__ import annotations
 
@@ -7,14 +7,11 @@ import unittest
 from pathlib import Path
 
 import importlib.util
+import subprocess
 import sys
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "authentik_blueprint_sync.py"
-
-VAULT_FILE = REPO_ROOT / "inventory" / "group_vars" / "all" / "vault.yml"
-VAULT_PASS_FILE = Path.home() / ".ansible" / "vault-pass"
-
 
 def load_script():
     spec = importlib.util.spec_from_file_location("authentik_blueprint_sync", SCRIPT_PATH)
@@ -47,24 +44,21 @@ class ExtractVaultTokenTests(unittest.TestCase):
         self.assertEqual(token, "spaced")
 
 
-@unittest.skipUnless(
-    VAULT_FILE.exists() and VAULT_PASS_FILE.exists(),
-    "vault.yml or vault-pass not present — skipping integration tests",
-)
-class VaultTokenIntegrationTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.mod = load_script()
+class PublicCliTokenFileTests(unittest.TestCase):
+    def test_token_file_is_required_for_every_command(self):
+        for command in ("export", "apply"):
+            with self.subTest(command=command):
+                result = subprocess.run(
+                    [sys.executable, str(SCRIPT_PATH), command],
+                    cwd=REPO_ROOT,
+                    env={"HOME": "/nonexistent", "PATH": ""},
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
 
-    def test_token_from_vault_returns_non_empty_string(self):
-        token = self.mod.token_from_vault(VAULT_FILE, VAULT_PASS_FILE)
-        self.assertIsInstance(token, str)
-        self.assertGreater(len(token), 0)
-
-    def test_client_from_vault_connects_to_authentik(self):
-        client = self.mod.AuthentikClient.from_vault()
-        self.assertIsNotNone(client.base_url)
-        self.assertGreater(len(client.token), 0)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("the following arguments are required: --token-file", result.stderr)
 
 
 if __name__ == "__main__":
