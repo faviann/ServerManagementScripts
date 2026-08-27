@@ -213,6 +213,30 @@ def test_targeted_launchers_inherit_validation_fixture_environment(
     assert os.environ["ANSIBLE_CACHE_PLUGIN_CONNECTION"] == original_cache_connection
 
 
+def test_direct_runner_replaces_operator_ansible_environment_with_repo_fixtures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_runner()
+    fixture_root = RUNNER_PATH.parents[1] / "fixtures" / "ansible"
+    operator_vault = "/operator/vault-password-that-must-not-be-read"
+    operator_inventory = "/operator/inventory-that-must-not-be-read"
+    monkeypatch.setenv("ANSIBLE_VAULT_PASSWORD_FILE", operator_vault)
+    monkeypatch.setenv("ANSIBLE_INVENTORY", operator_inventory)
+
+    def launch(script: str) -> tuple[str, int, float, str]:
+        assert os.environ["ANSIBLE_VAULT_PASSWORD_FILE"] == str(
+            fixture_root / "vault-pass"
+        )
+        assert os.environ["ANSIBLE_INVENTORY"] == str(fixture_root / "inventory.yml")
+        return passing_result(script)
+
+    assert runner.main(
+        ["--only", runner.FULL_ONLY_SCRIPTS[0]], launcher=launch
+    ) == 0
+    assert os.environ["ANSIBLE_VAULT_PASSWORD_FILE"] == operator_vault
+    assert os.environ["ANSIBLE_INVENTORY"] == operator_inventory
+
+
 def test_targeted_runner_smoke_uses_isolated_ansible_environment() -> None:
     target = "test_lxc_spec_invalid_guest_bootstrap.py"
     fixture_root = RUNNER_PATH.parents[1] / "fixtures" / "ansible"

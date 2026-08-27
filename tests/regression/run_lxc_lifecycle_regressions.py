@@ -45,6 +45,11 @@ from typing import Callable, Sequence
 
 TESTS = Path(__file__).resolve().parent
 REPO_ROOT = TESTS.parents[1]
+FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "ansible"
+FIXTURE_ENVIRONMENT = {
+    "ANSIBLE_INVENTORY": str(FIXTURE_ROOT / "inventory.yml"),
+    "ANSIBLE_VAULT_PASSWORD_FILE": str(FIXTURE_ROOT / "vault-pass"),
+}
 
 # Both fast launchers are internally parallel and fully isolated (per-run
 # temp state directories), so the fast path runs them concurrently.
@@ -188,15 +193,22 @@ def main(
 
     with tempfile.TemporaryDirectory(prefix="lxc-lifecycle-cache-") as temp_dir:
         cache_root = Path(temp_dir)
-        previous_cache_plugin_connection = os.environ.get(
-            "ANSIBLE_CACHE_PLUGIN_CONNECTION"
-        )
+        managed_environment = {
+            **FIXTURE_ENVIRONMENT,
+            "ANSIBLE_CACHE_PLUGIN_CONNECTION": str(cache_root / "fact-cache"),
+        }
+        previous_environment = {
+            name: os.environ.get(name) for name in managed_environment
+        }
+        # Keep documented direct runner invocations credential-free until the
+        # supported targeted validation command replaces them. Under
+        # ./validate.sh these are the same fixture values already inherited.
+        os.environ.update(managed_environment)
         # Fixtures add fake hosts (e.g. s1_portal) that fact caching would
         # otherwise persist for up to the production TTL. Redirect the jsonfile
         # cache per run instead of forcing memory so within-run caching
         # semantics stay production-like while .ansible/cache stays untouched
         # (issue #89).
-        os.environ["ANSIBLE_CACHE_PLUGIN_CONNECTION"] = str(cache_root / "fact-cache")
         try:
             return run_regressions(
                 full=args.full,
@@ -205,12 +217,11 @@ def main(
                 launcher=launcher,
             )
         finally:
-            if previous_cache_plugin_connection is None:
-                os.environ.pop("ANSIBLE_CACHE_PLUGIN_CONNECTION", None)
-            else:
-                os.environ["ANSIBLE_CACHE_PLUGIN_CONNECTION"] = (
-                    previous_cache_plugin_connection
-                )
+            for name, value in previous_environment.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
 
 
 if __name__ == "__main__":
