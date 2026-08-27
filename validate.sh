@@ -6,6 +6,11 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
 
+# Keep every validation child on repository-owned, credential-free Ansible
+# inputs. Individual regression launchers inherit the same boundary.
+export ANSIBLE_INVENTORY="$PROJECT_ROOT/tests/fixtures/ansible/inventory.yml"
+export ANSIBLE_VAULT_PASSWORD_FILE="$PROJECT_ROOT/tests/fixtures/ansible/vault-pass"
+
 # Isolate non-live validation from the operator's live fact cache (issue #89).
 VALIDATION_CACHE_DIR="$(mktemp -d)"
 trap 'rm -rf -- "$VALIDATION_CACHE_DIR"' EXIT

@@ -1,0 +1,9 @@
+---
+all:
+  hosts:
+    auth:
+      ansible_host: auth.invalid.
+    portal:
+      ansible_host: portal.invalid.
+    workstation:
+      ansible_host: workstation.invalid.
