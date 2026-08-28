@@ -35,8 +35,6 @@ def current_entrypoints() -> set[Path]:
             "git",
             "ls-files",
             "--cached",
-            "--others",
-            "--exclude-standard",
             "--",
             "*.yml",
         ],
@@ -106,14 +104,8 @@ def inherited_documents(
     ]
 
 
-def test_every_derived_live_playbook_inherits_the_controller_layer() -> None:
-    entrypoints = current_entrypoints()
-    assert CONTROLLER_LAYER in entrypoints
-    assert PROXMOX_HOST_LAYER in entrypoints
-    assert MIXED_LAYER not in entrypoints
-    graph = {path: documents(path) for path in entrypoints}
-
-    live = {
+def live_entrypoints(entrypoints: set[Path], graph: PlaybookGraph) -> set[Path]:
+    return {
         path
         for path in entrypoints
         if path != CONTROLLER_LAYER
@@ -126,7 +118,16 @@ def test_every_derived_live_playbook_inherits_the_controller_layer() -> None:
         )
     }
 
-    assert live == L3_CONSUMERS | L1_ONLY_CONSUMERS
+
+def test_every_derived_live_playbook_inherits_the_controller_layer() -> None:
+    entrypoints = current_entrypoints()
+    assert CONTROLLER_LAYER in entrypoints
+    assert PROXMOX_HOST_LAYER in entrypoints
+    assert MIXED_LAYER not in entrypoints
+    graph = {path: documents(path) for path in entrypoints}
+
+    live = live_entrypoints(entrypoints, graph)
+
     assert_expected_layer_relationships(graph)
     for path in live:
         assert CONTROLLER_LAYER in inherited_playbooks(path, graph), path
@@ -159,3 +160,35 @@ def test_l1_only_consumer_cannot_import_l3() -> None:
 
     with pytest.raises(AssertionError, match="must remain L1-only"):
         assert_expected_layer_relationships(graph)
+
+
+def test_future_live_playbook_needs_l1_but_no_matrix_entry() -> None:
+    graph = {path: deepcopy(documents(path)) for path in current_entrypoints()}
+    future = Path("playbooks/future-live.yml")
+    graph[future] = [
+        {"ansible.builtin.import_playbook": "controller-prerequisites.yml"},
+        {"hosts": "future_targets", "tasks": []},
+    ]
+
+    assert future not in L3_CONSUMERS | L1_ONLY_CONSUMERS
+    live = live_entrypoints(set(graph), graph)
+    assert future in live
+    for path in live:
+        assert CONTROLLER_LAYER in inherited_playbooks(path, graph), path
+
+
+def test_current_entrypoints_exclude_nonignored_untracked_playbooks() -> None:
+    relative = Path("playbooks/_untracked_entrypoint_test.yml")
+    untracked = REPO_ROOT / relative
+    assert not untracked.exists()
+    try:
+        untracked.write_text("---\n- hosts: future_targets\n", encoding="utf-8")
+        ignored = subprocess.run(
+            ["git", "check-ignore", "--quiet", str(relative)],
+            cwd=REPO_ROOT,
+            check=False,
+        )
+        assert ignored.returncode == 1
+        assert relative not in current_entrypoints()
+    finally:
+        untracked.unlink(missing_ok=True)
