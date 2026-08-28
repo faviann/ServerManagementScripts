@@ -3,7 +3,7 @@
 # Validates shared prerequisites before delegating the run to the lifecycle facade.
 
 - name: Validate lifecycle prerequisites
-  ansible.builtin.import_playbook: lifecycle-prerequisites.yml
+  ansible.builtin.import_playbook: proxmox-host-prerequisites.yml
 
 - name: Initialize the targeted LXC lifecycle run
   hosts: lxcs

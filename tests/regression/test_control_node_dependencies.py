@@ -192,11 +192,16 @@ printf 'version: %s\\n' "$role_version" > "$install_path/$role_name/meta/.galaxy
         (
             "1.6.0",
             2,
-            ("community.proxmox", "expected 2.0.0", "installed 1.6.0"),
+            (
+                "community.proxmox",
+                "expected 2.0.0",
+                "installed 1.6.0",
+                "Run `./setup.sh bootstrap`",
+            ),
         ),
     ],
 )
-def test_lifecycle_preflight_checks_exact_collection_versions(
+def test_controller_prerequisites_check_exact_collection_versions(
     tmp_path: Path,
     installed_version: str,
     expected_returncode: int,
@@ -211,7 +216,7 @@ def test_lifecycle_preflight_checks_exact_collection_versions(
     write_collection_manifest(collections, "community.proxmox", installed_version)
 
     result = run_playbook(
-        REPO_ROOT / "playbooks" / "lifecycle-prerequisites.yml",
+        REPO_ROOT / "playbooks" / "controller-prerequisites.yml",
         extra_vars={
             "control_node_collection_requirements": str(requirements),
             "control_node_collection_install_path": str(collections),
@@ -222,3 +227,57 @@ def test_lifecycle_preflight_checks_exact_collection_versions(
     output = result.stdout + result.stderr
     assert result.returncode == expected_returncode, output
     assert all(diagnostic in output for diagnostic in expected_diagnostics)
+
+
+def test_controller_prerequisites_require_lifecycle_wrapper(tmp_path: Path) -> None:
+    requirements = tmp_path / "requirements.yml"
+    requirements.write_text(
+        "collections:\n  - name: community.proxmox\n    version: 2.0.0\n",
+        encoding="utf-8",
+    )
+    collections = tmp_path / "collections"
+    write_collection_manifest(collections, "community.proxmox", "2.0.0")
+    extra_vars = {
+        "control_node_collection_requirements": str(requirements),
+        "control_node_collection_install_path": str(collections),
+    }
+
+    missing_marker = run_playbook(
+        REPO_ROOT / "playbooks" / "controller-prerequisites.yml",
+        extra_vars=extra_vars,
+        env={"HOMELAB_IAC_LIFECYCLE_WRAPPER": ""},
+        tags="control_node_prerequisites",
+    )
+    assert missing_marker.returncode == 2
+    assert "Lifecycle runs must use ./run.sh" in (
+        missing_marker.stdout + missing_marker.stderr
+    )
+
+    present_marker = run_playbook(
+        REPO_ROOT / "playbooks" / "controller-prerequisites.yml",
+        extra_vars=extra_vars,
+        env={"HOMELAB_IAC_LIFECYCLE_WRAPPER": "1"},
+        tags="control_node_prerequisites",
+    )
+    assert present_marker.returncode == 0, present_marker.stdout + present_marker.stderr
+
+
+def test_controller_prerequisites_name_supported_virtualenv_repair(
+    tmp_path: Path,
+) -> None:
+    requirements = tmp_path / "requirements.yml"
+    requirements.write_text("collections: []\n", encoding="utf-8")
+    result = run_playbook(
+        REPO_ROOT / "playbooks" / "controller-prerequisites.yml",
+        extra_vars={
+            "control_node_uv_virtualenv": str(tmp_path / "missing-venv"),
+            "control_node_collection_requirements": str(requirements),
+            "control_node_collection_install_path": str(tmp_path / "collections"),
+        },
+        env={"HOMELAB_IAC_LIFECYCLE_WRAPPER": "1"},
+        tags="control_node_prerequisites",
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 2
+    assert "Run `./setup.sh sync`" in output
+    assert "uv sync --locked" not in output

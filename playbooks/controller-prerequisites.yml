@@ -1,6 +1,6 @@
 ---
 - name: Verify control node has been bootstrapped
-  hosts: localhost
+  hosts: "{{ prerequisite_target_pattern | default('localhost') }}"
   connection: local
   gather_facts: false
   become: false
@@ -55,7 +55,7 @@
         that:
           - control_node_virtualenv_stat.stat.exists
         fail_msg: >-
-          Bootstrap prerequisite {{ control_node_uv_virtualenv }} is missing. Run `uv sync --locked`.
+          Bootstrap prerequisite {{ control_node_uv_virtualenv }} is missing. Run `./setup.sh sync`.
       run_once: true
 
     - name: Assert installed Ansible collection versions match requirements
@@ -65,7 +65,7 @@
         fail_msg: >-
           Ansible collection {{ item.item.name }} version drift:
           expected {{ item.item.version }}, installed {{ control_node_installed_collection_version }}.
-          Run `uv run --locked ansible-playbook bootstrap.yml`.
+          Run `./setup.sh bootstrap`.
         quiet: true
       vars:
         control_node_installed_collection_version: >-
@@ -78,27 +78,3 @@
       loop_control:
         label: "{{ item.item.name }}"
       run_once: true
-
-    - name: Ensure Traefik-integrated Docker hosts define default_domain
-      ansible.builtin.assert:
-        that:
-          - hostvars[item].default_domain is defined
-          - hostvars[item].default_domain | string | length > 0
-        fail_msg: >-
-          Host '{{ item }}' has Traefik-integrated Docker agents enabled but is missing
-          `default_domain` in inventory/host_vars/{{ item }}.yml. Define `default_domain`
-          or explicitly set `traefik_kop_enabled: false` for opt-out hosts.
-        quiet: true
-      loop: "{{ groups['cap_docker'] | default([]) }}"
-      when:
-        - hostvars[item].docker_agents_enabled | default(true) | bool
-        - hostvars[item].traefik_kop_enabled | default(true) | bool
-
-- name: Bootstrap Proxmox host SSH access
-  hosts: localhost
-  connection: local
-  gather_facts: false
-  become: false
-  roles:
-    - role: infrastructure/proxmox_host_bootstrap
-      proxmox_validate_api: false

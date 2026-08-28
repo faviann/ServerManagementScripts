@@ -1,4 +1,7 @@
 ---
+- name: Validate control node health
+  ansible.builtin.import_playbook: controller-prerequisites.yml
+
 - name: Validate SSH connectivity to managed hosts
   hosts: all:!proxmox_api
   gather_facts: false
