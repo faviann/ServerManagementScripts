@@ -14,6 +14,29 @@
       {%- endfor -%}
       {{ records }}
 
+- name: Detect Traefik-integrated Docker hosts missing default_domain
+  ansible.builtin.set_fact:
+    proxmox_fleet_preflight_problem_records: >-
+      {%- set records = proxmox_fleet_preflight_problem_records[:] -%}
+      {%- for host in groups['cap_docker'] | default([]) -%}
+      {%-   if hostvars[host].docker_agents_enabled | default(true) | bool
+              and hostvars[host].traefik_kop_enabled | default(true) | bool
+              and (
+                hostvars[host].default_domain is not defined
+                or hostvars[host].default_domain | string | length == 0
+              ) -%}
+      {%-     set _ = records.append({
+                'message': (
+                  "Host '" ~ host ~ "' has Traefik-integrated Docker agents enabled but is missing "
+                  ~ "`default_domain` in inventory/host_vars/" ~ host ~ ".yml. Define `default_domain` "
+                  ~ "or explicitly set `traefik_kop_enabled: false` for opt-out hosts."
+                ),
+                'cause_hosts': []
+              }) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ records }}
+
 - name: Compile inventory-wide LXC identity reservations
   ansible.builtin.set_fact:
     proxmox_fleet_identity_reservations: >-

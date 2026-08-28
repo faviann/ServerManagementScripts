@@ -78,27 +78,3 @@
       loop_control:
         label: "{{ item.item.name }}"
       run_once: true
-
-    - name: Ensure Traefik-integrated Docker hosts define default_domain
-      ansible.builtin.assert:
-        that:
-          - hostvars[item].default_domain is defined
-          - hostvars[item].default_domain | string | length > 0
-        fail_msg: >-
-          Host '{{ item }}' has Traefik-integrated Docker agents enabled but is missing
-          `default_domain` in inventory/host_vars/{{ item }}.yml. Define `default_domain`
-          or explicitly set `traefik_kop_enabled: false` for opt-out hosts.
-        quiet: true
-      loop: "{{ groups['cap_docker'] | default([]) }}"
-      when:
-        - hostvars[item].docker_agents_enabled | default(true) | bool
-        - hostvars[item].traefik_kop_enabled | default(true) | bool
-
-- name: Bootstrap Proxmox host SSH access
-  hosts: localhost
-  connection: local
-  gather_facts: false
-  become: false
-  roles:
-    - role: infrastructure/proxmox_host_bootstrap
-      proxmox_validate_api: false

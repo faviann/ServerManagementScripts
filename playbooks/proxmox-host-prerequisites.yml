@@ -1,0 +1,12 @@
+---
+- name: Validate control node health
+  ansible.builtin.import_playbook: controller-prerequisites.yml
+
+- name: Bootstrap Proxmox host SSH access
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  roles:
+    - role: infrastructure/proxmox_host_bootstrap
+      proxmox_validate_api: false

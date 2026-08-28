@@ -1,4 +1,7 @@
 ---
+- name: Validate control node health
+  ansible.builtin.import_playbook: controller-prerequisites.yml
+
 - name: Proxmox API connectivity and LXC info
   hosts: proxmox_api
   connection: local

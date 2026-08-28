@@ -68,12 +68,25 @@ def main() -> int:
             "            memory: 1\n"
             "            disk: ''\n"
             "            netif: {}\n"
+            "    cap_docker:\n"
+            "      hosts:\n"
+            "        unrelated-invalid-host:\n"
+            "          docker_agents_enabled: true\n"
+            "          traefik_kop_enabled: true\n"
         )
 
         env = os.environ.copy()
         env["PATH"] = f"{temp_root}:{env['PATH']}"
+        env["HOMELAB_IAC_LIFECYCLE_WRAPPER"] = "1"
         proc = subprocess.run(
-            [*ANSIBLE_PLAYBOOK, "-i", str(inventory), str(PLAYBOOK)],
+            [
+                *ANSIBLE_PLAYBOOK,
+                "-i",
+                str(inventory),
+                str(PLAYBOOK),
+                "--limit",
+                "recovery-host",
+            ],
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,

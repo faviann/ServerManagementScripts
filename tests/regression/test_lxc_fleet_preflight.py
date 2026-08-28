@@ -402,8 +402,9 @@ def run_regressions() -> int:
         missing_domain.returncode == 0
         or "missing `default_domain`" not in missing_domain_output
         or "missing_domain" not in missing_domain_output
+        or "Controlled shared Fleet preflight problem." not in missing_domain_output
     ):
-        print("site validation did not reject missing default_domain", file=sys.stderr)
+        print("site validation did not aggregate missing default_domain", file=sys.stderr)
         print(missing_domain_output, file=sys.stderr)
         return 1
 

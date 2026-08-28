@@ -22,6 +22,8 @@ all:
           allow_destructive_transitions: false
         proxmox_fleet_observation_override:
           containers: []
+          problems:
+            - Controlled shared Fleet preflight problem.
         proxmox_lxc_global_defaults:
           state: present
           node: pve-a
