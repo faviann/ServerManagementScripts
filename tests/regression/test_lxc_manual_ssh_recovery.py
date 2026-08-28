@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from contextlib import contextmanager
 import os
 import socketserver
@@ -66,10 +67,18 @@ def main() -> int:
             f"printf '%s %s\\n' \"$1\" \"$2\" >> '{pct_log}'\n"
             "case \"$1\" in\n"
             "  status) echo 'status: running' ;;\n"
-            "  config) echo 'hostname: recovery-host' ;;\n"
+            "  config)\n"
+            "    case \"$2\" in\n"
+            "      4201) echo 'hostname: recovery-host' ;;\n"
+            "      4202) echo 'hostname: recovery-peer' ;;\n"
+            "      4203) echo 'hostname: unrelated-invalid-host' ;;\n"
+            "      *) exit 98 ;;\n"
+            "    esac\n"
+            "    ;;\n"
             "  exec)\n"
-            f"    if [ ! -f '{pct_exec_count}' ]; then\n"
-            f"      : > '{pct_exec_count}'\n"
+            f"    count_file='{pct_exec_count}.'\"$2\"\n"
+            "    if [ ! -f \"$count_file\" ]; then\n"
+            "      : > \"$count_file\"\n"
             "      echo 'CHANGED=1'\n"
             "    else\n"
             "      echo '1'\n"
@@ -85,34 +94,42 @@ def main() -> int:
             "all:\n"
             "  children:\n"
             "    lxcs:\n"
+            "      vars:\n"
+            "        ansible_connection: local\n"
+            "        ansible_python_interpreter: '{{ ansible_playbook_python }}'\n"
+            "        proxmox_pct_delegate_host: localhost\n"
+            "        proxmox_api_host: localhost\n"
+            "        proxmox_host: 127.0.0.1\n"
+            f"        proxmox_ssh_port: {ssh_port}\n"
+            f"        proxmox_ssh_key_private: '{private_key}'\n"
+            f"        proxmox_ssh_key_public: '{public_key}'\n"
+            "        proxmox_validate_pct: false\n"
+            f"        proxmox_lxc_controller_pubkey_path: '{public_key}'\n"
+            "        proxmox_default_storage: ''\n"
+            "        proxmox_lxc_global_defaults:\n"
+            "          node: ''\n"
+            "          ostemplate: ''\n"
+            "        proxmox_lxc_group_defaults:\n"
+            "          cores: 0\n"
+            "          memory: 1\n"
+            "          disk: ''\n"
+            "          netif: {}\n"
             "      hosts:\n"
             "        recovery-host:\n"
-            "          ansible_connection: local\n"
-            "          ansible_python_interpreter: '{{ ansible_playbook_python }}'\n"
-            "          proxmox_pct_delegate_host: localhost\n"
-            "          proxmox_api_host: localhost\n"
-            "          proxmox_host: 127.0.0.1\n"
-            f"          proxmox_ssh_port: {ssh_port}\n"
-            f"          proxmox_ssh_key_private: '{private_key}'\n"
-            f"          proxmox_ssh_key_public: '{public_key}'\n"
-            "          proxmox_validate_pct: false\n"
-            f"          proxmox_lxc_controller_pubkey_path: '{public_key}'\n"
             "          proxmox_lxc_overrides:\n"
             "            vmid: 4201\n"
             "            hostname: recovery-host\n"
-            "          proxmox_default_storage: ''\n"
-            "          proxmox_lxc_global_defaults:\n"
-            "            node: ''\n"
-            "            ostemplate: ''\n"
-            "          proxmox_lxc_group_defaults:\n"
-            "            cores: 0\n"
-            "            memory: 1\n"
-            "            disk: ''\n"
-            "            netif: {}\n"
+            "        recovery-peer:\n"
+            "          proxmox_lxc_overrides:\n"
+            "            vmid: 4202\n"
+            "            hostname: recovery-peer\n"
             "        unrelated-invalid-host:\n"
             "          docker_enabled: true\n"
             "          docker_agents_enabled: true\n"
             "          traefik_kop_enabled: true\n"
+            "          proxmox_lxc_overrides:\n"
+            "            vmid: 4203\n"
+            "            hostname: unrelated-invalid-host\n"
         )
 
         env = os.environ.copy()
@@ -167,6 +184,38 @@ def main() -> int:
         calls = pct_log.read_text().splitlines()
         if calls != ["status 4201", "config 4201", "exec 4201", "exec 4201"]:
             print(f"unexpected pct calls: {calls}", file=sys.stderr)
+            return 1
+
+        ssh_log.unlink()
+        pct_log.unlink()
+        for count_file in temp_root.glob("pct-exec-count.*"):
+            count_file.unlink()
+        no_limit = subprocess.run(
+            [*ANSIBLE_PLAYBOOK, "-i", str(inventory), str(PLAYBOOK)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        no_limit_output = f"{no_limit.stdout}\n{no_limit.stderr}"
+        if no_limit.returncode != 0:
+            print("no-limit manual SSH recovery failed unexpectedly", file=sys.stderr)
+            print(no_limit_output, file=sys.stderr)
+            return 1
+
+        ssh_calls = ssh_log.read_text().splitlines()
+        if len(ssh_calls) != 1:
+            print(f"L3 SSH validation ran {len(ssh_calls)} times", file=sys.stderr)
+            return 1
+
+        expected_pct_calls = Counter(
+            f"{operation} {vmid}"
+            for vmid in (4201, 4202, 4203)
+            for operation in ("status", "config", "exec", "exec")
+        )
+        no_limit_pct_calls = pct_log.read_text().splitlines()
+        if Counter(no_limit_pct_calls) != expected_pct_calls:
+            print(f"unexpected no-limit pct calls: {no_limit_pct_calls}", file=sys.stderr)
             return 1
 
     print("ok: manual SSH recovery ignores unrelated invalid desired infrastructure")

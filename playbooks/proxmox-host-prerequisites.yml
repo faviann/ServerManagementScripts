@@ -10,3 +10,4 @@
   roles:
     - role: infrastructure/proxmox_host_bootstrap
       proxmox_validate_api: false
+      run_once: true
