@@ -3,7 +3,7 @@
   ansible.builtin.import_playbook: controller-prerequisites.yml
 
 - name: Bootstrap Proxmox host SSH access
-  hosts: localhost
+  hosts: "{{ prerequisite_target_pattern | default('localhost') }}"
   connection: local
   gather_facts: false
   become: false

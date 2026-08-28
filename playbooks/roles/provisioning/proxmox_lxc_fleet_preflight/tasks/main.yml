@@ -18,8 +18,9 @@
   ansible.builtin.set_fact:
     proxmox_fleet_preflight_problem_records: >-
       {%- set records = proxmox_fleet_preflight_problem_records[:] -%}
-      {%- for host in groups['cap_docker'] | default([]) -%}
-      {%-   if hostvars[host].docker_agents_enabled | default(true) | bool
+      {%- for host in proxmox_fleet_managed_hosts -%}
+      {%-   if hostvars[host].docker_enabled | default(false) | bool
+              and hostvars[host].docker_agents_enabled | default(true) | bool
               and hostvars[host].traefik_kop_enabled | default(true) | bool
               and (
                 hostvars[host].default_domain is not defined

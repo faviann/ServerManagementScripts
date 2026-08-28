@@ -1,6 +1,6 @@
 ---
 - name: Verify control node has been bootstrapped
-  hosts: localhost
+  hosts: "{{ prerequisite_target_pattern | default('localhost') }}"
   connection: local
   gather_facts: false
   become: false
@@ -55,7 +55,7 @@
         that:
           - control_node_virtualenv_stat.stat.exists
         fail_msg: >-
-          Bootstrap prerequisite {{ control_node_uv_virtualenv }} is missing. Run `uv sync --locked`.
+          Bootstrap prerequisite {{ control_node_uv_virtualenv }} is missing. Run `./setup.sh sync`.
       run_once: true
 
     - name: Assert installed Ansible collection versions match requirements
@@ -65,7 +65,7 @@
         fail_msg: >-
           Ansible collection {{ item.item.name }} version drift:
           expected {{ item.item.version }}, installed {{ control_node_installed_collection_version }}.
-          Run `uv run --locked ansible-playbook bootstrap.yml`.
+          Run `./setup.sh bootstrap`.
         quiet: true
       vars:
         control_node_installed_collection_version: >-

@@ -36,12 +36,13 @@ all:
           pubkey: ssh-ed25519 AAAAVALIDATIONPREREQUISITE lifecycle@test
       hosts:
         missing_domain:
-          docker_enabled: false
+          docker_enabled: true
           docker_agents_enabled: true
           traefik_kop_enabled: true
+          proxmox_lxc_capability_defaults:
+            features:
+              - nesting=1
+              - keyctl=1
           proxmox_lxc:
             vmid: 5301
             hostname: missing-domain
-    cap_docker:
-      hosts:
-        missing_domain:

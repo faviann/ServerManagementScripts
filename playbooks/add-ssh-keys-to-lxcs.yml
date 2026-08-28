@@ -8,6 +8,8 @@
 
 - name: Validate manual SSH recovery prerequisites
   ansible.builtin.import_playbook: proxmox-host-prerequisites.yml
+  vars:
+    prerequisite_target_pattern: lxcs
 
 - name: Add SSH keys to existing LXC containers via Proxmox host
   hosts: lxcs
