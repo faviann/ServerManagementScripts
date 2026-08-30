@@ -119,6 +119,64 @@ def process_has_open_path(pid: int, expected_path: Path) -> bool:
         return False
 
 
+def assert_prerequisite_plays_survive_lifecycle_limits() -> None:
+    for wrapper_arguments, expected_host in (
+        (("--limit", "collie"), "collie"),
+        (("--include-controller",), "workstation"),
+    ):
+        with tempfile.TemporaryDirectory(prefix="lifecycle-prerequisite-limit-") as temp_dir:
+            temp_root = Path(temp_dir)
+            env = wrapper_environment(temp_root)
+            wrapper_result = run_wrapper(env, *wrapper_arguments)
+            capture = json.loads(
+                (temp_root / "capture.json").read_text(encoding="utf-8")
+            )
+            inventory = temp_root / "inventory.yml"
+            inventory.write_text(
+                """---
+all:
+  children:
+    lxcs:
+      hosts:
+        collie:
+        workstation:
+""",
+                encoding="utf-8",
+            )
+            list_result = subprocess.run(
+                [
+                    *ANSIBLE_PLAYBOOK,
+                    *capture["argv"][3:],
+                    "--list-hosts",
+                    "-i",
+                    str(inventory),
+                ],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            output = f"{list_result.stdout}\n{list_result.stderr}"
+            for play_name in (
+                "Verify control node has been bootstrapped",
+                "Bootstrap Proxmox host SSH access",
+            ):
+                play_start = output.rfind(play_name)
+                play_end = output.find("\n  play #", play_start + 1)
+                play_output = output[play_start : play_end if play_end >= 0 else None]
+                if (
+                    wrapper_result.returncode != 0
+                    or list_result.returncode != 0
+                    or play_start < 0
+                    or "hosts (1):" not in play_output
+                    or expected_host not in play_output
+                ):
+                    raise AssertionError(
+                        f"{play_name!r} lost {expected_host!r} under {wrapper_arguments!r}:\n"
+                        f"{output}"
+                    )
+
+
 def assert_command_grammar_reports_help_and_usage_errors() -> None:
     with tempfile.TemporaryDirectory(prefix="lifecycle-wrapper-grammar-") as temp_dir:
         env = wrapper_environment(Path(temp_dir))
@@ -147,37 +205,36 @@ def assert_command_grammar_reports_help_and_usage_errors() -> None:
 
 
 def assert_wrapper_routes_and_propagates() -> None:
-    full_defaults = (
-        "-e",
-        "proxmox_lifecycle_intent=full",
-        "-e",
-        "proxmox_skip_self=true",
-        '--extra-vars={"stack_filter":null}',
-    )
-    provision_defaults = (
-        "-e",
-        "proxmox_lifecycle_intent=provision_only",
-        "-e",
-        "proxmox_skip_self=true",
-        '--extra-vars={"stack_filter":null}',
-    )
-    configure_defaults = (
-        "-e",
-        "proxmox_lifecycle_intent=configure_only",
-        "-e",
-        "proxmox_skip_self=true",
-        '--extra-vars={"stack_filter":null}',
-    )
+    def canonical_defaults(intent: str, target: str = "localhost") -> tuple[str, ...]:
+        return (
+            "-e",
+            f"prerequisite_target_pattern={target}",
+            "-e",
+            f"proxmox_lifecycle_intent={intent}",
+            "-e",
+            "proxmox_skip_self=true",
+            '--extra-vars={"stack_filter":null}',
+        )
+
+    full_defaults = canonical_defaults("full")
+    provision_defaults = canonical_defaults("provision_only")
+    configure_defaults = canonical_defaults("configure_only")
+    cap_docker_defaults = canonical_defaults("full", "cap_docker")
+    mixed_limit_defaults = canonical_defaults("full", "collie,portal,!workstation")
+    collie_provision_defaults = canonical_defaults("provision_only", "collie")
+    collie_configure_defaults = canonical_defaults("configure_only", "collie")
     cases = (
         ((), "site.yml", full_defaults),
         (("full",), "site.yml", full_defaults),
-        (("--limit", "cap_docker"), "site.yml", ("--limit", "cap_docker", *full_defaults)),
-        (("--limit", "collie,portal,!workstation"), "site.yml", ("--limit", "collie,portal,!workstation", *full_defaults)),
+        (("--limit", "cap_docker"), "site.yml", ("--limit", "cap_docker", *cap_docker_defaults)),
+        (("--limit", "collie,portal,!workstation"), "site.yml", ("--limit", "collie,portal,!workstation", *mixed_limit_defaults)),
         (("--check",), "site.yml", ("--check", *full_defaults)),
         (
             ("--stack", "beets"),
             "site.yml",
             (
+                "-e",
+                "prerequisite_target_pattern=localhost",
                 "-e",
                 "proxmox_lifecycle_intent=full",
                 "-e",
@@ -193,6 +250,8 @@ def assert_wrapper_routes_and_propagates() -> None:
                 "--limit",
                 "workstation",
                 "-e",
+                "prerequisite_target_pattern=workstation",
+                "-e",
                 "proxmox_lifecycle_intent=full",
                 "-e",
                 "proxmox_skip_self=false",
@@ -205,6 +264,8 @@ def assert_wrapper_routes_and_propagates() -> None:
             (
                 "--limit",
                 "workstation",
+                "-e",
+                "prerequisite_target_pattern=workstation",
                 "-e",
                 "proxmox_lifecycle_intent=full",
                 "-e",
@@ -224,9 +285,10 @@ def assert_wrapper_routes_and_propagates() -> None:
         (("--", "--extra-vars", "{harmless: true}"), "site.yml", ("--extra-vars", "{harmless: true}", *full_defaults)),
         (("--", "-e", "@vaulted-vars.yml"), "site.yml", ("-e", "@vaulted-vars.yml", *full_defaults)),
         (("--", "-e", "proxmox_lifecycle_intent=configure_only"), "site.yml", ("-e", "proxmox_lifecycle_intent=configure_only", *full_defaults)),
+        (("--", "-e", "prerequisite_target_pattern=workstation"), "site.yml", ("-e", "prerequisite_target_pattern=workstation", *full_defaults)),
         (("--", '--extra-vars={"stack_filter":"beets","proxmox_skip_self":false}'), "site.yml", ('--extra-vars={"stack_filter":"beets","proxmox_skip_self":false}', *full_defaults)),
-        (("provision", "--limit", "collie"), "playbooks/provision-lxcs.yml", ("--limit", "collie", *provision_defaults)),
-        (("configure", "--limit", "collie"), "playbooks/configure-lxcs.yml", ("--limit", "collie", *configure_defaults)),
+        (("provision", "--limit", "collie"), "playbooks/provision-lxcs.yml", ("--limit", "collie", *collie_provision_defaults)),
+        (("configure", "--limit", "collie"), "playbooks/configure-lxcs.yml", ("--limit", "collie", *collie_configure_defaults)),
         (("configure", "--", "--diff", "-e", "harmless=true"), "playbooks/configure-lxcs.yml", ("--diff", "-e", "harmless=true", *configure_defaults)),
     )
     for arguments, playbook, passthrough in cases:
@@ -1022,6 +1084,7 @@ def assert_direct_lifecycle_run_is_rejected() -> None:
 
 def main() -> int:
     try:
+        assert_prerequisite_plays_survive_lifecycle_limits()
         assert_command_grammar_reports_help_and_usage_errors()
         assert_wrapper_routes_and_propagates()
         assert_contention_fails_fast()

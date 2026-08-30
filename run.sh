@@ -162,6 +162,14 @@ fi
 if $check_mode; then
     arguments+=("--check")
 fi
+if $include_controller; then
+    prerequisite_target_pattern="workstation"
+elif [[ -n "$limit_pattern" ]]; then
+    prerequisite_target_pattern="$limit_pattern"
+else
+    prerequisite_target_pattern="localhost"
+fi
+arguments+=("-e" "prerequisite_target_pattern=$prerequisite_target_pattern")
 arguments+=("-e" "proxmox_lifecycle_intent=$lifecycle_intent")
 if $include_controller; then
     arguments+=("-e" "proxmox_skip_self=false")
