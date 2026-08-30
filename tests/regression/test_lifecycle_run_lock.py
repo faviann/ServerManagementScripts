@@ -163,6 +163,51 @@ def accepted_protected_long_options() -> tuple[tuple[str, bool], ...]:
     return tuple(accepted)
 
 
+def accepted_safe_long_value_options() -> tuple[str, ...]:
+    safe_options = (
+        "--private-key",
+        "--key-file",
+        "--user",
+        "--connection",
+        "--timeout",
+        "--ssh-common-args",
+        "--sftp-extra-args",
+        "--scp-extra-args",
+        "--ssh-extra-args",
+        "--connection-password-file",
+        "--conn-pass-file",
+        "--become-method",
+        "--become-user",
+        "--become-password-file",
+        "--become-pass-file",
+        "--vault-id",
+        "--vault-password-file",
+        "--vault-pass-file",
+        "--forks",
+        "--module-path",
+        "--extra-vars",
+    )
+    candidates = {
+        option[:length]
+        for option in safe_options
+        for length in range(3, len(option) + 1)
+    }
+    cli = PlaybookCLI(["ansible-playbook"])
+    cli.init_parser()
+    accepted: list[str] = []
+    for candidate in sorted(candidates):
+        try:
+            with redirect_stderr(StringIO()), redirect_stdout(StringIO()):
+                parsed = cli.parser.parse_args(
+                    [candidate, "2", "site.yml"]
+                )
+        except SystemExit:
+            continue
+        if parsed.args == ["site.yml"]:
+            accepted.append(candidate)
+    return tuple(accepted)
+
+
 def assert_prerequisite_plays_survive_lifecycle_limits() -> None:
     for wrapper_arguments, expected_host in (
         (("--limit", "collie"), "collie"),
@@ -362,6 +407,33 @@ def assert_wrapper_routes_and_propagates() -> None:
                 raise AssertionError(
                     f"wrapper routing mismatch for {arguments!r}: capture={capture!r}\n"
                     f"{proc.stdout}\n{proc.stderr}"
+                )
+
+    for option in accepted_safe_long_value_options():
+        with tempfile.TemporaryDirectory(prefix="lifecycle-wrapper-safe-prefix-") as temp_dir:
+            temp_root = Path(temp_dir)
+            env = wrapper_environment(temp_root)
+            proc = run_wrapper(env, "--", option, "fixture-value")
+            capture_path = temp_root / "capture.json"
+            if proc.returncode != 0 or not capture_path.exists():
+                raise AssertionError(
+                    f"accepted safe option {option!r} did not consume its operand:\n"
+                    f"{proc.stdout}\n{proc.stderr}"
+                )
+            capture = json.loads(capture_path.read_text(encoding="utf-8"))
+            expected = [
+                "run",
+                "--locked",
+                "ansible-playbook",
+                "site.yml",
+                option,
+                "fixture-value",
+                *full_defaults,
+            ]
+            if capture["argv"] != expected:
+                raise AssertionError(
+                    f"accepted safe option {option!r} was not forwarded byte-for-byte: "
+                    f"{capture['argv']!r}"
                 )
 
     with tempfile.TemporaryDirectory(prefix="lifecycle-wrapper-nondisclosure-") as temp_dir:

@@ -133,21 +133,18 @@ for ((index = 0; index < ${#passthrough[@]}; index++)); do
             usage_error \
                 "passthrough cannot set target selection, lifecycle intent, or check mode"
             ;;
+        --*=*|-e?*)
+            ;;
         -e|--extra-vars)
             ((index + 1 < ${#passthrough[@]})) || usage_error "$argument requires a value"
             ((index += 1))
             ;;
-        --private-key|--key-file|--user|--connection|--timeout|\
-        --ssh-common-args|--sftp-extra-args|--scp-extra-args|--ssh-extra-args|\
-        --connection-password-file|--conn-pass-file|\
-        --become-method|--become-user|\
-        --become-password-file|--become-pass-file|\
-        --vault-id|--vault-password-file|--vault-pass-file|\
-        --forks|--module-path)
+        --p*|--k*|--u*|--connection|--connection-*|--conn-*|--ti*|\
+        --ssh-c*|--sf*|--sc*|--ssh-e*|\
+        --become-m*|--become-u*|--become-pass-*|--become-passw*|\
+        --vault-i*|--vault-pass-*|--vault-passw*|--fork*|--m*|--e*)
             ((index + 1 < ${#passthrough[@]})) || usage_error "long option requires a value"
             ((index += 1))
-            ;;
-        --extra-vars=*|-e?*)
             ;;
         --*)
             ;;
