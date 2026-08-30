@@ -12,6 +12,8 @@ import tempfile
 from pathlib import Path
 
 import yaml
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from test_lxc_fleet_preflight import (
     generate_localhost_certificate,
@@ -27,7 +29,9 @@ CONTROLLED_API_TOKEN_SECRET = "inspect-fixture-token-secret"
 
 
 def run_inspect(
-    *arguments: str, env: dict[str, str] | None = None
+    *arguments: str,
+    env: dict[str, str] | None = None,
+    timeout: int = 15,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [str(INSPECT), *arguments],
@@ -35,7 +39,7 @@ def run_inspect(
         capture_output=True,
         text=True,
         env=env or os.environ.copy(),
-        timeout=15,
+        timeout=timeout,
     )
 
 
@@ -374,6 +378,114 @@ all:
             raise AssertionError("credentials disclosed a controlled credential value")
 
 
+def assert_public_plan_reports_all_problems_without_disclosure_or_mutation() -> None:
+    with tempfile.TemporaryDirectory(prefix="inspect-plan-live-") as temp_dir:
+        temp_root = Path(temp_dir)
+        certificate = temp_root / "certificate.pem"
+        private_key = temp_root / "private-key.pem"
+        ssh_private_key = temp_root / "fixture-ssh-key"
+        ssh_public_key = temp_root / "fixture-ssh-key.pub"
+        generate_localhost_certificate(certificate, private_key)
+        ssh_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        ssh_private_key.write_bytes(
+            ssh_key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.OpenSSH,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+        )
+        ssh_private_key.chmod(0o600)
+        ssh_public_key.write_bytes(
+            ssh_key.public_key().public_bytes(
+                encoding=serialization.Encoding.OpenSSH,
+                format=serialization.PublicFormat.OpenSSH,
+            )
+            + b" inspect@test\n"
+        )
+        inventory = yaml.safe_load(
+            (
+                REPO_ROOT
+                / "tests/regression/fixtures/lxc_fleet_preflight_inventory.yml"
+            ).read_text(encoding="utf-8")
+        )
+        with local_proxmox_server(certificate, private_key, status=200) as api_server:
+            inventory["all"]["vars"] = {
+                "proxmox_api_host": "127.0.0.1",
+                "proxmox_api_port": api_server.server_address[1],
+                "proxmox_api_user": CONTROLLED_API_USER,
+                "proxmox_api_token_id": CONTROLLED_API_TOKEN_ID,
+                "proxmox_api_token_secret": CONTROLLED_API_TOKEN_SECRET,
+                "proxmox_default_node": "pve-a",
+                "proxmox_verify_ssl": False,
+                "proxmox_host": "controlled.invalid",
+                "proxmox_ssh_port": 1,
+                "proxmox_ssh_connect_timeout": 1,
+                "proxmox_ssh_key_private": str(ssh_private_key),
+                "proxmox_ssh_key_public": str(ssh_public_key),
+            }
+            inventory["all"]["children"]["lxcs"]["vars"][
+                "proxmox_fleet_observation_override"
+            ] = None
+            env = live_fixture_environment(temp_root, yaml.safe_dump(inventory))
+            for proxy_name in (
+                "ALL_PROXY",
+                "HTTPS_PROXY",
+                "HTTP_PROXY",
+                "all_proxy",
+                "https_proxy",
+                "http_proxy",
+            ):
+                env.pop(proxy_name, None)
+            env["NO_PROXY"] = "127.0.0.1,localhost"
+            env["no_proxy"] = "127.0.0.1,localhost"
+            result = run_inspect(
+                "plan",
+                "--limit",
+                "target_conflict,release_problem",
+                env=env,
+                timeout=60,
+            )
+            api_requests = list(api_server.requests)  # type: ignore[attr-defined]
+
+    output = f"{result.stdout}\n{result.stderr}"
+    required_fragments = (
+        "Standalone lifecycle validation found",
+        "Target identity conflict",
+        "VMID 5199",
+        "Guest release observation is required",
+        "release_problem",
+        "SSH key authentication to controlled.invalid is not configured",
+    )
+    if result.returncode == 0 or not all(
+        fragment in output for fragment in required_fragments
+    ):
+        raise AssertionError(f"public plan did not report every controlled problem:\n{output}")
+    mutation_tasks = (
+        "Prompt for Proxmox root password",
+        "Add SSH public key to authorized_keys",
+        "Set correct permissions on authorized_keys",
+    )
+    for task_name in mutation_tasks:
+        task_start = output.find(f": {task_name}] ")
+        task_end = output.find("\nTASK [", task_start + 1)
+        task_output = output[task_start : task_end if task_end >= 0 else None]
+        if task_start < 0 or "skipping:" not in task_output:
+            raise AssertionError(
+                f"public plan did not skip L3 mutation task {task_name!r}:\n{output}"
+            )
+    if "Password for root@" in output:
+        raise AssertionError("public plan entered the password-driven mutation path")
+    if not api_requests:
+        raise AssertionError("public plan did not exercise the controlled API boundary")
+    for credential_value in (
+        CONTROLLED_API_USER,
+        CONTROLLED_API_TOKEN_ID,
+        CONTROLLED_API_TOKEN_SECRET,
+    ):
+        if credential_value in output:
+            raise AssertionError("public plan disclosed a controlled credential value")
+
+
 def main() -> int:
     try:
         assert_explicit_operation_and_help()
@@ -383,6 +495,7 @@ def main() -> int:
         assert_connectivity_fails_after_reporting_unreachable_targets()
         assert_containers_includes_unreserved_node_container()
         assert_credentials_walks_permission_ladder_without_disclosure()
+        assert_public_plan_reports_all_problems_without_disclosure_or_mutation()
     except (AssertionError, subprocess.TimeoutExpired) as error:
         print(error, file=sys.stderr)
         return 1
