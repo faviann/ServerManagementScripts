@@ -215,9 +215,11 @@ def assert_wrapper_routes_and_propagates() -> None:
         (("-v",), "site.yml", ("-v", *full_defaults)),
         (("-vv",), "site.yml", ("-vv", *full_defaults)),
         (("-vvv",), "site.yml", ("-vvv", *full_defaults)),
+        (("--", "-Dv"), "site.yml", ("-Dv", *full_defaults)),
         (("--", "--diff", "-e", "harmless=true"), "site.yml", ("--diff", "-e", "harmless=true", *full_defaults)),
         (("--", "--extra-vars=harmless=true"), "site.yml", ("--extra-vars=harmless=true", *full_defaults)),
         (("--", "-eharmless=true"), "site.yml", ("-eharmless=true", *full_defaults)),
+        (("--", "-eharmless=Ci/l/t"), "site.yml", ("-eharmless=Ci/l/t", *full_defaults)),
         (("--", "-e", '{"harmless": true}'), "site.yml", ("-e", '{"harmless": true}', *full_defaults)),
         (("--", "--extra-vars", "{harmless: true}"), "site.yml", ("--extra-vars", "{harmless: true}", *full_defaults)),
         (("--", "-e", "@vaulted-vars.yml"), "site.yml", ("-e", "@vaulted-vars.yml", *full_defaults)),
@@ -287,16 +289,32 @@ def assert_wrapper_routes_and_propagates() -> None:
         ("--", "--start-a=Apply lifecycle actions"),
         ("provision", "--", "--tags", "configure"),
         ("--check", "--", "--limit", "portal"),
+        ("--", "-CD"),
+        ("--", "-Dlportal"),
+        ("--", "-Dtconfigure"),
+        ("--", "-Di/tmp/other.yml"),
+        ("--", f"-Dl{sensitive_placeholder}"),
+        ("--", f"-Dt{sensitive_placeholder}"),
+        ("--", f"-Di/tmp/{sensitive_placeholder}"),
+        ("--", "-DC"),
+        ("--", f"-vl{sensitive_placeholder}"),
+        ("--", f"-vt{sensitive_placeholder}"),
+        ("--", f"-vi/tmp/{sensitive_placeholder}"),
     )
     for arguments in protected_passthrough:
         with tempfile.TemporaryDirectory(prefix="lifecycle-wrapper-protection-") as temp_dir:
             temp_root = Path(temp_dir)
             env = wrapper_environment(temp_root)
             proc = run_wrapper(env, *arguments)
-            if proc.returncode != 2 or (temp_root / "capture.json").exists():
+            output = f"{proc.stdout}\n{proc.stderr}"
+            if (
+                proc.returncode != 2
+                or (temp_root / "capture.json").exists()
+                or sensitive_placeholder in output
+            ):
                 raise AssertionError(
                     f"protected passthrough {arguments!r} was not rejected:\n"
-                    f"{proc.stdout}\n{proc.stderr}"
+                    f"{output}"
                 )
 
     for arguments in (("--limit",), ("--stack",), ("--limit", "--check")):

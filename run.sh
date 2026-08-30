@@ -31,6 +31,26 @@ usage_error() {
     exit 2
 }
 
+inspect_passthrough_short_options() {
+    local short_options="${1#-}"
+    local short_option
+    passthrough_consumes_next=false
+    while [[ -n "$short_options" ]]; do
+        short_option="${short_options:0:1}"
+        short_options="${short_options:1}"
+        case "$short_option" in
+            C|i|l|t)
+                return 1
+                ;;
+            B|M|P|T|c|e|f|u)
+                [[ -n "$short_options" ]] || passthrough_consumes_next=true
+                return 0
+                ;;
+        esac
+    done
+    return 0
+}
+
 playbook="site.yml"
 lifecycle_intent="full"
 case "${1:-}" in
@@ -108,14 +128,27 @@ done
 for ((index = 0; index < ${#passthrough[@]}; index++)); do
     argument="${passthrough[index]}"
     case "$argument" in
-        --lim*|-l|-l*|--ch*|-C|\
-        --tag*|-t|-t*|--sk*|\
-        --inv*|-i|-i*|--sta*)
+        --lim*|--ch*|--tag*|--sk*|--inv*|--sta*)
             usage_error \
                 "passthrough cannot set target selection, lifecycle intent, or check mode"
             ;;
         -e|--extra-vars)
             ((index + 1 < ${#passthrough[@]})) || usage_error "$argument requires a value"
+            ((index += 1))
+            ;;
+        --extra-vars=*|-e?*)
+            ;;
+        --*)
+            ;;
+        -?*)
+            if ! inspect_passthrough_short_options "$argument"; then
+                usage_error \
+                    "passthrough cannot set target selection, lifecycle intent, or check mode"
+            fi
+            if $passthrough_consumes_next; then
+                ((index + 1 < ${#passthrough[@]})) || usage_error "short option requires a value"
+                ((index += 1))
+            fi
             ;;
     esac
 done
