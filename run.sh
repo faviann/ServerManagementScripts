@@ -88,12 +88,14 @@ verbosity=()
 while (($#)); do
     case "$1" in
         --limit)
-            (($# >= 2)) && [[ "$2" != -* ]] || usage_error "$1 requires a value"
+            (($# >= 2)) && [[ -n "$2" ]] && [[ "$2" != -* ]] || \
+                usage_error "$1 requires a value"
             limit_pattern="$2"
             shift 2
             ;;
         --stack)
-            (($# >= 2)) && [[ "$2" != -* ]] || usage_error "$1 requires a value"
+            (($# >= 2)) && [[ -n "$2" ]] && [[ "$2" != -* ]] || \
+                usage_error "$1 requires a value"
             stack_name="$2"
             shift 2
             ;;

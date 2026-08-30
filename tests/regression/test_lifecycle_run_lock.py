@@ -292,6 +292,26 @@ def assert_command_grammar_reports_help_and_usage_errors() -> None:
                     f"returncode={result.returncode}\n{output}"
                 )
 
+    with tempfile.TemporaryDirectory(prefix="lifecycle-wrapper-empty-limit-") as temp_dir:
+        temp_root = Path(temp_dir)
+        env = wrapper_environment(temp_root)
+        result = run_wrapper(env, "--limit", "")
+        if result.returncode != 2 or (temp_root / "capture.json").exists():
+            raise AssertionError(
+                "empty --limit did not fail closed without launching Ansible:\n"
+                f"returncode={result.returncode}\n{result.stdout}\n{result.stderr}"
+            )
+
+    with tempfile.TemporaryDirectory(prefix="lifecycle-wrapper-empty-stack-") as temp_dir:
+        temp_root = Path(temp_dir)
+        env = wrapper_environment(temp_root)
+        result = run_wrapper(env, "--stack", "")
+        if result.returncode != 2 or (temp_root / "capture.json").exists():
+            raise AssertionError(
+                "empty --stack did not fail closed without launching Ansible:\n"
+                f"returncode={result.returncode}\n{result.stdout}\n{result.stderr}"
+            )
+
 
 def assert_wrapper_routes_and_propagates() -> None:
     def canonical_defaults(intent: str, target: str = "localhost") -> tuple[str, ...]:
