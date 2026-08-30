@@ -18,13 +18,13 @@ L3_CONSUMERS = {
     Path("playbooks/configure-lxcs.yml"),
     Path("playbooks/lifecycle-lxcs.yml"),
     Path("playbooks/provision-lxcs.yml"),
+    Path("playbooks/validate-infrastructure.yml"),
 }
 L1_ONLY_CONSUMERS = {
     Path("playbooks/lab-connectivity.yml"),
     Path("playbooks/proxmox_api_check.yml"),
     PROXMOX_HOST_LAYER,
     Path("playbooks/validate-credentials.yml"),
-    Path("playbooks/validate-infrastructure.yml"),
 }
 PlaybookGraph = dict[Path, list[dict[str, object]]]
 
@@ -153,8 +153,8 @@ def test_required_l3_consumer_cannot_substitute_l1() -> None:
 
 def test_l1_only_consumer_cannot_import_l3() -> None:
     graph = {path: deepcopy(documents(path)) for path in current_entrypoints()}
-    validation = Path("playbooks/validate-infrastructure.yml")
-    graph[validation][0]["ansible.builtin.import_playbook"] = (
+    connectivity = Path("playbooks/lab-connectivity.yml")
+    graph[connectivity][0]["ansible.builtin.import_playbook"] = (
         "proxmox-host-prerequisites.yml"
     )
 

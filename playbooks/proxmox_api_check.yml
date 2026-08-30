@@ -2,23 +2,12 @@
 - name: Validate control node health
   ansible.builtin.import_playbook: controller-prerequisites.yml
 
-- name: Proxmox API connectivity and LXC info
+- name: List LXC containers on the Proxmox node
   hosts: proxmox_api
   connection: local
   gather_facts: false
 
   tasks:
-    - name: Query Proxmox API for node status
-      ansible.builtin.uri:
-        url: "https://{{ proxmox_api_host }}:{{ proxmox_api_port | default(8006) }}/api2/json/nodes/{{ proxmox_default_node }}/status"
-        method: GET
-        headers:
-          Authorization: "PVEAPIToken={{ proxmox_api_user }}!{{ proxmox_api_token_id }}={{ proxmox_api_token_secret }}"
-        validate_certs: "{{ proxmox_verify_ssl | default(false) }}"
-        status_code: 200
-      register: node_status
-      no_log: true
-
     - name: Query Proxmox API for LXC containers
       ansible.builtin.uri:
         url: "https://{{ proxmox_api_host }}:{{ proxmox_api_port | default(8006) }}/api2/json/nodes/{{ proxmox_default_node }}/lxc"
@@ -29,15 +18,6 @@
         status_code: 200
       register: lxc_list
       no_log: true
-
-    - name: Show node status
-      ansible.builtin.debug:
-        msg: "Node {{ proxmox_default_node }} is {{ node_status.json.data.status | default('unknown') }}"
-
-    - name: Show LXC containers
-      ansible.builtin.debug:
-        msg: "Found {{ lxc_list.json.data | length }} LXC container(s) on node {{ proxmox_default_node }}"
-      when: lxc_list.json.data is defined
 
     - name: List LXC containers
       ansible.builtin.debug:

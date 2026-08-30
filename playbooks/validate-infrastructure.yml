@@ -4,7 +4,7 @@
 # but reports every detected problem before returning nonzero.
 
 - name: Validate lifecycle prerequisites
-  ansible.builtin.import_playbook: controller-prerequisites.yml
+  ansible.builtin.import_playbook: proxmox-host-prerequisites.yml
 
 - name: Validate targeted LXC lifecycle plans
   hosts: lxcs

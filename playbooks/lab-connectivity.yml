@@ -3,7 +3,7 @@
   ansible.builtin.import_playbook: controller-prerequisites.yml
 
 - name: Validate SSH connectivity to managed hosts
-  hosts: all:!proxmox_api
+  hosts: lxcs
   gather_facts: false
   tags:
     - connectivity
@@ -27,27 +27,7 @@
           ❌ SSH unreachable: {{ inventory_hostname }} (target {{ hostvars[inventory_hostname].ansible_host | default(inventory_hostname) }})
       when: ping_result is unreachable or ping_result is failed
 
-- name: Validate Proxmox API credentials
-  hosts: proxmox_api
-  gather_facts: false
-  tags:
-    - connectivity
-    - proxmox
-  tasks:
-    - name: Query Proxmox API version endpoint
-      ansible.builtin.uri:
-        url: "https://{{ proxmox_api_host }}:{{ proxmox_api_port }}/api2/json/version"
-        method: GET
-        headers:
-          Authorization: "PVEAPIToken={{ proxmox_api_user }}!{{ proxmox_api_token_id }}={{ proxmox_api_token_secret }}"
-        validate_certs: "{{ proxmox_verify_ssl }}"
-        timeout: 15
-      register: proxmox_version
-      no_log: true
-
-    - name: Show Proxmox API version details
-      ansible.builtin.debug:
-        msg: >-
-          Connected to Proxmox host {{ proxmox_api_host }} (version {{ proxmox_version.json.data.version | default('unknown') }}).
-      when: proxmox_version.json is defined
-      no_log: false
+    - name: Fail when SSH connectivity is unavailable
+      ansible.builtin.fail:
+        msg: "SSH connectivity failed for {{ inventory_hostname }}."
+      when: ping_result is unreachable or ping_result is failed
