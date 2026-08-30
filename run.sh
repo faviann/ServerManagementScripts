@@ -3,6 +3,7 @@
 
 set -euo pipefail
 
+CALLER_WORKING_DIRECTORY="$(pwd -P)"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$PROJECT_ROOT/scripts/lib/live-execution.sh"
 
@@ -31,14 +32,55 @@ usage_error() {
     exit 2
 }
 
-reject_protected_extra_vars() {
+validate_passthrough_extra_vars() {
     local assignment="$1"
-    if [[ ! "$assignment" =~ ^[a-zA-Z_][a-zA-Z0-9_]*=[^[:space:]]*$ ]]; then
-        usage_error "passthrough extra vars must use an inspectable key=value encoding"
+    local inspection_status=0
+    local file_path
+    local resolved_file_path
+    validated_extra_vars_encoding="$assignment"
+    if [[ "$assignment" == @* ]]; then
+        file_path="${assignment#@}"
+        if [[ "$file_path" != /* ]]; then
+            file_path="$CALLER_WORKING_DIRECTORY/$file_path"
+        fi
+        resolved_file_path="$(realpath -e -- "$file_path" 2>/dev/null)" || \
+            usage_error "passthrough extra-vars file cannot be resolved"
+        validated_extra_vars_encoding="@$resolved_file_path"
     fi
-    case "${assignment%%=*}" in
-        proxmox_lifecycle_intent|stack_filter|proxmox_skip_self)
+    (
+        cd "$PROJECT_ROOT"
+        uv run --locked python -c '
+import sys
+from pathlib import Path
+
+import yaml
+from ansible.parsing.splitter import parse_kv
+
+encoding = sys.argv[1]
+try:
+    if encoding.startswith("@"):
+        data = yaml.safe_load(Path(encoding[1:]).read_text(encoding="utf-8"))
+    elif encoding.startswith(("{", "[")):
+        data = yaml.safe_load(encoding)
+    else:
+        data = parse_kv(encoding)
+    if not isinstance(data, dict) or "_raw_params" in data:
+        raise ValueError("extra vars do not resolve to an inspectable mapping")
+except Exception:
+    raise SystemExit(11)
+
+protected = {"proxmox_lifecycle_intent", "stack_filter", "proxmox_skip_self"}
+raise SystemExit(10 if protected.intersection(data) else 0)
+' "$validated_extra_vars_encoding"
+    ) || inspection_status=$?
+    case "$inspection_status" in
+        0)
+            ;;
+        10)
             usage_error "passthrough cannot override a wrapper-owned variable"
+            ;;
+        *)
+            usage_error "passthrough extra vars must have inspectable effective keys"
             ;;
     esac
 }
@@ -125,13 +167,16 @@ for ((index = 0; index < ${#passthrough[@]}; index++)); do
             ;;
         -e|--extra-vars)
             ((index + 1 < ${#passthrough[@]})) || usage_error "$argument requires a value"
-            reject_protected_extra_vars "${passthrough[index + 1]}"
+            validate_passthrough_extra_vars "${passthrough[index + 1]}"
+            passthrough[index + 1]="$validated_extra_vars_encoding"
             ;;
         --extra-vars=*)
-            reject_protected_extra_vars "${argument#*=}"
+            validate_passthrough_extra_vars "${argument#*=}"
+            passthrough[index]="--extra-vars=$validated_extra_vars_encoding"
             ;;
         -e*)
-            reject_protected_extra_vars "${argument#-e}"
+            validate_passthrough_extra_vars "${argument#-e}"
+            passthrough[index]="-e$validated_extra_vars_encoding"
             ;;
     esac
 done

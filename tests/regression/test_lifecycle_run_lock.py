@@ -6,6 +6,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -19,6 +20,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNNER = REPO_ROOT / "run.sh"
 LOCK_RELATIVE_PATH = Path(".ansible/homelab-iac-lifecycle.lock")
+COORDINATOR_RELATIVE_PATH = Path(".ansible/homelab-iac-lifecycle.lock.metadata")
 ANSIBLE_PLAYBOOK = "uv run --locked ansible-playbook".split()
 LIVE_EXECUTION_LIBRARY = REPO_ROOT / "scripts/lib/live-execution.sh"
 
@@ -35,6 +37,9 @@ import time
 from pathlib import Path
 
 capture = Path(os.environ["LIFECYCLE_TEST_CAPTURE"])
+if sys.argv[1:4] == ["run", "--locked", "python"]:
+    real_uv = os.environ["LIFECYCLE_TEST_REAL_UV"]
+    os.execv(real_uv, [real_uv, *sys.argv[1:]])
 capture.write_text(json.dumps({
     "argv": sys.argv[1:],
     "marker": os.environ.get("HOMELAB_IAC_LIFECYCLE_WRAPPER"),
@@ -72,6 +77,7 @@ def wrapper_environment(temp_root: Path, *, mode: str = "success") -> dict[str, 
             "PATH": f"{bin_dir}:{env['PATH']}",
             "LIFECYCLE_TEST_CAPTURE": str(temp_root / "capture.json"),
             "LIFECYCLE_TEST_MODE": mode,
+            "LIFECYCLE_TEST_REAL_UV": shutil.which("uv", path=env["PATH"]) or "uv",
         }
     )
     return env
@@ -134,6 +140,8 @@ def assert_wrapper_routes_and_propagates() -> None:
         (("--", "--diff", "-e", "harmless=true"), "site.yml", ("--diff", "-e", "harmless=true")),
         (("--", "--extra-vars=harmless=true"), "site.yml", ("--extra-vars=harmless=true",)),
         (("--", "-eharmless=true"), "site.yml", ("-eharmless=true",)),
+        (("--", "-e", '{"harmless": true}'), "site.yml", ("-e", '{"harmless": true}')),
+        (("--", "--extra-vars", "{harmless: true}"), "site.yml", ("--extra-vars", "{harmless: true}")),
         (("provision", "--limit", "collie"), "playbooks/provision-lxcs.yml", ("--limit", "collie")),
         (("configure", "--limit", "collie"), "playbooks/configure-lxcs.yml", ("--limit", "collie")),
     )
@@ -179,9 +187,7 @@ def assert_wrapper_routes_and_propagates() -> None:
         ("--", "--start-a=Apply lifecycle actions"),
         ("--", "-e", "proxmox_lifecycle_intent=configure_only"),
         ("--", "--extra-vars={\"proxmox_lifecycle_intent\":\"configure_only\"}"),
-        ("--", "-e", "@vars.yml"),
         ("--", "-e", "{\"proxmox_\\u006cifecycle_intent\":\"configure_only\"}"),
-        ("--", "--extra-vars", "{harmless: true}"),
         ("--", "-e", "stack_filter=beets"),
         ("--", "-e", "proxmox_skip_self=false"),
         ("provision", "--", "--tags", "configure"),
@@ -198,6 +204,55 @@ def assert_wrapper_routes_and_propagates() -> None:
                     f"protected passthrough {arguments!r} was not rejected:\n"
                     f"{proc.stdout}\n{proc.stderr}"
                 )
+
+    with tempfile.TemporaryDirectory(prefix="lifecycle-wrapper-extra-vars-file-") as temp_dir:
+        temp_root = Path(temp_dir)
+        env = wrapper_environment(temp_root)
+        harmless_vars = temp_root / "harmless-vars.yml"
+        harmless_vars.write_text("harmless: true\n", encoding="utf-8")
+        argument = f"@{harmless_vars}"
+        proc = run_wrapper(env, "--", "-e", argument)
+        capture = json.loads((temp_root / "capture.json").read_text(encoding="utf-8"))
+        if proc.returncode != 0 or capture["argv"][-2:] != ["-e", argument]:
+            raise AssertionError(
+                "harmless file-backed extra vars did not launch unchanged:\n"
+                f"{proc.stdout}\n{proc.stderr}"
+            )
+
+    with tempfile.TemporaryDirectory(prefix="lifecycle-wrapper-protected-vars-file-") as temp_dir:
+        temp_root = Path(temp_dir)
+        env = wrapper_environment(temp_root)
+        protected_vars = temp_root / "protected-vars.yml"
+        protected_vars.write_text("proxmox_lifecycle_intent: configure_only\n", encoding="utf-8")
+        proc = run_wrapper(env, "--", "-e", f"@{protected_vars}")
+        if proc.returncode != 2 or (temp_root / "capture.json").exists():
+            raise AssertionError(
+                "protected file-backed extra vars launched the playbook:\n"
+                f"{proc.stdout}\n{proc.stderr}"
+            )
+
+    with tempfile.TemporaryDirectory(prefix="lifecycle-wrapper-relative-vars-") as temp_dir:
+        temp_root = Path(temp_dir)
+        env = wrapper_environment(temp_root)
+        caller_directory = temp_root / "caller"
+        caller_directory.mkdir()
+        colliding_vars = caller_directory / RUNNER.name
+        colliding_vars.write_text("harmless: true\n", encoding="utf-8")
+        proc = subprocess.run(
+            [str(RUNNER), "--", "-e", f"@{RUNNER.name}"],
+            cwd=caller_directory,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=15,
+        )
+        capture = json.loads((temp_root / "capture.json").read_text(encoding="utf-8"))
+        expected_argument = f"@{colliding_vars.resolve()}"
+        if proc.returncode != 0 or capture["argv"][-2:] != ["-e", expected_argument]:
+            raise AssertionError(
+                "relative extra-vars file inspection and execution identities diverged:\n"
+                f"capture={capture!r}\n{proc.stdout}\n{proc.stderr}"
+            )
 
     for arguments in (("--limit",), ("--stack",), ("--limit", "--check")):
         with tempfile.TemporaryDirectory(prefix="lifecycle-wrapper-missing-value-") as temp_dir:
@@ -216,9 +271,9 @@ def assert_wrapper_routes_and_propagates() -> None:
         first = run_wrapper(env)
         env["LIFECYCLE_TEST_MODE"] = "success"
         second = run_wrapper(env)
-        if first.returncode != 42 or second.returncode != 0:
+        if first.returncode != 1 or second.returncode != 0:
             raise AssertionError(
-                "wrapper did not propagate failure or release the lock afterward:\n"
+                "wrapper did not normalize failure or release the lock afterward:\n"
                 f"first={first.returncode}\n{first.stdout}\n{first.stderr}\n"
                 f"second={second.returncode}\n{second.stdout}\n{second.stderr}"
             )
@@ -366,6 +421,98 @@ def assert_contention_names_a_remaining_shared_holder() -> None:
             if first.poll() is None:
                 os.killpg(first.pid, signal.SIGINT)
             first.communicate(timeout=10)
+
+
+def assert_holder_transitions_are_serialized() -> None:
+    with tempfile.TemporaryDirectory(prefix="lifecycle-holder-publication-") as temp_dir:
+        temp_root = Path(temp_dir)
+        env = wrapper_environment(temp_root, mode="delay")
+        env["LIFECYCLE_TEST_DELAY_SECONDS"] = "0.2"
+        lock_path = Path(env["HOME"]) / LOCK_RELATIVE_PATH
+        coordinator_path = Path(env["HOME"]) / COORDINATOR_RELATIVE_PATH
+        coordinator_path.parent.mkdir(parents=True)
+        with coordinator_path.open("w", encoding="utf-8") as coordinator:
+            fcntl.flock(coordinator, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            holder = subprocess.Popen(
+                [str(RUNNER), "--check"],
+                cwd=REPO_ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            try:
+                deadline = time.monotonic() + 0.75
+                while holder.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                if holder.poll() is not None:
+                    raise AssertionError(
+                        "holder did not enter the metadata-coordinated acquisition boundary"
+                    )
+                with lock_path.open("a", encoding="utf-8") as lock_file:
+                    try:
+                        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError as error:
+                        raise AssertionError(
+                            "holder acquired the live lock before publishing metadata"
+                        ) from error
+            finally:
+                fcntl.flock(coordinator, fcntl.LOCK_UN)
+            stdout, stderr = holder.communicate(timeout=10)
+            if holder.returncode != 0:
+                raise AssertionError(
+                    f"coordinated holder did not complete:\n{stdout}\n{stderr}"
+                )
+
+    with tempfile.TemporaryDirectory(prefix="lifecycle-holder-removal-") as temp_dir:
+        temp_root = Path(temp_dir)
+        env = wrapper_environment(temp_root, mode="delay")
+        env["LIFECYCLE_TEST_DELAY_SECONDS"] = "0.2"
+        lock_path = Path(env["HOME"]) / LOCK_RELATIVE_PATH
+        coordinator_path = Path(env["HOME"]) / COORDINATOR_RELATIVE_PATH
+        holder = subprocess.Popen(
+            [str(RUNNER), "--check"],
+            cwd=REPO_ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        capture_path = temp_root / "capture.json"
+        deadline = time.monotonic() + 10
+        while not capture_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if not capture_path.exists():
+            holder.kill()
+            raise AssertionError("shared holder never launched for cleanup ordering")
+        child_pid = json.loads(capture_path.read_text(encoding="utf-8"))["pid"]
+
+        with coordinator_path.open("a", encoding="utf-8") as coordinator:
+            fcntl.flock(coordinator, fcntl.LOCK_EX)
+            deadline = time.monotonic() + 10
+            while Path(f"/proc/{child_pid}").exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if holder.poll() is not None:
+                raise AssertionError("holder removed metadata before entering coordinated cleanup")
+            with lock_path.open("a", encoding="utf-8") as lock_file:
+                try:
+                    fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    pass
+                else:
+                    raise AssertionError("holder unlocked before coordinated metadata cleanup")
+            holder_records = list(Path(f"{lock_path}.holders").glob("*.holder"))
+            if len(holder_records) != 1 or f"parent_pid={holder.pid}" not in holder_records[0].read_text(
+                encoding="utf-8"
+            ):
+                raise AssertionError("coordinated cleanup lacks an active parent holder record")
+            fcntl.flock(coordinator, fcntl.LOCK_UN)
+
+        stdout, stderr = holder.communicate(timeout=10)
+        if holder.returncode != 0:
+            raise AssertionError(f"holder cleanup failed:\n{stdout}\n{stderr}")
+        if list(Path(f"{lock_path}.holders").glob("*.holder")):
+            raise AssertionError("holder cleanup left invocation metadata behind")
 
 
 def assert_live_execution_responsibilities_are_sourced() -> None:
@@ -626,6 +773,7 @@ def main() -> int:
         assert_contention_fails_fast()
         assert_lock_class_follows_operation_class()
         assert_contention_names_a_remaining_shared_holder()
+        assert_holder_transitions_are_serialized()
         assert_live_execution_responsibilities_are_sourced()
         assert_mismatched_prerequisite_layers_prevent_execution()
         assert_check_mode_opt_out_audit_is_unchanged()
