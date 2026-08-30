@@ -28,9 +28,11 @@ def make_fake_uv(bin_dir: Path) -> None:
     fake_uv = bin_dir / "uv"
     fake_uv.write_text(
         """#!/usr/bin/env python3
+import fcntl
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -52,6 +54,24 @@ if mode == "sleep":
         time.sleep(1)
 if mode == "delay":
     time.sleep(float(os.environ["LIFECYCLE_TEST_DELAY_SECONDS"]))
+if mode in ("cleanup_contention_success", "cleanup_contention_fail"):
+    metadata_path = Path(os.environ["HOME"]) / ".ansible/homelab-iac-lifecycle.lock.metadata"
+    metadata_file = metadata_path.open("a+", encoding="utf-8")
+    fcntl.flock(metadata_file, fcntl.LOCK_EX)
+    holder = subprocess.Popen(
+        ["sleep", "1.4"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        pass_fds=(metadata_file.fileno(),),
+    )
+    metadata_file.seek(0)
+    metadata_file.truncate()
+    metadata_file.write(f"pid={holder.pid} worktree=/controlled/cleanup-holder\\n")
+    metadata_file.flush()
+    metadata_file.close()
+    if mode == "cleanup_contention_fail":
+        raise SystemExit(42)
 if mode == "fail":
     raise SystemExit(42)
 """,
@@ -87,6 +107,16 @@ def run_wrapper(env: dict[str, str], *arguments: str) -> subprocess.CompletedPro
         env=env,
         timeout=15,
     )
+
+
+def process_has_open_path(pid: int, expected_path: Path) -> bool:
+    try:
+        return any(
+            descriptor.resolve() == expected_path
+            for descriptor in Path(f"/proc/{pid}/fd").iterdir()
+        )
+    except (FileNotFoundError, PermissionError):
+        return False
 
 
 def assert_command_grammar_reports_help_and_usage_errors() -> None:
@@ -548,16 +578,23 @@ def assert_metadata_transitions_serialize_compatible_callers() -> None:
                 text=True,
                 env=env,
             )
-            deadline = time.monotonic() + 0.5
-            while caller.poll() is None and time.monotonic() < deadline:
-                if (temp_root / "capture.json").exists():
-                    caller.kill()
-                    raise AssertionError(
-                        "compatible caller bypassed the metadata transition boundary"
-                    )
-                time.sleep(0.05)
-            if caller.poll() is not None:
+            deadline = time.monotonic() + 2
+            while (
+                caller.poll() is None
+                and not process_has_open_path(caller.pid, metadata_path)
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.005)
+            if caller.poll() is not None or not process_has_open_path(
+                caller.pid, metadata_path
+            ):
                 raise AssertionError("compatible caller rejected metadata serialization")
+            time.sleep(0.04)
+            if (temp_root / "capture.json").exists():
+                caller.kill()
+                raise AssertionError(
+                    "compatible caller bypassed the metadata transition boundary"
+                )
             fcntl.flock(metadata_file, fcntl.LOCK_UN)
         stdout, stderr = caller.communicate(timeout=10)
         if caller.returncode != 0 or not (temp_root / "capture.json").exists():
@@ -590,7 +627,7 @@ def assert_metadata_coordination_has_a_bounded_failure() -> None:
                 start_new_session=True,
             )
             try:
-                stdout, stderr = caller.communicate(timeout=2.5)
+                stdout, stderr = caller.communicate(timeout=1)
             except subprocess.TimeoutExpired as error:
                 os.killpg(caller.pid, signal.SIGKILL)
                 caller.communicate(timeout=10)
@@ -599,7 +636,8 @@ def assert_metadata_coordination_has_a_bounded_failure() -> None:
         output = f"{stdout}\n{stderr}"
         if (
             caller.returncode != 75
-            or elapsed >= 2
+            or elapsed < 0.05
+            or elapsed >= 0.5
             or f"pid={os.getpid()}" not in output
             or "worktree=/controlled/metadata-holder" not in output
             or (temp_root / "capture.json").exists()
@@ -608,6 +646,39 @@ def assert_metadata_coordination_has_a_bounded_failure() -> None:
                 f"bounded metadata failure lacked active holder identity ({elapsed:.2f}s):\n"
                 f"{output}"
             )
+
+
+def assert_cleanup_metadata_contention_preserves_playbook_status() -> None:
+    for mode, expected_status in (
+        ("cleanup_contention_success", 0),
+        ("cleanup_contention_fail", 1),
+    ):
+        with tempfile.TemporaryDirectory(prefix="lifecycle-cleanup-contention-") as temp_dir:
+            temp_root = Path(temp_dir)
+            env = wrapper_environment(temp_root, mode=mode)
+            result = run_wrapper(env)
+            output = f"{result.stdout}\n{result.stderr}"
+            holder_records = list(
+                (Path(env["HOME"]) / f"{LOCK_RELATIVE_PATH}.holders").glob("*.holder")
+            )
+            lock_path = Path(env["HOME"]) / LOCK_RELATIVE_PATH
+            with lock_path.open("a", encoding="utf-8") as lock_file:
+                try:
+                    fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as error:
+                    raise AssertionError(
+                        f"cleanup contention left the lifecycle lock held for {mode}"
+                    ) from error
+            if (
+                result.returncode != expected_status
+                or not (temp_root / "capture.json").exists()
+                or holder_records
+                or "coordinates" in output
+            ):
+                raise AssertionError(
+                    f"cleanup contention changed the normalized playbook result for {mode}:\n"
+                    f"returncode={result.returncode}\n{output}"
+                )
 
 
 def assert_holder_metadata_covers_lock_lifetime() -> None:
@@ -940,6 +1011,7 @@ def main() -> int:
         assert_contention_names_a_remaining_shared_holder()
         assert_contention_ignores_a_completed_holder_during_turnover()
         assert_metadata_transitions_serialize_compatible_callers()
+        assert_cleanup_metadata_contention_preserves_playbook_status()
         assert_metadata_coordination_has_a_bounded_failure()
         assert_holder_metadata_covers_lock_lifetime()
         assert_live_execution_responsibilities_are_sourced()

@@ -5,7 +5,7 @@ readonly LIVE_EXECUTION_PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../..
 readonly LIVE_EXECUTION_LOCK_FILE="${HOME}/.ansible/homelab-iac-lifecycle.lock"
 readonly LIVE_EXECUTION_HOLDER_DIR="${LIVE_EXECUTION_LOCK_FILE}.holders"
 readonly LIVE_EXECUTION_METADATA_LOCK_FILE="${LIVE_EXECUTION_LOCK_FILE}.metadata"
-readonly LIVE_EXECUTION_METADATA_LOCK_WAIT_SECONDS=1
+readonly LIVE_EXECUTION_METADATA_LOCK_WAIT_SECONDS=0.1
 readonly LIVE_EXECUTION_WRAPPER_MARKER="HOMELAB_IAC_LIFECYCLE_WRAPPER"
 
 write_live_holder_record() {
@@ -63,7 +63,7 @@ report_live_metadata_holder() {
     local holder_pid
     local holder_worktree
     local attempt
-    for attempt in {1..20}; do
+    for attempt in {1..3}; do
         holder_record="$(sed -n '1p' "$LIVE_EXECUTION_METADATA_LOCK_FILE")"
         holder_pid="${holder_record%% *}"
         holder_pid="${holder_pid#pid=}"
@@ -72,7 +72,7 @@ report_live_metadata_holder() {
             echo "pid=$holder_pid worktree=$holder_worktree" >&2
             return 0
         fi
-        sleep 0.01
+        sleep 0.005
     done
     return 1
 }
@@ -192,12 +192,15 @@ run_live_playbook() {
         exec uv run --locked ansible-playbook "$playbook" "$@"
     ) || status=1
     exec {live_execution_metadata_lock_fd}>>"$LIVE_EXECUTION_METADATA_LOCK_FILE"
-    if ! acquire_live_metadata_lock "$live_execution_metadata_lock_fd"; then
+    if ! flock --exclusive \
+        --wait "$LIVE_EXECUTION_METADATA_LOCK_WAIT_SECONDS" \
+        "$live_execution_metadata_lock_fd"; then
         exec {live_execution_lock_fd}>&-
         rm -f -- "$holder_file"
         exec {live_execution_metadata_lock_fd}>&-
-        return 75
+        return "$status"
     fi
+    write_live_metadata_holder_record
     exec {live_execution_lock_fd}>&-
     rm -f -- "$holder_file"
     exec {live_execution_metadata_lock_fd}>&-
