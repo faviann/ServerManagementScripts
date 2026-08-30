@@ -6,7 +6,6 @@ from __future__ import annotations
 import fcntl
 import json
 import os
-import shutil
 import signal
 import subprocess
 import sys
@@ -20,7 +19,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNNER = REPO_ROOT / "run.sh"
 LOCK_RELATIVE_PATH = Path(".ansible/homelab-iac-lifecycle.lock")
-COORDINATOR_RELATIVE_PATH = Path(".ansible/homelab-iac-lifecycle.lock.metadata")
+COORDINATOR_RELATIVE_PATH = Path(".ansible/homelab-iac-lifecycle.lock.coordinator")
 ANSIBLE_PLAYBOOK = "uv run --locked ansible-playbook".split()
 LIVE_EXECUTION_LIBRARY = REPO_ROOT / "scripts/lib/live-execution.sh"
 
@@ -37,9 +36,6 @@ import time
 from pathlib import Path
 
 capture = Path(os.environ["LIFECYCLE_TEST_CAPTURE"])
-if sys.argv[1:4] == ["run", "--locked", "python"]:
-    real_uv = os.environ["LIFECYCLE_TEST_REAL_UV"]
-    os.execv(real_uv, [real_uv, *sys.argv[1:]])
 capture.write_text(json.dumps({
     "argv": sys.argv[1:],
     "marker": os.environ.get("HOMELAB_IAC_LIFECYCLE_WRAPPER"),
@@ -77,7 +73,6 @@ def wrapper_environment(temp_root: Path, *, mode: str = "success") -> dict[str, 
             "PATH": f"{bin_dir}:{env['PATH']}",
             "LIFECYCLE_TEST_CAPTURE": str(temp_root / "capture.json"),
             "LIFECYCLE_TEST_MODE": mode,
-            "LIFECYCLE_TEST_REAL_UV": shutil.which("uv", path=env["PATH"]) or "uv",
         }
     )
     return env
@@ -107,43 +102,99 @@ def assert_command_grammar_reports_help_and_usage_errors() -> None:
         ):
             raise AssertionError(f"help did not describe lifecycle operations:\n{help_output}")
 
-        for arguments in (("unknown-operation",), ("--unknown-option",)):
+        sensitive_placeholder = "PLACEHOLDER_SENSITIVE_VALUE_206"
+        for arguments in (
+            (f"unknown-{sensitive_placeholder}",),
+            (f"--unknown={sensitive_placeholder}",),
+        ):
             result = run_wrapper(env, *arguments)
-            if result.returncode != 2:
+            output = f"{result.stdout}\n{result.stderr}"
+            if result.returncode != 2 or sensitive_placeholder in output:
                 raise AssertionError(
-                    f"invalid input {arguments!r} returned {result.returncode}, expected 2:\n"
-                    f"{result.stdout}\n{result.stderr}"
+                    "invalid input did not return 2 with non-disclosing diagnostics:\n"
+                    f"returncode={result.returncode}\n{output}"
                 )
 
 
 def assert_wrapper_routes_and_propagates() -> None:
+    full_defaults = (
+        "-e",
+        "proxmox_lifecycle_intent=full",
+        "-e",
+        "proxmox_skip_self=true",
+        '--extra-vars={"stack_filter":null}',
+    )
+    provision_defaults = (
+        "-e",
+        "proxmox_lifecycle_intent=provision_only",
+        "-e",
+        "proxmox_skip_self=true",
+        '--extra-vars={"stack_filter":null}',
+    )
+    configure_defaults = (
+        "-e",
+        "proxmox_lifecycle_intent=configure_only",
+        "-e",
+        "proxmox_skip_self=true",
+        '--extra-vars={"stack_filter":null}',
+    )
     cases = (
-        ((), "site.yml", ()),
-        (("full",), "site.yml", ()),
-        (("--limit", "cap_docker"), "site.yml", ("--limit", "cap_docker")),
-        (("--limit", "collie,portal,!workstation"), "site.yml", ("--limit", "collie,portal,!workstation")),
-        (("--check",), "site.yml", ("--check",)),
-        (("--stack", "beets"), "site.yml", ("-e", "stack_filter=beets")),
+        ((), "site.yml", full_defaults),
+        (("full",), "site.yml", full_defaults),
+        (("--limit", "cap_docker"), "site.yml", ("--limit", "cap_docker", *full_defaults)),
+        (("--limit", "collie,portal,!workstation"), "site.yml", ("--limit", "collie,portal,!workstation", *full_defaults)),
+        (("--check",), "site.yml", ("--check", *full_defaults)),
+        (
+            ("--stack", "beets"),
+            "site.yml",
+            (
+                "-e",
+                "proxmox_lifecycle_intent=full",
+                "-e",
+                "proxmox_skip_self=true",
+                "-e",
+                "stack_filter=beets",
+            ),
+        ),
         (
             ("--include-controller",),
             "site.yml",
-            ("--limit", "workstation", "-e", "proxmox_skip_self=false"),
+            (
+                "--limit",
+                "workstation",
+                "-e",
+                "proxmox_lifecycle_intent=full",
+                "-e",
+                "proxmox_skip_self=false",
+                '--extra-vars={"stack_filter":null}',
+            ),
         ),
         (
             ("--include-controller", "--limit", "portal"),
             "site.yml",
-            ("--limit", "workstation", "-e", "proxmox_skip_self=false"),
+            (
+                "--limit",
+                "workstation",
+                "-e",
+                "proxmox_lifecycle_intent=full",
+                "-e",
+                "proxmox_skip_self=false",
+                '--extra-vars={"stack_filter":null}',
+            ),
         ),
-        (("-v",), "site.yml", ("-v",)),
-        (("-vv",), "site.yml", ("-vv",)),
-        (("-vvv",), "site.yml", ("-vvv",)),
-        (("--", "--diff", "-e", "harmless=true"), "site.yml", ("--diff", "-e", "harmless=true")),
-        (("--", "--extra-vars=harmless=true"), "site.yml", ("--extra-vars=harmless=true",)),
-        (("--", "-eharmless=true"), "site.yml", ("-eharmless=true",)),
-        (("--", "-e", '{"harmless": true}'), "site.yml", ("-e", '{"harmless": true}')),
-        (("--", "--extra-vars", "{harmless: true}"), "site.yml", ("--extra-vars", "{harmless: true}")),
-        (("provision", "--limit", "collie"), "playbooks/provision-lxcs.yml", ("--limit", "collie")),
-        (("configure", "--limit", "collie"), "playbooks/configure-lxcs.yml", ("--limit", "collie")),
+        (("-v",), "site.yml", ("-v", *full_defaults)),
+        (("-vv",), "site.yml", ("-vv", *full_defaults)),
+        (("-vvv",), "site.yml", ("-vvv", *full_defaults)),
+        (("--", "--diff", "-e", "harmless=true"), "site.yml", ("--diff", "-e", "harmless=true", *full_defaults)),
+        (("--", "--extra-vars=harmless=true"), "site.yml", ("--extra-vars=harmless=true", *full_defaults)),
+        (("--", "-eharmless=true"), "site.yml", ("-eharmless=true", *full_defaults)),
+        (("--", "-e", '{"harmless": true}'), "site.yml", ("-e", '{"harmless": true}', *full_defaults)),
+        (("--", "--extra-vars", "{harmless: true}"), "site.yml", ("--extra-vars", "{harmless: true}", *full_defaults)),
+        (("--", "-e", "@vaulted-vars.yml"), "site.yml", ("-e", "@vaulted-vars.yml", *full_defaults)),
+        (("--", "-e", "proxmox_lifecycle_intent=configure_only"), "site.yml", ("-e", "proxmox_lifecycle_intent=configure_only", *full_defaults)),
+        (("--", '--extra-vars={"stack_filter":"beets","proxmox_skip_self":false}'), "site.yml", ('--extra-vars={"stack_filter":"beets","proxmox_skip_self":false}', *full_defaults)),
+        (("provision", "--limit", "collie"), "playbooks/provision-lxcs.yml", ("--limit", "collie", *provision_defaults)),
+        (("configure", "--limit", "collie"), "playbooks/configure-lxcs.yml", ("--limit", "collie", *configure_defaults)),
     )
     for arguments, playbook, passthrough in cases:
         with tempfile.TemporaryDirectory(prefix="lifecycle-wrapper-routing-") as temp_dir:
@@ -168,6 +219,24 @@ def assert_wrapper_routes_and_propagates() -> None:
                     f"{proc.stdout}\n{proc.stderr}"
                 )
 
+    with tempfile.TemporaryDirectory(prefix="lifecycle-wrapper-nondisclosure-") as temp_dir:
+        temp_root = Path(temp_dir)
+        env = wrapper_environment(temp_root)
+        sensitive_placeholder = "PLACEHOLDER_SENSITIVE_VALUE_206"
+        extra_var = f"harmless={sensitive_placeholder}"
+        proc = run_wrapper(env, "--", "-e", extra_var)
+        capture = json.loads((temp_root / "capture.json").read_text(encoding="utf-8"))
+        output = f"{proc.stdout}\n{proc.stderr}"
+        if (
+            proc.returncode != 0
+            or extra_var not in capture["argv"]
+            or sensitive_placeholder in output
+        ):
+            raise AssertionError(
+                "passthrough was not forwarded exactly and kept out of terminal prose:\n"
+                f"capture={capture!r}\n{output}"
+            )
+
     protected_passthrough = (
         ("--", "--limit", "portal"),
         ("--", "--check"),
@@ -185,13 +254,7 @@ def assert_wrapper_routes_and_propagates() -> None:
         ("--", "--start-at-task", "Apply lifecycle actions"),
         ("--", "--sta", "Apply lifecycle actions"),
         ("--", "--start-a=Apply lifecycle actions"),
-        ("--", "-e", "proxmox_lifecycle_intent=configure_only"),
-        ("--", "--extra-vars={\"proxmox_lifecycle_intent\":\"configure_only\"}"),
-        ("--", "-e", "{\"proxmox_\\u006cifecycle_intent\":\"configure_only\"}"),
-        ("--", "-e", "stack_filter=beets"),
-        ("--", "-e", "proxmox_skip_self=false"),
         ("provision", "--", "--tags", "configure"),
-        ("configure", "--", "-e", "proxmox_lifecycle_intent=full"),
         ("--check", "--", "--limit", "portal"),
     )
     for arguments in protected_passthrough:
@@ -204,55 +267,6 @@ def assert_wrapper_routes_and_propagates() -> None:
                     f"protected passthrough {arguments!r} was not rejected:\n"
                     f"{proc.stdout}\n{proc.stderr}"
                 )
-
-    with tempfile.TemporaryDirectory(prefix="lifecycle-wrapper-extra-vars-file-") as temp_dir:
-        temp_root = Path(temp_dir)
-        env = wrapper_environment(temp_root)
-        harmless_vars = temp_root / "harmless-vars.yml"
-        harmless_vars.write_text("harmless: true\n", encoding="utf-8")
-        argument = f"@{harmless_vars}"
-        proc = run_wrapper(env, "--", "-e", argument)
-        capture = json.loads((temp_root / "capture.json").read_text(encoding="utf-8"))
-        if proc.returncode != 0 or capture["argv"][-2:] != ["-e", argument]:
-            raise AssertionError(
-                "harmless file-backed extra vars did not launch unchanged:\n"
-                f"{proc.stdout}\n{proc.stderr}"
-            )
-
-    with tempfile.TemporaryDirectory(prefix="lifecycle-wrapper-protected-vars-file-") as temp_dir:
-        temp_root = Path(temp_dir)
-        env = wrapper_environment(temp_root)
-        protected_vars = temp_root / "protected-vars.yml"
-        protected_vars.write_text("proxmox_lifecycle_intent: configure_only\n", encoding="utf-8")
-        proc = run_wrapper(env, "--", "-e", f"@{protected_vars}")
-        if proc.returncode != 2 or (temp_root / "capture.json").exists():
-            raise AssertionError(
-                "protected file-backed extra vars launched the playbook:\n"
-                f"{proc.stdout}\n{proc.stderr}"
-            )
-
-    with tempfile.TemporaryDirectory(prefix="lifecycle-wrapper-relative-vars-") as temp_dir:
-        temp_root = Path(temp_dir)
-        env = wrapper_environment(temp_root)
-        caller_directory = temp_root / "caller"
-        caller_directory.mkdir()
-        colliding_vars = caller_directory / RUNNER.name
-        colliding_vars.write_text("harmless: true\n", encoding="utf-8")
-        proc = subprocess.run(
-            [str(RUNNER), "--", "-e", f"@{RUNNER.name}"],
-            cwd=caller_directory,
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=15,
-        )
-        capture = json.loads((temp_root / "capture.json").read_text(encoding="utf-8"))
-        expected_argument = f"@{colliding_vars.resolve()}"
-        if proc.returncode != 0 or capture["argv"][-2:] != ["-e", expected_argument]:
-            raise AssertionError(
-                "relative extra-vars file inspection and execution identities diverged:\n"
-                f"capture={capture!r}\n{proc.stdout}\n{proc.stderr}"
-            )
 
     for arguments in (("--limit",), ("--stack",), ("--limit", "--check")):
         with tempfile.TemporaryDirectory(prefix="lifecycle-wrapper-missing-value-") as temp_dir:
@@ -423,51 +437,60 @@ def assert_contention_names_a_remaining_shared_holder() -> None:
             first.communicate(timeout=10)
 
 
-def assert_holder_transitions_are_serialized() -> None:
-    with tempfile.TemporaryDirectory(prefix="lifecycle-holder-publication-") as temp_dir:
+def assert_metadata_coordination_is_fail_fast() -> None:
+    with tempfile.TemporaryDirectory(prefix="lifecycle-metadata-contention-") as temp_dir:
         temp_root = Path(temp_dir)
-        env = wrapper_environment(temp_root, mode="delay")
-        env["LIFECYCLE_TEST_DELAY_SECONDS"] = "0.2"
-        lock_path = Path(env["HOME"]) / LOCK_RELATIVE_PATH
+        env = wrapper_environment(temp_root)
         coordinator_path = Path(env["HOME"]) / COORDINATOR_RELATIVE_PATH
         coordinator_path.parent.mkdir(parents=True)
-        with coordinator_path.open("w", encoding="utf-8") as coordinator:
-            fcntl.flock(coordinator, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            holder = subprocess.Popen(
-                [str(RUNNER), "--check"],
-                cwd=REPO_ROOT,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=env,
-            )
-            try:
-                deadline = time.monotonic() + 0.75
-                while holder.poll() is None and time.monotonic() < deadline:
-                    time.sleep(0.05)
-                if holder.poll() is not None:
-                    raise AssertionError(
-                        "holder did not enter the metadata-coordinated acquisition boundary"
-                    )
-                with lock_path.open("a", encoding="utf-8") as lock_file:
-                    try:
-                        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    except BlockingIOError as error:
-                        raise AssertionError(
-                            "holder acquired the live lock before publishing metadata"
-                        ) from error
-            finally:
-                fcntl.flock(coordinator, fcntl.LOCK_UN)
-            stdout, stderr = holder.communicate(timeout=10)
-            if holder.returncode != 0:
+        ready_path = temp_root / "coordinator-ready"
+        coordinator = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import os, pathlib, sys, time; "
+                    "pathlib.Path(sys.argv[1]).symlink_to("
+                    "f'pid={os.getpid()} worktree=/controlled/coordinator'); "
+                    "pathlib.Path(sys.argv[2]).touch(); time.sleep(30)"
+                ),
+                str(coordinator_path),
+                str(ready_path),
+            ],
+            cwd=REPO_ROOT,
+        )
+        try:
+            deadline = time.monotonic() + 10
+            while not ready_path.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if not ready_path.exists():
+                raise AssertionError("metadata coordinator never became ready")
+            start = time.monotonic()
+            proc = run_wrapper(env)
+            elapsed = time.monotonic() - start
+            output = f"{proc.stdout}\n{proc.stderr}"
+            if (
+                proc.returncode != 75
+                or elapsed >= 2
+                or f"pid={coordinator.pid}" not in output
+                or "worktree=/controlled/coordinator" not in output
+                or (temp_root / "capture.json").exists()
+            ):
                 raise AssertionError(
-                    f"coordinated holder did not complete:\n{stdout}\n{stderr}"
+                    f"metadata contention did not fail fast with holder identity ({elapsed:.2f}s):\n"
+                    f"{output}"
                 )
+        finally:
+            coordinator.terminate()
+            coordinator.wait(timeout=10)
+            coordinator_path.unlink(missing_ok=True)
 
-    with tempfile.TemporaryDirectory(prefix="lifecycle-holder-removal-") as temp_dir:
+
+def assert_holder_metadata_covers_lock_lifetime() -> None:
+    with tempfile.TemporaryDirectory(prefix="lifecycle-holder-lifetime-") as temp_dir:
         temp_root = Path(temp_dir)
         env = wrapper_environment(temp_root, mode="delay")
-        env["LIFECYCLE_TEST_DELAY_SECONDS"] = "0.2"
+        env["LIFECYCLE_TEST_DELAY_SECONDS"] = "0.6"
         lock_path = Path(env["HOME"]) / LOCK_RELATIVE_PATH
         coordinator_path = Path(env["HOME"]) / COORDINATOR_RELATIVE_PATH
         holder = subprocess.Popen(
@@ -482,37 +505,32 @@ def assert_holder_transitions_are_serialized() -> None:
         deadline = time.monotonic() + 10
         while not capture_path.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
-        if not capture_path.exists():
+        holder_records = list(Path(f"{lock_path}.holders").glob("*.holder"))
+        if not capture_path.exists() or len(holder_records) != 1:
             holder.kill()
-            raise AssertionError("shared holder never launched for cleanup ordering")
-        child_pid = json.loads(capture_path.read_text(encoding="utf-8"))["pid"]
-
-        with coordinator_path.open("a", encoding="utf-8") as coordinator:
-            fcntl.flock(coordinator, fcntl.LOCK_EX)
-            deadline = time.monotonic() + 10
-            while Path(f"/proc/{child_pid}").exists() and time.monotonic() < deadline:
-                time.sleep(0.05)
-            if holder.poll() is not None:
-                raise AssertionError("holder removed metadata before entering coordinated cleanup")
-            with lock_path.open("a", encoding="utf-8") as lock_file:
-                try:
-                    fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    pass
-                else:
-                    raise AssertionError("holder unlocked before coordinated metadata cleanup")
-            holder_records = list(Path(f"{lock_path}.holders").glob("*.holder"))
-            if len(holder_records) != 1 or f"parent_pid={holder.pid}" not in holder_records[0].read_text(
-                encoding="utf-8"
-            ):
-                raise AssertionError("coordinated cleanup lacks an active parent holder record")
-            fcntl.flock(coordinator, fcntl.LOCK_UN)
-
-        stdout, stderr = holder.communicate(timeout=10)
+            raise AssertionError("held live lock lacked invocation metadata")
+        with lock_path.open("a", encoding="utf-8") as lock_file:
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                pass
+            else:
+                holder.kill()
+                raise AssertionError("shared holder metadata existed without its live lock")
+        coordinator_path.symlink_to(
+            f"pid={os.getpid()} worktree=/controlled/cleanup-coordinator"
+        )
+        try:
+            stdout, stderr = holder.communicate(timeout=10)
+        finally:
+            coordinator_path.unlink(missing_ok=True)
         if holder.returncode != 0:
-            raise AssertionError(f"holder cleanup failed:\n{stdout}\n{stderr}")
+            raise AssertionError(
+                "cleanup consulted the contended coordinator or changed the playbook result:\n"
+                f"{stdout}\n{stderr}"
+            )
         if list(Path(f"{lock_path}.holders").glob("*.holder")):
-            raise AssertionError("holder cleanup left invocation metadata behind")
+            raise AssertionError("holder metadata outlived its released lock")
 
 
 def assert_live_execution_responsibilities_are_sourced() -> None:
@@ -623,6 +641,36 @@ def assert_check_mode_opt_out_audit_is_unchanged() -> None:
     module_source = (REPO_ROOT / "library/proxmox_pct.py").read_text(encoding="utf-8")
     if "supports_check_mode=True" not in module_source:
         raise AssertionError("library/proxmox_pct.py must declare check-mode support")
+
+
+def assert_null_stack_filter_preserves_all_stack_behavior() -> None:
+    discover_tasks = yaml.safe_load(
+        (
+            REPO_ROOT
+            / "playbooks/roles/config/lxc_stack_sync/tasks/discover.yml"
+        ).read_text(encoding="utf-8")
+    )
+    filter_task_names = {
+        "Fail when stack_filter is used but stacks source is absent",
+        "Assert stack_filter names a known stack",
+        "Scope desired stacks to stack_filter",
+        "Suppress stale stack list when stack_filter is active",
+        "Scope per-host find results to stack_filter",
+    }
+    actual = {
+        task["name"]: task.get("when")
+        for task in discover_tasks
+        if task.get("name") in filter_task_names
+    }
+    expected = {
+        name: "stack_filter is defined and stack_filter is not none"
+        for name in filter_task_names
+    }
+    if actual != expected:
+        raise AssertionError(
+            "canonical null must bypass every stack-filter-specific role task:\n"
+            f"expected={expected!r}\nactual={actual!r}"
+        )
 
 
 def assert_lock_decision_amends_linear_execution_adr() -> None:
@@ -773,10 +821,12 @@ def main() -> int:
         assert_contention_fails_fast()
         assert_lock_class_follows_operation_class()
         assert_contention_names_a_remaining_shared_holder()
-        assert_holder_transitions_are_serialized()
+        assert_metadata_coordination_is_fail_fast()
+        assert_holder_metadata_covers_lock_lifetime()
         assert_live_execution_responsibilities_are_sourced()
         assert_mismatched_prerequisite_layers_prevent_execution()
         assert_check_mode_opt_out_audit_is_unchanged()
+        assert_null_stack_filter_preserves_all_stack_behavior()
         assert_lock_decision_amends_linear_execution_adr()
         assert_interrupt_releases_lock()
         assert_wrapper_crash_keeps_child_lock()
