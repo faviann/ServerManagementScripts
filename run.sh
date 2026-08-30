@@ -39,7 +39,7 @@ inspect_passthrough_short_options() {
         short_option="${short_options:0:1}"
         short_options="${short_options:1}"
         case "$short_option" in
-            C|i|l|t)
+            C|h|i|l|t)
                 return 1
                 ;;
             B|M|P|T|c|e|f|u)
@@ -128,12 +128,23 @@ done
 for ((index = 0; index < ${#passthrough[@]}; index++)); do
     argument="${passthrough[index]}"
     case "$argument" in
-        --lim*|--ch*|--tag*|--sk*|--inv*|--sta*)
+        --lim*|--inv*|--ta*|--sk*|--ch*|--sta*|--sy*|--h*|--vers*|\
+        --list-h*|--list-tag*|--list-tas*|--ste*)
             usage_error \
                 "passthrough cannot set target selection, lifecycle intent, or check mode"
             ;;
         -e|--extra-vars)
             ((index + 1 < ${#passthrough[@]})) || usage_error "$argument requires a value"
+            ((index += 1))
+            ;;
+        --private-key|--key-file|--user|--connection|--timeout|\
+        --ssh-common-args|--sftp-extra-args|--scp-extra-args|--ssh-extra-args|\
+        --connection-password-file|--conn-pass-file|\
+        --become-method|--become-user|\
+        --become-password-file|--become-pass-file|\
+        --vault-id|--vault-password-file|--vault-pass-file|\
+        --forks|--module-path)
+            ((index + 1 < ${#passthrough[@]})) || usage_error "long option requires a value"
             ((index += 1))
             ;;
         --extra-vars=*|-e?*)
@@ -149,6 +160,9 @@ for ((index = 0; index < ${#passthrough[@]}; index++)); do
                 ((index + 1 < ${#passthrough[@]})) || usage_error "short option requires a value"
                 ((index += 1))
             fi
+            ;;
+        *)
+            usage_error "passthrough positional operands are not allowed"
             ;;
     esac
 done

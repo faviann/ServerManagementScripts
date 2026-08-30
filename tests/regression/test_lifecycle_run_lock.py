@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stderr, redirect_stdout
 import fcntl
+from io import StringIO
 import json
 import os
 import signal
@@ -13,6 +15,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from ansible.cli.playbook import PlaybookCLI
 import yaml
 
 
@@ -117,6 +120,47 @@ def process_has_open_path(pid: int, expected_path: Path) -> bool:
         )
     except (FileNotFoundError, PermissionError):
         return False
+
+
+def accepted_protected_long_options() -> tuple[tuple[str, bool], ...]:
+    protected_options = (
+        ("--limit", True),
+        ("--inventory", True),
+        ("--inventory-file", True),
+        ("--tags", True),
+        ("--skip-tags", True),
+        ("--check", False),
+        ("--start-at-task", True),
+        ("--syntax-check", False),
+        ("--list-hosts", False),
+        ("--list-tags", False),
+        ("--list-tasks", False),
+        ("--step", False),
+        ("--help", False),
+        ("--version", False),
+    )
+    candidates = {
+        (option[:length], requires_value)
+        for option, requires_value in protected_options
+        for length in range(3, len(option) + 1)
+    }
+    cli = PlaybookCLI(["ansible-playbook"])
+    cli.init_parser()
+    accepted: list[tuple[str, bool]] = []
+    for candidate, requires_value in sorted(candidates):
+        arguments = [candidate]
+        if requires_value:
+            arguments.append("fixture-value")
+        arguments.append("site.yml")
+        try:
+            with redirect_stderr(StringIO()), redirect_stdout(StringIO()):
+                cli.parser.parse_args(arguments)
+        except SystemExit as error:
+            if error.code == 0:
+                accepted.append((candidate, requires_value))
+            continue
+        accepted.append((candidate, requires_value))
+    return tuple(accepted)
 
 
 def assert_prerequisite_plays_survive_lifecycle_limits() -> None:
@@ -287,6 +331,12 @@ def assert_wrapper_routes_and_propagates() -> None:
         (("--", "-e", "proxmox_lifecycle_intent=configure_only"), "site.yml", ("-e", "proxmox_lifecycle_intent=configure_only", *full_defaults)),
         (("--", "-e", "prerequisite_target_pattern=workstation"), "site.yml", ("-e", "prerequisite_target_pattern=workstation", *full_defaults)),
         (("--", '--extra-vars={"stack_filter":"beets","proxmox_skip_self":false}'), "site.yml", ('--extra-vars={"stack_filter":"beets","proxmox_skip_self":false}', *full_defaults)),
+        (("--", "--private-key", "/tmp/fixture-key"), "site.yml", ("--private-key", "/tmp/fixture-key", *full_defaults)),
+        (("--", "--private-key=/tmp/fixture-key"), "site.yml", ("--private-key=/tmp/fixture-key", *full_defaults)),
+        (("--", "--connection", "local"), "site.yml", ("--connection", "local", *full_defaults)),
+        (("--", "--connection=local"), "site.yml", ("--connection=local", *full_defaults)),
+        (("--", "--forks", "2"), "site.yml", ("--forks", "2", *full_defaults)),
+        (("--", "--forks=2"), "site.yml", ("--forks=2", *full_defaults)),
         (("provision", "--limit", "collie"), "playbooks/provision-lxcs.yml", ("--limit", "collie", *collie_provision_defaults)),
         (("configure", "--limit", "collie"), "playbooks/configure-lxcs.yml", ("--limit", "collie", *collie_configure_defaults)),
         (("configure", "--", "--diff", "-e", "harmless=true"), "playbooks/configure-lxcs.yml", ("--diff", "-e", "harmless=true", *configure_defaults)),
@@ -338,6 +388,11 @@ def assert_wrapper_routes_and_propagates() -> None:
         ("--", "--tags", "provision"),
         ("--", "-t", "configure"),
         ("--", "--tag=configure"),
+        ("--", "--ta", "validation"),
+        ("--", "--help"),
+        ("--", "--version"),
+        ("--", "-h"),
+        ("--", "-Dh"),
         ("--", "--sk", "validation"),
         ("--", "--skip-t", "validation"),
         ("--", "--inventory", "inventory/other.yml"),
@@ -362,6 +417,18 @@ def assert_wrapper_routes_and_propagates() -> None:
         ("--", f"-vl{sensitive_placeholder}"),
         ("--", f"-vt{sensitive_placeholder}"),
         ("--", f"-vi/tmp/{sensitive_placeholder}"),
+        ("--", f"other-{sensitive_placeholder}.yml"),
+        ("provision", "--", "other-playbook.yml"),
+        ("configure", "--", "other-playbook.yml"),
+        ("--check", "--", "other-playbook.yml"),
+    )
+    protected_passthrough += tuple(
+        (
+            "--",
+            option,
+            *((sensitive_placeholder,) if requires_value else ()),
+        )
+        for option, requires_value in accepted_protected_long_options()
     )
     for arguments in protected_passthrough:
         with tempfile.TemporaryDirectory(prefix="lifecycle-wrapper-protection-") as temp_dir:
