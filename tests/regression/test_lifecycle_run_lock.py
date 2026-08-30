@@ -19,7 +19,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNNER = REPO_ROOT / "run.sh"
 LOCK_RELATIVE_PATH = Path(".ansible/homelab-iac-lifecycle.lock")
-COORDINATOR_RELATIVE_PATH = Path(".ansible/homelab-iac-lifecycle.lock.coordinator")
+METADATA_LOCK_RELATIVE_PATH = Path(".ansible/homelab-iac-lifecycle.lock.metadata")
 ANSIBLE_PLAYBOOK = "uv run --locked ansible-playbook".split()
 LIVE_EXECUTION_LIBRARY = REPO_ROOT / "scripts/lib/live-execution.sh"
 
@@ -195,6 +195,7 @@ def assert_wrapper_routes_and_propagates() -> None:
         (("--", '--extra-vars={"stack_filter":"beets","proxmox_skip_self":false}'), "site.yml", ('--extra-vars={"stack_filter":"beets","proxmox_skip_self":false}', *full_defaults)),
         (("provision", "--limit", "collie"), "playbooks/provision-lxcs.yml", ("--limit", "collie", *provision_defaults)),
         (("configure", "--limit", "collie"), "playbooks/configure-lxcs.yml", ("--limit", "collie", *configure_defaults)),
+        (("configure", "--", "--diff", "-e", "harmless=true"), "playbooks/configure-lxcs.yml", ("--diff", "-e", "harmless=true", *configure_defaults)),
     )
     for arguments, playbook, passthrough in cases:
         with tempfile.TemporaryDirectory(prefix="lifecycle-wrapper-routing-") as temp_dir:
@@ -437,53 +438,133 @@ def assert_contention_names_a_remaining_shared_holder() -> None:
             first.communicate(timeout=10)
 
 
-def assert_metadata_coordination_is_fail_fast() -> None:
-    with tempfile.TemporaryDirectory(prefix="lifecycle-metadata-contention-") as temp_dir:
+def assert_contention_ignores_a_completed_holder_during_turnover() -> None:
+    with tempfile.TemporaryDirectory(prefix="lifecycle-wrapper-holder-turnover-") as temp_dir:
         temp_root = Path(temp_dir)
-        env = wrapper_environment(temp_root)
-        coordinator_path = Path(env["HOME"]) / COORDINATOR_RELATIVE_PATH
-        coordinator_path.parent.mkdir(parents=True)
-        ready_path = temp_root / "coordinator-ready"
-        coordinator = subprocess.Popen(
-            [
-                sys.executable,
-                "-c",
-                (
-                    "import os, pathlib, sys, time; "
-                    "pathlib.Path(sys.argv[1]).symlink_to("
-                    "f'pid={os.getpid()} worktree=/controlled/coordinator'); "
-                    "pathlib.Path(sys.argv[2]).touch(); time.sleep(30)"
-                ),
-                str(coordinator_path),
-                str(ready_path),
-            ],
+        base_env = wrapper_environment(temp_root)
+
+        completed_env = base_env.copy()
+        completed_capture = temp_root / "completed-capture.json"
+        completed_env.update(
+            {
+                "LIFECYCLE_TEST_CAPTURE": str(completed_capture),
+                "LIFECYCLE_TEST_MODE": "delay",
+                "LIFECYCLE_TEST_DELAY_SECONDS": "0.3",
+            }
+        )
+        completed = subprocess.Popen(
+            [str(RUNNER), "--check"],
             cwd=REPO_ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=completed_env,
+        )
+        deadline = time.monotonic() + 10
+        while not completed_capture.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if not completed_capture.exists():
+            completed.kill()
+            raise AssertionError("first turnover holder never launched")
+
+        current_env = base_env.copy()
+        current_capture = temp_root / "current-capture.json"
+        current_env.update(
+            {
+                "LIFECYCLE_TEST_CAPTURE": str(current_capture),
+                "LIFECYCLE_TEST_MODE": "sleep",
+            }
+        )
+        current = subprocess.Popen(
+            [str(RUNNER), "--check"],
+            cwd=REPO_ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=current_env,
+            start_new_session=True,
         )
         try:
             deadline = time.monotonic() + 10
-            while not ready_path.exists() and time.monotonic() < deadline:
+            while not current_capture.exists() and time.monotonic() < deadline:
                 time.sleep(0.05)
-            if not ready_path.exists():
-                raise AssertionError("metadata coordinator never became ready")
-            start = time.monotonic()
-            proc = run_wrapper(env)
-            elapsed = time.monotonic() - start
-            output = f"{proc.stdout}\n{proc.stderr}"
+            if not current_capture.exists():
+                raise AssertionError("successor shared holder never launched")
+            current_child_pid = json.loads(
+                current_capture.read_text(encoding="utf-8")
+            )["pid"]
+            completed_stdout, completed_stderr = completed.communicate(timeout=10)
+            if completed.returncode != 0:
+                raise AssertionError(
+                    "first turnover holder did not complete cleanly:\n"
+                    f"{completed_stdout}\n{completed_stderr}"
+                )
+            if current.poll() is not None:
+                raise AssertionError("successor holder exited before turnover contention")
+
+            contender_env = base_env.copy()
+            contender_capture = temp_root / "turnover-contender-capture.json"
+            contender_env.update(
+                {
+                    "LIFECYCLE_TEST_CAPTURE": str(contender_capture),
+                    "LIFECYCLE_TEST_MODE": "success",
+                }
+            )
+            contender = run_wrapper(contender_env)
+            output = f"{contender.stdout}\n{contender.stderr}"
             if (
-                proc.returncode != 75
-                or elapsed >= 2
-                or f"pid={coordinator.pid}" not in output
-                or "worktree=/controlled/coordinator" not in output
-                or (temp_root / "capture.json").exists()
+                contender.returncode != 75
+                or f"pid={current_child_pid}" not in output
+                or f"worktree={REPO_ROOT}" not in output
+                or contender_capture.exists()
             ):
                 raise AssertionError(
-                    f"metadata contention did not fail fast with holder identity ({elapsed:.2f}s):\n"
+                    "turnover contention reported stale rather than current metadata:\n"
                     f"{output}"
                 )
         finally:
-            coordinator.terminate()
-            coordinator.wait(timeout=10)
-            coordinator_path.unlink(missing_ok=True)
+            if completed.poll() is None:
+                completed.kill()
+                completed.communicate(timeout=10)
+            if current.poll() is None:
+                os.killpg(current.pid, signal.SIGINT)
+            current.communicate(timeout=10)
+
+
+def assert_metadata_transitions_serialize_compatible_callers() -> None:
+    with tempfile.TemporaryDirectory(prefix="lifecycle-metadata-serialization-") as temp_dir:
+        temp_root = Path(temp_dir)
+        env = wrapper_environment(temp_root, mode="delay")
+        env["LIFECYCLE_TEST_DELAY_SECONDS"] = "0.2"
+        metadata_path = Path(env["HOME"]) / METADATA_LOCK_RELATIVE_PATH
+        metadata_path.parent.mkdir(parents=True)
+        with metadata_path.open("w", encoding="utf-8") as metadata_file:
+            fcntl.flock(metadata_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            caller = subprocess.Popen(
+                [str(RUNNER), "--check"],
+                cwd=REPO_ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            deadline = time.monotonic() + 0.5
+            while caller.poll() is None and time.monotonic() < deadline:
+                if (temp_root / "capture.json").exists():
+                    caller.kill()
+                    raise AssertionError(
+                        "compatible caller bypassed the metadata transition boundary"
+                    )
+                time.sleep(0.05)
+            if caller.poll() is not None:
+                raise AssertionError("compatible caller rejected metadata serialization")
+            fcntl.flock(metadata_file, fcntl.LOCK_UN)
+        stdout, stderr = caller.communicate(timeout=10)
+        if caller.returncode != 0 or not (temp_root / "capture.json").exists():
+            raise AssertionError(
+                "compatible caller did not continue after metadata serialization:\n"
+                f"{stdout}\n{stderr}"
+            )
 
 
 def assert_holder_metadata_covers_lock_lifetime() -> None:
@@ -492,7 +573,6 @@ def assert_holder_metadata_covers_lock_lifetime() -> None:
         env = wrapper_environment(temp_root, mode="delay")
         env["LIFECYCLE_TEST_DELAY_SECONDS"] = "0.6"
         lock_path = Path(env["HOME"]) / LOCK_RELATIVE_PATH
-        coordinator_path = Path(env["HOME"]) / COORDINATOR_RELATIVE_PATH
         holder = subprocess.Popen(
             [str(RUNNER), "--check"],
             cwd=REPO_ROOT,
@@ -517,16 +597,10 @@ def assert_holder_metadata_covers_lock_lifetime() -> None:
             else:
                 holder.kill()
                 raise AssertionError("shared holder metadata existed without its live lock")
-        coordinator_path.symlink_to(
-            f"pid={os.getpid()} worktree=/controlled/cleanup-coordinator"
-        )
-        try:
-            stdout, stderr = holder.communicate(timeout=10)
-        finally:
-            coordinator_path.unlink(missing_ok=True)
+        stdout, stderr = holder.communicate(timeout=10)
         if holder.returncode != 0:
             raise AssertionError(
-                "cleanup consulted the contended coordinator or changed the playbook result:\n"
+                "holder cleanup changed the playbook result:\n"
                 f"{stdout}\n{stderr}"
             )
         if list(Path(f"{lock_path}.holders").glob("*.holder")):
@@ -821,7 +895,8 @@ def main() -> int:
         assert_contention_fails_fast()
         assert_lock_class_follows_operation_class()
         assert_contention_names_a_remaining_shared_holder()
-        assert_metadata_coordination_is_fail_fast()
+        assert_contention_ignores_a_completed_holder_during_turnover()
+        assert_metadata_transitions_serialize_compatible_callers()
         assert_holder_metadata_covers_lock_lifetime()
         assert_live_execution_responsibilities_are_sourced()
         assert_mismatched_prerequisite_layers_prevent_execution()
