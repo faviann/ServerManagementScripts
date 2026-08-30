@@ -193,7 +193,7 @@
     fail_msg: >-
       stack_filter '{{ stack_filter }}' was requested but the per-host stacks source
       directory does not exist at {{ lxc_docker_environment_internal.stacks_source }}.
-  when: stack_filter is defined
+  when: stack_filter is defined and stack_filter is not none
 
 - name: Assert stack_filter names a known stack
   ansible.builtin.assert:
@@ -203,17 +203,17 @@
     fail_msg: >-
       stack_filter '{{ stack_filter }}' not found. Known stacks:
       {{ lxc_docker_env_desired_top_level_stack_dirs | join(', ') }}
-  when: stack_filter is defined
+  when: stack_filter is defined and stack_filter is not none
 
 - name: Scope desired stacks to stack_filter
   ansible.builtin.set_fact:
     lxc_docker_env_desired_top_level_stack_dirs: "{{ [stack_filter] }}"
-  when: stack_filter is defined
+  when: stack_filter is defined and stack_filter is not none
 
 - name: Suppress stale stack list when stack_filter is active
   ansible.builtin.set_fact:
     lxc_docker_env_stale_top_level_stack_dirs: []
-  when: stack_filter is defined
+  when: stack_filter is defined and stack_filter is not none
 
 - name: Scope per-host find results to stack_filter
   ansible.builtin.set_fact:
@@ -238,7 +238,7 @@
           | selectattr('path', 'search', '/' ~ stack_filter ~ '/')
           | list
         }}
-  when: stack_filter is defined
+  when: stack_filter is defined and stack_filter is not none
 
 - name: Capture stack metadata files before deploy filtering
   ansible.builtin.set_fact:
