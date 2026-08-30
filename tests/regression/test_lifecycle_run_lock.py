@@ -567,6 +567,49 @@ def assert_metadata_transitions_serialize_compatible_callers() -> None:
             )
 
 
+def assert_metadata_coordination_has_a_bounded_failure() -> None:
+    with tempfile.TemporaryDirectory(prefix="lifecycle-metadata-timeout-") as temp_dir:
+        temp_root = Path(temp_dir)
+        env = wrapper_environment(temp_root)
+        metadata_path = Path(env["HOME"]) / METADATA_LOCK_RELATIVE_PATH
+        metadata_path.parent.mkdir(parents=True)
+        with metadata_path.open("w", encoding="utf-8") as metadata_file:
+            metadata_file.write(
+                f"pid={os.getpid()} worktree=/controlled/metadata-holder\n"
+            )
+            metadata_file.flush()
+            fcntl.flock(metadata_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            start = time.monotonic()
+            caller = subprocess.Popen(
+                [str(RUNNER)],
+                cwd=REPO_ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+                start_new_session=True,
+            )
+            try:
+                stdout, stderr = caller.communicate(timeout=2.5)
+            except subprocess.TimeoutExpired as error:
+                os.killpg(caller.pid, signal.SIGKILL)
+                caller.communicate(timeout=10)
+                raise AssertionError("metadata acquisition waited beyond its bound") from error
+            elapsed = time.monotonic() - start
+        output = f"{stdout}\n{stderr}"
+        if (
+            caller.returncode != 75
+            or elapsed >= 2
+            or f"pid={os.getpid()}" not in output
+            or "worktree=/controlled/metadata-holder" not in output
+            or (temp_root / "capture.json").exists()
+        ):
+            raise AssertionError(
+                f"bounded metadata failure lacked active holder identity ({elapsed:.2f}s):\n"
+                f"{output}"
+            )
+
+
 def assert_holder_metadata_covers_lock_lifetime() -> None:
     with tempfile.TemporaryDirectory(prefix="lifecycle-holder-lifetime-") as temp_dir:
         temp_root = Path(temp_dir)
@@ -897,6 +940,7 @@ def main() -> int:
         assert_contention_names_a_remaining_shared_holder()
         assert_contention_ignores_a_completed_holder_during_turnover()
         assert_metadata_transitions_serialize_compatible_callers()
+        assert_metadata_coordination_has_a_bounded_failure()
         assert_holder_metadata_covers_lock_lifetime()
         assert_live_execution_responsibilities_are_sourced()
         assert_mismatched_prerequisite_layers_prevent_execution()
