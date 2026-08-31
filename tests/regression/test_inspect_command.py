@@ -131,9 +131,9 @@ derived_sequence:
         )
 
     output = f"{result.stdout}\n{result.stderr}"
-    if result.returncode != 23:
+    if result.returncode != 1:
         raise AssertionError(
-            f"vars did not preserve inventory status 23: {result.returncode}\n{output}"
+            f"vars did not normalize inventory failure to 1: {result.returncode}\n{output}"
         )
     if diagnostic_secret in output or fixture_secret in output:
         raise AssertionError(f"vars disclosed a fixture secret:\n{output}")
@@ -215,7 +215,7 @@ def assert_vars_graph_preserves_inventory_tree_without_live_execution() -> None:
 
     output = f"{result.stdout}\n{result.stderr}"
     if (
-        result.returncode != 24
+        result.returncode != 1
         or result.stdout != graph_output
         or diagnostic_secret in output
     ):

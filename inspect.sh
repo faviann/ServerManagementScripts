@@ -65,14 +65,19 @@ case "${1:-}" in
         shift
         (($# == 1)) || usage_error "vars requires one host or --graph"
         if [[ "$1" == "--graph" ]]; then
-            exec uv run --locked ansible-inventory \
-                -i inventory/hosts.yml --graph 2>/dev/null
+            if uv run --locked ansible-inventory \
+                -i inventory/hosts.yml --graph 2>/dev/null; then
+                exit 0
+            fi
+            exit 1
         fi
         [[ "$1" != -* ]] || usage_error "unknown option"
-        uv run --locked ansible-inventory \
+        if uv run --locked ansible-inventory \
             -i inventory/hosts.yml --host "$1" --yaml 2>/dev/null \
-            | uv run --locked python -m scripts.masked_inventory
-        exit
+            | uv run --locked python -m scripts.masked_inventory; then
+            exit 0
+        fi
+        exit 1
         ;;
     "")
         usage_error "an operation is required"
