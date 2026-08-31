@@ -42,15 +42,14 @@ def main() -> int:
         str(value)
         for key, value in inventory.items()
         if key.startswith("vault_")
-        and not isinstance(value, (dict, list))
         and len(str(value)) >= 8
     )
     for key, value in inventory.items():
-        if key.startswith("vault_") or (
-            isinstance(value, str)
-            and any(vault_value in value for vault_value in vault_values)
+        rendered_value = str(value)
+        if key.startswith("vault_") or any(
+            vault_value in rendered_value for vault_value in vault_values
         ):
-            inventory[key] = mask_value(str(value))
+            inventory[key] = mask_value(rendered_value)
 
     yaml.safe_dump(inventory, sys.stdout, allow_unicode=True, sort_keys=False)
     return 0

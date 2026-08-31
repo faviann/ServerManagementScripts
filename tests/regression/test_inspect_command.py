@@ -103,6 +103,13 @@ vault_primary_secret: {fixture_secret}
 derived_header: Bearer {fixture_secret}
 vault_numeric_secret: 12345678
 derived_numeric_value: token=12345678
+derived_mapping:
+  authorization: Bearer {fixture_secret}
+  mode: fixture
+derived_sequence:
+  - prefix
+  - {fixture_secret}
+  - 7
 """
     with tempfile.TemporaryDirectory(prefix="inspect-vars-") as temp_dir:
         temp_root = Path(temp_dir)
@@ -130,6 +137,20 @@ derived_numeric_value: token=12345678
         )
     if diagnostic_secret in output or fixture_secret in output:
         raise AssertionError(f"vars disclosed a fixture secret:\n{output}")
+    rendered_inventory = yaml.safe_load(result.stdout)
+    expected_composites = {
+        "derived_mapping": (
+            "{'aaaaaaaaaaaaa':·'aaaaaa·aaaaaa99',·'aaaa':·'aaaaaaa'}"
+        ),
+        "derived_sequence": "['aaaaaa',·'aaaaaa99',·9]",
+    }
+    if {
+        key: rendered_inventory.get(key) for key in expected_composites
+    } != expected_composites:
+        raise AssertionError(
+            "vars did not mask each containing composite as one whole value:\n"
+            f"{result.stdout}"
+        )
     for expected in (
         "ordinary_value: visible",
         "vault_feature_enabled: aaaa",

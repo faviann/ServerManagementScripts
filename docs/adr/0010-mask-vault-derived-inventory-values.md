@@ -2,11 +2,13 @@
 
 `./inspect.sh vars <host>` may print a masked derivative of a secret. It derives
 the vault key/value set from the command's one merged inventory result. Every
-value whose key starts with `vault_` is masked. Any other string containing a
-vault scalar's rendered value of at least eight characters is masked whole,
-which covers derived values such as bearer headers and numeric identifiers
-without treating short settings such as `true` or `587` as secrets wherever
-they occur.
+value whose key starts with `vault_` is masked. Any other top-level value whose
+rendered content contains a rendered vault value of at least eight characters
+is masked whole. This includes mapping and sequence values: the operation
+replaces the containing value with one masked representation rather than
+selectively masking nested fields. The rule covers derived values such as
+bearer headers and numeric identifiers without treating short settings such as
+`true` or `587` as secrets wherever they occur.
 
 The mask renders every letter as `a` without preserving case, every digit as
 `9`, a space as `·`, a newline as `\n`, and a tab as `\t`. Other characters
