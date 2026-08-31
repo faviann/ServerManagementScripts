@@ -104,6 +104,44 @@ def vars_invocations(temp_root: Path) -> list[dict[str, object]]:
     )
 
 
+def expected_host_vars_invocations(host: str) -> list[dict[str, object]]:
+    return [
+        {
+            "argv": [
+                "run",
+                "--locked",
+                "ansible-inventory",
+                "-i",
+                "inventory/hosts.yml",
+                "--host",
+                host,
+                "--yaml",
+            ],
+            "marker": None,
+        },
+        {
+            "argv": ["run", "--locked", "python", "-m", "scripts.masked_inventory"],
+            "marker": None,
+        },
+    ]
+
+
+def expected_graph_vars_invocations() -> list[dict[str, object]]:
+    return [
+        {
+            "argv": [
+                "run",
+                "--locked",
+                "ansible-inventory",
+                "-i",
+                "inventory/hosts.yml",
+                "--graph",
+            ],
+            "marker": None,
+        }
+    ]
+
+
 def assert_vars_masks_vault_derived_values_without_live_execution() -> None:
     fixture_secret = "SeCrEt42"
     diagnostic_secret = "DiagnosticSecret42"
@@ -127,8 +165,7 @@ derived_sequence:
         env = vars_environment(
             temp_root,
             inventory_output,
-            inventory_stderr=f"inventory failed with {diagnostic_secret}\n",
-            inventory_status=23,
+            inventory_stderr=f"inventory warning with {diagnostic_secret}\n",
         )
         lock_path = Path(env["HOME"]) / ".ansible/homelab-iac-lifecycle.lock"
         lock_path.parent.mkdir(parents=True)
@@ -139,9 +176,9 @@ derived_sequence:
         captures = vars_invocations(temp_root)
 
     output = f"{result.stdout}\n{result.stderr}"
-    if result.returncode != 1:
+    if result.returncode != 0:
         raise AssertionError(
-            f"vars did not normalize inventory failure to 1: {result.returncode}\n{output}"
+            f"vars did not preserve inventory success: {result.returncode}\n{output}"
         )
     if any(
         secret in output
@@ -171,24 +208,45 @@ derived_sequence:
     ):
         if expected not in output:
             raise AssertionError(f"vars omitted expected masked inventory {expected!r}:\n{output}")
-    expected_argv = [
-        "run",
-        "--locked",
-        "ansible-inventory",
-        "-i",
-        "inventory/hosts.yml",
-        "--host",
-        "fixture_host",
-        "--yaml",
-    ]
-    expected_mask_argv = ["run", "--locked", "python", "-m", "scripts.masked_inventory"]
-    expected_captures = [
-        {"argv": expected_argv, "marker": None},
-        {"argv": expected_mask_argv, "marker": None},
-    ]
+    expected_captures = expected_host_vars_invocations("fixture_host")
     if captures != expected_captures:
         raise AssertionError(
             f"vars used a live or unexpected execution path: {captures!r}"
+        )
+
+
+def assert_vars_normalizes_inventory_failure_without_disclosure() -> None:
+    fixture_secret = "FailureSecret42"
+    diagnostic_secret = "FailureDiagnosticSecret42"
+    inventory_output = f"""---
+ordinary_value: visible
+vault_failure_secret: {fixture_secret}
+"""
+    with tempfile.TemporaryDirectory(prefix="inspect-vars-failure-") as temp_dir:
+        temp_root = Path(temp_dir)
+        env = vars_environment(
+            temp_root,
+            inventory_output,
+            inventory_stderr=f"inventory failed with {diagnostic_secret}\n",
+            inventory_status=23,
+        )
+        result = run_inspect("vars", "fixture_host", env=env)
+        captures = vars_invocations(temp_root)
+
+    output = f"{result.stdout}\n{result.stderr}"
+    if (
+        result.returncode != 1
+        or "ordinary_value: visible" not in result.stdout
+        or fixture_secret in output
+        or diagnostic_secret in output
+    ):
+        raise AssertionError(
+            f"vars did not safely normalize inventory failure:\n{output}"
+        )
+    expected_captures = expected_host_vars_invocations("fixture_host")
+    if captures != expected_captures:
+        raise AssertionError(
+            f"failing vars used a live or unexpected execution path: {captures!r}"
         )
 
 
@@ -215,8 +273,7 @@ def assert_vars_graph_preserves_inventory_tree_without_live_execution() -> None:
         env = vars_environment(
             temp_root,
             graph_output,
-            inventory_stderr=f"inventory failed with {diagnostic_secret}\n",
-            inventory_status=24,
+            inventory_stderr=f"inventory warning with {diagnostic_secret}\n",
         )
         lock_path = Path(env["HOME"]) / ".ansible/homelab-iac-lifecycle.lock"
         lock_path.parent.mkdir(parents=True)
@@ -227,23 +284,46 @@ def assert_vars_graph_preserves_inventory_tree_without_live_execution() -> None:
 
     output = f"{result.stdout}\n{result.stderr}"
     if (
-        result.returncode != 1
+        result.returncode != 0
         or result.stdout != graph_output
         or diagnostic_secret in output
     ):
         raise AssertionError(f"vars --graph did not preserve the inventory tree:\n{result.stdout}\n{result.stderr}")
-    expected_argv = [
-        "run",
-        "--locked",
-        "ansible-inventory",
-        "-i",
-        "inventory/hosts.yml",
-        "--graph",
-    ]
-    expected_captures = [{"argv": expected_argv, "marker": None}]
+    expected_captures = expected_graph_vars_invocations()
     if captures != expected_captures:
         raise AssertionError(
             f"vars --graph used a live or unexpected execution path: {captures!r}"
+        )
+
+
+def assert_vars_graph_normalizes_inventory_failure_without_disclosure() -> None:
+    graph_output = "@all:\n  |--@lxcs:\n  |  |--fixture_host\n"
+    diagnostic_secret = "GraphFailureDiagnosticSecret42"
+    with tempfile.TemporaryDirectory(prefix="inspect-vars-graph-failure-") as temp_dir:
+        temp_root = Path(temp_dir)
+        env = vars_environment(
+            temp_root,
+            graph_output,
+            inventory_stderr=f"inventory failed with {diagnostic_secret}\n",
+            inventory_status=24,
+        )
+        result = run_inspect("vars", "--graph", env=env)
+        captures = vars_invocations(temp_root)
+
+    output = f"{result.stdout}\n{result.stderr}"
+    if (
+        result.returncode != 1
+        or result.stdout != graph_output
+        or diagnostic_secret in output
+    ):
+        raise AssertionError(
+            f"vars --graph did not safely normalize inventory failure:\n{output}"
+        )
+    expected_captures = expected_graph_vars_invocations()
+    if captures != expected_captures:
+        raise AssertionError(
+            "failing vars --graph used a live or unexpected execution path: "
+            f"{captures!r}"
         )
 
 
@@ -678,8 +758,10 @@ def main() -> int:
     try:
         assert_explicit_operation_and_help()
         assert_vars_masks_vault_derived_values_without_live_execution()
+        assert_vars_normalizes_inventory_failure_without_disclosure()
         assert_vars_content_rule_ignores_seven_character_vault_values()
         assert_vars_graph_preserves_inventory_tree_without_live_execution()
+        assert_vars_graph_normalizes_inventory_failure_without_disclosure()
         assert_operations_route_through_shared_live_execution()
         assert_exclusive_contention_names_holder()
         assert_diagnostic_playbooks_are_consolidated()
