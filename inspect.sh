@@ -72,10 +72,17 @@ case "${1:-}" in
             exit 1
         fi
         [[ "$1" != -* ]] || usage_error "unknown option"
+        if ! masked_inventory_file="$(mktemp)"; then
+            exit 1
+        fi
+        trap 'rm -f -- "$masked_inventory_file"' EXIT
         if uv run --locked ansible-inventory \
             -i inventory/hosts.yml --host "$1" --yaml 2>/dev/null \
-            | uv run --locked python -m scripts.masked_inventory; then
-            exit 0
+            | uv run --locked python -m scripts.masked_inventory \
+                >"$masked_inventory_file"; then
+            if cat "$masked_inventory_file"; then
+                exit 0
+            fi
         fi
         exit 1
         ;;

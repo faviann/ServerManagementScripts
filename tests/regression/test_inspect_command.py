@@ -216,11 +216,10 @@ derived_sequence:
 
 
 def assert_vars_normalizes_inventory_failure_without_disclosure() -> None:
-    fixture_secret = "FailureSecret42"
+    fixture_secret = "PartialSecret42"
     diagnostic_secret = "FailureDiagnosticSecret42"
     inventory_output = f"""---
-ordinary_value: visible
-vault_failure_secret: {fixture_secret}
+ordinary_derived_value: marker={fixture_secret}
 """
     with tempfile.TemporaryDirectory(prefix="inspect-vars-failure-") as temp_dir:
         temp_root = Path(temp_dir)
@@ -236,12 +235,12 @@ vault_failure_secret: {fixture_secret}
     output = f"{result.stdout}\n{result.stderr}"
     if (
         result.returncode != 1
-        or "ordinary_value: visible" not in result.stdout
+        or result.stdout
         or fixture_secret in output
         or diagnostic_secret in output
     ):
         raise AssertionError(
-            f"vars did not safely normalize inventory failure:\n{output}"
+            f"vars published partial inventory failure output:\n{output}"
         )
     expected_captures = expected_host_vars_invocations("fixture_host")
     if captures != expected_captures:
