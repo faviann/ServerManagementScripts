@@ -73,9 +73,9 @@ import os
 import sys
 from pathlib import Path
 
-capture = Path(os.environ["INSPECT_TEST_CAPTURE"])
-if "python" in sys.argv:
-    capture = capture.with_suffix(".mask.json")
+capture_dir = Path(f"{{os.environ['INSPECT_TEST_CAPTURE']}}.invocations")
+capture_dir.mkdir(exist_ok=True)
+capture = capture_dir / f"{{os.getpid()}}.json"
 capture.write_text(json.dumps({{
     "argv": sys.argv[1:],
     "marker": os.environ.get("HOMELAB_IAC_LIFECYCLE_WRAPPER"),
@@ -91,6 +91,17 @@ elif "python" in sys.argv:
         encoding="utf-8",
     )
     return env
+
+
+def vars_invocations(temp_root: Path) -> list[dict[str, object]]:
+    capture_dir = temp_root / "capture.json.invocations"
+    return sorted(
+        (
+            json.loads(capture_path.read_text(encoding="utf-8"))
+            for capture_path in capture_dir.glob("*.json")
+        ),
+        key=lambda capture: capture["argv"],
+    )
 
 
 def assert_vars_masks_vault_derived_values_without_live_execution() -> None:
@@ -125,17 +136,17 @@ derived_sequence:
             fcntl.flock(exclusive_holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
             result = run_inspect("vars", "fixture_host", env=env)
 
-        capture = json.loads((temp_root / "capture.json").read_text(encoding="utf-8"))
-        mask_capture = json.loads(
-            (temp_root / "capture.mask.json").read_text(encoding="utf-8")
-        )
+        captures = vars_invocations(temp_root)
 
     output = f"{result.stdout}\n{result.stderr}"
     if result.returncode != 1:
         raise AssertionError(
             f"vars did not normalize inventory failure to 1: {result.returncode}\n{output}"
         )
-    if diagnostic_secret in output or fixture_secret in output:
+    if any(
+        secret in output
+        for secret in (diagnostic_secret, fixture_secret, "12345678")
+    ):
         raise AssertionError(f"vars disclosed a fixture secret:\n{output}")
     rendered_inventory = yaml.safe_load(result.stdout)
     expected_composites = {
@@ -171,12 +182,13 @@ derived_sequence:
         "--yaml",
     ]
     expected_mask_argv = ["run", "--locked", "python", "-m", "scripts.masked_inventory"]
-    if capture != {"argv": expected_argv, "marker": None} or mask_capture != {
-        "argv": expected_mask_argv,
-        "marker": None,
-    }:
+    expected_captures = [
+        {"argv": expected_argv, "marker": None},
+        {"argv": expected_mask_argv, "marker": None},
+    ]
+    if captures != expected_captures:
         raise AssertionError(
-            f"vars used a live or unexpected execution path: {capture!r}, {mask_capture!r}"
+            f"vars used a live or unexpected execution path: {captures!r}"
         )
 
 
@@ -211,7 +223,7 @@ def assert_vars_graph_preserves_inventory_tree_without_live_execution() -> None:
         with lock_path.open("a", encoding="utf-8") as exclusive_holder:
             fcntl.flock(exclusive_holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
             result = run_inspect("vars", "--graph", env=env)
-        capture = json.loads((temp_root / "capture.json").read_text(encoding="utf-8"))
+        captures = vars_invocations(temp_root)
 
     output = f"{result.stdout}\n{result.stderr}"
     if (
@@ -228,8 +240,11 @@ def assert_vars_graph_preserves_inventory_tree_without_live_execution() -> None:
         "inventory/hosts.yml",
         "--graph",
     ]
-    if capture != {"argv": expected_argv, "marker": None}:
-        raise AssertionError(f"vars --graph used a live or unexpected execution path: {capture!r}")
+    expected_captures = [{"argv": expected_argv, "marker": None}]
+    if captures != expected_captures:
+        raise AssertionError(
+            f"vars --graph used a live or unexpected execution path: {captures!r}"
+        )
 
 
 def controlled_environment(temp_root: Path) -> dict[str, str]:
