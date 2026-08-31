@@ -5,6 +5,10 @@
   gather_facts: false
   become: false
   vars:
+    # Inventory group_vars set ansible_connection: ssh for lxcs, which outranks the
+    # play-level `connection: local` keyword. These checks always inspect the
+    # control node, so pin the connection at play-vars precedence.
+    ansible_connection: local
     control_node_project_root: "{{ playbook_dir | dirname }}"
     control_node_uv_virtualenv: "{{ [playbook_dir | dirname, '.venv'] | path_join }}"
     control_node_collection_install_path: "{{ [playbook_dir | dirname, 'collections'] | path_join }}"
