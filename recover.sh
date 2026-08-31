@@ -1,5 +1,5 @@
 #!/bin/bash
-# Locked entry point for narrow managed-host recovery operations.
+# Locked entry point for Manual SSH recovery.
 
 set -euo pipefail
 
