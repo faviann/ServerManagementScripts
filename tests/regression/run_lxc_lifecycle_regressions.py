@@ -64,6 +64,7 @@ FAST_SCRIPTS = (
 FULL_ONLY_SCRIPTS = (
     "test_lifecycle_run_lock.py",
     "test_inspect_command.py",
+    "test_recover_command.py",
     "test_lxc_lifecycle_invalid_state.py",
     "test_lxc_lifecycle_guest_bootstrap_contract.py",
     "test_lxc_spec_contract.py",

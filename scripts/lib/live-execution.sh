@@ -136,6 +136,7 @@ run_live_playbook() {
         control-node,proxmox-host:playbooks/provision-lxcs.yml|\
         control-node,proxmox-host:playbooks/configure-lxcs.yml|\
         control-node,proxmox-host:playbooks/validate-infrastructure.yml|\
+        control-node,proxmox-host:playbooks/add-ssh-keys-to-lxcs.yml|\
         control-node:playbooks/validate-credentials.yml|\
         control-node:playbooks/lab-connectivity.yml|\
         control-node:playbooks/proxmox_api_check.yml)
