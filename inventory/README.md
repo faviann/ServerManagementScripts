@@ -134,13 +134,10 @@ proxmox_lxc_overrides:
 
 ```bash
 # Visualize group membership
-ansible-inventory -i inventory/hosts.yml --graph
+./inspect.sh vars --graph
 
 # Show merged vars for one host
-ansible-inventory -i inventory/hosts.yml --host servarr --yaml
-
-# Show all resolved inventory data
-ansible-inventory -i inventory/hosts.yml --list
+./inspect.sh vars servarr
 ```
 
 Hosts resolve via DNS as `{hostname}.faviann.vms`.

@@ -50,13 +50,165 @@ def assert_explicit_operation_and_help() -> None:
 
     help_result = run_inspect("--help")
     help_output = f"{help_result.stdout}\n{help_result.stderr}"
-    operations = ("credentials", "connectivity", "containers", "plan")
+    operations = ("credentials", "connectivity", "containers", "plan", "vars")
     if help_result.returncode != 0 or not all(
         operation in help_output for operation in operations
     ):
         raise AssertionError(f"inspect help is incomplete:\n{help_output}")
-    if "vars" in help_output:
-        raise AssertionError(f"out-of-scope vars operation appeared in help:\n{help_output}")
+
+
+def vars_environment(
+    temp_root: Path,
+    inventory_output: str,
+    *,
+    inventory_stderr: str = "",
+    inventory_status: int = 0,
+) -> dict[str, str]:
+    env = controlled_environment(temp_root)
+    fake_uv = Path(env["PATH"].split(":", 1)[0]) / "uv"
+    fake_uv.write_text(
+        f"""#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+capture = Path(os.environ["INSPECT_TEST_CAPTURE"])
+if "python" in sys.argv:
+    capture = capture.with_suffix(".mask.json")
+capture.write_text(json.dumps({{
+    "argv": sys.argv[1:],
+    "marker": os.environ.get("HOMELAB_IAC_LIFECYCLE_WRAPPER"),
+}}), encoding="utf-8")
+if "ansible-inventory" in sys.argv:
+    sys.stdout.write({inventory_output!r})
+    sys.stderr.write({inventory_stderr!r})
+    raise SystemExit({inventory_status})
+elif "python" in sys.argv:
+    python_at = sys.argv.index("python")
+    os.execv(sys.executable, [sys.executable, *sys.argv[python_at + 1:]])
+""",
+        encoding="utf-8",
+    )
+    return env
+
+
+def assert_vars_masks_vault_derived_values_without_live_execution() -> None:
+    fixture_secret = "SeCrEt42"
+    diagnostic_secret = "DiagnosticSecret42"
+    inventory_output = f"""---
+ordinary_value: visible
+vault_feature_enabled: "true"
+vault_primary_secret: {fixture_secret}
+derived_header: Bearer {fixture_secret}
+vault_numeric_secret: 12345678
+derived_numeric_value: token=12345678
+"""
+    with tempfile.TemporaryDirectory(prefix="inspect-vars-") as temp_dir:
+        temp_root = Path(temp_dir)
+        env = vars_environment(
+            temp_root,
+            inventory_output,
+            inventory_stderr=f"inventory failed with {diagnostic_secret}\n",
+            inventory_status=23,
+        )
+        lock_path = Path(env["HOME"]) / ".ansible/homelab-iac-lifecycle.lock"
+        lock_path.parent.mkdir(parents=True)
+        with lock_path.open("a", encoding="utf-8") as exclusive_holder:
+            fcntl.flock(exclusive_holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = run_inspect("vars", "fixture_host", env=env)
+
+        capture = json.loads((temp_root / "capture.json").read_text(encoding="utf-8"))
+        mask_capture = json.loads(
+            (temp_root / "capture.mask.json").read_text(encoding="utf-8")
+        )
+
+    output = f"{result.stdout}\n{result.stderr}"
+    if result.returncode != 23:
+        raise AssertionError(
+            f"vars did not preserve inventory status 23: {result.returncode}\n{output}"
+        )
+    if diagnostic_secret in output or fixture_secret in output:
+        raise AssertionError(f"vars disclosed a fixture secret:\n{output}")
+    for expected in (
+        "ordinary_value: visible",
+        "vault_feature_enabled: aaaa",
+        "aaaaaa·aaaaaa99",
+        "vault_numeric_secret: '99999999'",
+        "derived_numeric_value: aaaaa=99999999",
+    ):
+        if expected not in output:
+            raise AssertionError(f"vars omitted expected masked inventory {expected!r}:\n{output}")
+    expected_argv = [
+        "run",
+        "--locked",
+        "ansible-inventory",
+        "-i",
+        "inventory/hosts.yml",
+        "--host",
+        "fixture_host",
+        "--yaml",
+    ]
+    expected_mask_argv = ["run", "--locked", "python", "-m", "scripts.masked_inventory"]
+    if capture != {"argv": expected_argv, "marker": None} or mask_capture != {
+        "argv": expected_mask_argv,
+        "marker": None,
+    }:
+        raise AssertionError(
+            f"vars used a live or unexpected execution path: {capture!r}, {mask_capture!r}"
+        )
+
+
+def assert_vars_content_rule_ignores_seven_character_vault_values() -> None:
+    inventory_output = """---
+vault_short_value: Abc1234
+derived_short_value: prefix-Abc1234
+"""
+    with tempfile.TemporaryDirectory(prefix="inspect-vars-short-") as temp_dir:
+        env = vars_environment(Path(temp_dir), inventory_output)
+        result = run_inspect("vars", "fixture_host", env=env)
+    if result.returncode != 0 or "derived_short_value: prefix-Abc1234" not in result.stdout:
+        raise AssertionError(
+            "vars selected a derived value containing only a seven-character vault value:\n"
+            f"{result.stdout}\n{result.stderr}"
+        )
+
+
+def assert_vars_graph_preserves_inventory_tree_without_live_execution() -> None:
+    graph_output = "@all:\n  |--@lxcs:\n  |  |--fixture_host\n"
+    diagnostic_secret = "GraphDiagnosticSecret42"
+    with tempfile.TemporaryDirectory(prefix="inspect-vars-graph-") as temp_dir:
+        temp_root = Path(temp_dir)
+        env = vars_environment(
+            temp_root,
+            graph_output,
+            inventory_stderr=f"inventory failed with {diagnostic_secret}\n",
+            inventory_status=24,
+        )
+        lock_path = Path(env["HOME"]) / ".ansible/homelab-iac-lifecycle.lock"
+        lock_path.parent.mkdir(parents=True)
+        with lock_path.open("a", encoding="utf-8") as exclusive_holder:
+            fcntl.flock(exclusive_holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = run_inspect("vars", "--graph", env=env)
+        capture = json.loads((temp_root / "capture.json").read_text(encoding="utf-8"))
+
+    output = f"{result.stdout}\n{result.stderr}"
+    if (
+        result.returncode != 24
+        or result.stdout != graph_output
+        or diagnostic_secret in output
+    ):
+        raise AssertionError(f"vars --graph did not preserve the inventory tree:\n{result.stdout}\n{result.stderr}")
+    expected_argv = [
+        "run",
+        "--locked",
+        "ansible-inventory",
+        "-i",
+        "inventory/hosts.yml",
+        "--graph",
+    ]
+    if capture != {"argv": expected_argv, "marker": None}:
+        raise AssertionError(f"vars --graph used a live or unexpected execution path: {capture!r}")
 
 
 def controlled_environment(temp_root: Path) -> dict[str, str]:
@@ -489,6 +641,9 @@ def assert_public_plan_reports_all_problems_without_disclosure_or_mutation() -> 
 def main() -> int:
     try:
         assert_explicit_operation_and_help()
+        assert_vars_masks_vault_derived_values_without_live_execution()
+        assert_vars_content_rule_ignores_seven_character_vault_values()
+        assert_vars_graph_preserves_inventory_tree_without_live_execution()
         assert_operations_route_through_shared_live_execution()
         assert_exclusive_contention_names_holder()
         assert_diagnostic_playbooks_are_consolidated()
