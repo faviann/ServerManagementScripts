@@ -20,6 +20,15 @@
     depth: 2
   register: _stack_compose_files
 
+# Stack images accumulate across version bumps and removed stacks. Reclaim them
+# before bringing stacks up, so a pull for a new tag has room on small root disks.
+# Images referenced by any container, running or stopped, are kept.
+- name: Reclaim unused Docker images
+  ansible.builtin.command:
+    cmd: docker image prune -af
+  register: _stack_sync_image_prune
+  changed_when: "'Total reclaimed space: 0B' not in _stack_sync_image_prune.stdout"
+
 - name: Ensure all stacks are running
   ansible.builtin.command:
     cmd: docker compose up -d
