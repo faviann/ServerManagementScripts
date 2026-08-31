@@ -134,7 +134,11 @@ run_live_playbook() {
     case "$prerequisite_layers:$playbook" in
         control-node,proxmox-host:site.yml|\
         control-node,proxmox-host:playbooks/provision-lxcs.yml|\
-        control-node,proxmox-host:playbooks/configure-lxcs.yml)
+        control-node,proxmox-host:playbooks/configure-lxcs.yml|\
+        control-node,proxmox-host:playbooks/validate-infrastructure.yml|\
+        control-node:playbooks/validate-credentials.yml|\
+        control-node:playbooks/lab-connectivity.yml|\
+        control-node:playbooks/proxmox_api_check.yml)
             ;;
         *)
             echo \

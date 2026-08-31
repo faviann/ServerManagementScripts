@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import yaml
 from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -45,6 +46,8 @@ EXPECTED_AUTHORIZATION = (
 VERSION_API_PATH = "/api2/json/version"
 NODES_API_PATH = "/api2/json/nodes"
 CLUSTER_RESOURCES_API_PATH = "/api2/json/cluster/resources?type=vm"
+CLUSTER_STATUS_API_PATH = "/api2/json/cluster/status"
+NODE_STATUS_API_PATH = "/api2/json/nodes/pve-a/status"
 LXC_API_PATHS = (
     "/api2/json/nodes/pve-a/lxc",
     "/api2/json/nodes/pve-b/lxc",
@@ -99,9 +102,15 @@ class _ProxmoxHandler(BaseHTTPRequestHandler):
                     for container in COMMON_OBSERVATION
                 ]
             }
+        elif self.path == CLUSTER_STATUS_API_PATH:
+            status = 200
+            payload = {"data": [{"type": "cluster", "name": "fixture"}]}
+        elif self.path == NODE_STATUS_API_PATH:
+            status = 200
+            payload = {"data": {"status": "online"}}
         elif self.path in LXC_API_PATHS:
             status = 200
-            node = self.path.split("/")[5]
+            node = self.path.split("/")[4]
             payload = {
                 "data": [
                     container
@@ -349,21 +358,6 @@ def run_regressions() -> int:
         print(f"{missing_hostname.stdout}\n{missing_hostname.stderr}", file=sys.stderr)
         return 1
 
-    validation_tasks = subprocess.run(
-        [
-            *ANSIBLE_PLAYBOOK,
-            "-i",
-            str(INVENTORY),
-            "site.yml",
-            "--list-tasks",
-            "--tags",
-            "validation",
-        ],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        env=os.environ.copy(),
-    )
     normal_tasks = subprocess.run(
         [*ANSIBLE_PLAYBOOK, "-i", str(INVENTORY), "site.yml", "--list-tasks"],
         cwd=REPO_ROOT,
@@ -371,15 +365,19 @@ def run_regressions() -> int:
         text=True,
         env=os.environ.copy(),
     )
+    site_documents = yaml.safe_load((REPO_ROOT / "site.yml").read_text(encoding="utf-8"))
     if (
-        validation_tasks.returncode != 0
-        or "Run aggregate standalone lifecycle validation" not in validation_tasks.stdout
+        any(
+            document.get("ansible.builtin.import_playbook")
+            == "playbooks/validate-infrastructure.yml"
+            or "validation" in document.get("tags", [])
+            for document in site_documents
+        )
         or normal_tasks.returncode != 0
         or "Run aggregate standalone lifecycle validation" in normal_tasks.stdout
         or "Build the effective LXC specification" not in normal_tasks.stdout
     ):
-        print("site.yml validation tag routing is incorrect", file=sys.stderr)
-        print(f"validation route:\n{validation_tasks.stdout}\n{validation_tasks.stderr}", file=sys.stderr)
+        print("site.yml still exposes standalone validation or lost lifecycle routing", file=sys.stderr)
         print(f"normal route:\n{normal_tasks.stdout}\n{normal_tasks.stderr}", file=sys.stderr)
         return 1
 
@@ -388,9 +386,9 @@ def run_regressions() -> int:
             *ANSIBLE_PLAYBOOK,
             "-i",
             str(VALIDATION_PREREQUISITE_INVENTORY),
-            "site.yml",
-            "--tags",
-            "validation",
+            str(STANDALONE_PLAYBOOK),
+            "--limit",
+            "missing_domain",
         ],
         cwd=REPO_ROOT,
         capture_output=True,
@@ -418,6 +416,7 @@ def run_regressions() -> int:
             str(STANDALONE_PLAYBOOK),
             "--limit",
             "target_conflict,release_problem",
+            "--check",
         ],
         cwd=REPO_ROOT,
         capture_output=True,

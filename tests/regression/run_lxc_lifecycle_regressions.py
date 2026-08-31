@@ -63,6 +63,7 @@ FAST_SCRIPTS = (
 # execution keeps their timing and failure attribution predictable.
 FULL_ONLY_SCRIPTS = (
     "test_lifecycle_run_lock.py",
+    "test_inspect_command.py",
     "test_lxc_lifecycle_invalid_state.py",
     "test_lxc_lifecycle_guest_bootstrap_contract.py",
     "test_lxc_spec_contract.py",

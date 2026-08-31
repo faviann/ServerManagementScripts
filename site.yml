@@ -5,15 +5,8 @@
 #
 # Usage:
 #   ./run.sh                                                     # Run full lifecycle
-#   uv run --locked ansible-playbook playbooks/validate-infrastructure.yml  # Just validation
 #   ./run.sh provision                                           # Just provisioning
 #   ./run.sh configure                                           # Just configuration
-
-- name: Run standalone LXC lifecycle validation when explicitly tagged
-  ansible.builtin.import_playbook: playbooks/validate-infrastructure.yml
-  tags:
-    - never
-    - validation
 
 - name: Run the full LXC lifecycle
   ansible.builtin.import_playbook: playbooks/lifecycle-lxcs.yml
