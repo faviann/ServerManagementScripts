@@ -249,6 +249,25 @@ ordinary_derived_value: marker={fixture_secret}
         )
 
 
+def assert_vars_suppresses_masker_failure_diagnostics() -> None:
+    fixture_marker = "FixtureLeakValue42"
+    inventory_output = f"ordinary: !{fixture_marker} x\n"
+    with tempfile.TemporaryDirectory(prefix="inspect-vars-mask-failure-") as temp_dir:
+        temp_root = Path(temp_dir)
+        env = vars_environment(temp_root, inventory_output)
+        result = run_inspect("vars", "fixture_host", env=env)
+        captures = vars_invocations(temp_root)
+
+    output = f"{result.stdout}\n{result.stderr}"
+    if result.returncode != 1 or result.stdout or fixture_marker in output:
+        raise AssertionError(f"vars disclosed masker failure input:\n{output}")
+    expected_captures = expected_host_vars_invocations("fixture_host")
+    if captures != expected_captures:
+        raise AssertionError(
+            f"masker failure used a live or unexpected execution path: {captures!r}"
+        )
+
+
 def assert_vars_content_rule_ignores_seven_character_vault_values() -> None:
     inventory_output = """---
 vault_short_value: Abc1234
@@ -758,6 +777,7 @@ def main() -> int:
         assert_explicit_operation_and_help()
         assert_vars_masks_vault_derived_values_without_live_execution()
         assert_vars_normalizes_inventory_failure_without_disclosure()
+        assert_vars_suppresses_masker_failure_diagnostics()
         assert_vars_content_rule_ignores_seven_character_vault_values()
         assert_vars_graph_preserves_inventory_tree_without_live_execution()
         assert_vars_graph_normalizes_inventory_failure_without_disclosure()

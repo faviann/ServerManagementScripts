@@ -79,7 +79,7 @@ case "${1:-}" in
         if uv run --locked ansible-inventory \
             -i inventory/hosts.yml --host "$1" --yaml 2>/dev/null \
             | uv run --locked python -m scripts.masked_inventory \
-                >"$masked_inventory_file"; then
+                >"$masked_inventory_file" 2>/dev/null; then
             if cat "$masked_inventory_file"; then
                 exit 0
             fi
