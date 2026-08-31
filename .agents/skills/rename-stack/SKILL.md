@@ -76,7 +76,7 @@ generic rename cannot safely reconcile.
 ### 3. Remote migration + deploy (present, run on approval — **gate 2**)
 
 Look up `docker_uid`/`docker_gid` for the host if a `chown` is needed
-(`uv run --locked ansible-inventory -i inventory/hosts.yml --host <host> --yaml`).
+(`./inspect.sh vars <host>`).
 
 ```bash
 # Stop old stack and rename folder in place (bind appdata rides along).
