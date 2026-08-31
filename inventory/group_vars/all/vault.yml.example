@@ -3,6 +3,8 @@
 #
 # This file contains sensitive credentials and should be encrypted with uv run --locked ansible-vault.
 # DO NOT commit this file unencrypted to version control.
+# Every top-level key must start with vault_; ./inspect.sh vars depends on this
+# contract to identify values that require masking.
 #
 # Setup instructions:
 #   1. Run ./setup.sh for guided credential configuration (recommended)

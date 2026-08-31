@@ -16,6 +16,7 @@ Operations:
                               Check managed-LXC SSH connectivity
   containers                  List every LXC on the Proxmox node
   plan [--limit <targets>]    Report lifecycle planning problems without execution
+  vars <host> | vars --graph  Show merged variables masked, or the inventory graph
 
 Options:
   --limit <targets>           Select hosts with Ansible limit grammar
@@ -59,6 +60,31 @@ case "${1:-}" in
         supports_limit=true
         requires_check_mode=true
         shift
+        ;;
+    vars)
+        shift
+        (($# == 1)) || usage_error "vars requires one host or --graph"
+        if [[ "$1" == "--graph" ]]; then
+            if uv run --locked ansible-inventory \
+                -i inventory/hosts.yml --graph 2>/dev/null; then
+                exit 0
+            fi
+            exit 1
+        fi
+        [[ "$1" != -* ]] || usage_error "unknown option"
+        if ! masked_inventory_file="$(mktemp)"; then
+            exit 1
+        fi
+        trap 'rm -f -- "$masked_inventory_file"' EXIT
+        if uv run --locked ansible-inventory \
+            -i inventory/hosts.yml --host "$1" --yaml 2>/dev/null \
+            | uv run --locked python -m scripts.masked_inventory \
+                >"$masked_inventory_file" 2>/dev/null; then
+            if cat "$masked_inventory_file"; then
+                exit 0
+            fi
+        fi
+        exit 1
         ;;
     "")
         usage_error "an operation is required"

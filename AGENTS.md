@@ -103,7 +103,7 @@ rg "failed=|unreachable=|FAILED|changed=|<relevant-resource>" /tmp/<task>.log
 ```
 Only read the full log when the summarized output is insufficient to diagnose a failure. Never print secrets from logs or vault output.
 
-Debug: `./run.sh -vvv` for verbose output, `uv run --locked ansible-inventory -i inventory/hosts.yml --host <name> --yaml` for merged vars, `uv run --locked ansible -i inventory/hosts.yml lxcs -m ping` for connectivity, delete `.ansible/cache/` for stale facts.
+Debug: `./run.sh -vvv` for verbose output, `./inspect.sh vars <name>` for merged vars, `uv run --locked ansible -i inventory/hosts.yml lxcs -m ping` for connectivity, delete `.ansible/cache/` for stale facts.
 
 ## Role Design Principles
 
