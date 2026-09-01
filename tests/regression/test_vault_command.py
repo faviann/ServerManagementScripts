@@ -10,6 +10,7 @@ import shutil
 import signal
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -34,26 +35,70 @@ unrelated_mapping:
 """
 
 
-def install_fake_executable(bin_dir: Path, name: str) -> Path:
-    executable = bin_dir / name
-    shutil.copy2(FAKE_FIXTURES / name, executable)
-    executable.chmod(0o755)
-    return executable
+FakeExecutableFactory = Callable[..., Path]
+FAKE_KNOB_ENV: dict[str, dict[str, str]] = {
+    "uv": {
+        "decrypt_fail": "VAULT_TEST_DECRYPT_FAIL",
+        "decrypt_writes_then_fail": "VAULT_TEST_DECRYPT_WRITES_THEN_FAIL",
+        "encrypt_fail": "VAULT_TEST_ENCRYPT_FAIL",
+        "python_fail": "VAULT_TEST_PYTHON_FAIL",
+        "require_project_cwd": "VAULT_TEST_REQUIRE_PROJECT_CWD",
+        "validate_fail": "VAULT_TEST_VALIDATE_FAIL",
+        "view_signal": "VAULT_TEST_VIEW_SIGNAL",
+    },
+    "mv": {
+        "fail": "VAULT_TEST_MOVE_FAIL",
+        "signal_after": "VAULT_TEST_MOVE_SIGNAL_AFTER",
+    },
+    "rm": {
+        "fail": "VAULT_TEST_CLEANUP_FAIL",
+        "signal": "VAULT_TEST_CLEANUP_SIGNAL",
+    },
+    "editor": {
+        "capture": "VAULT_TEST_EDITOR_CAPTURE",
+        "fail": "VAULT_TEST_EDITOR_FAIL",
+        "signal": "VAULT_TEST_EDITOR_SIGNAL",
+    },
+    "stat": {},
+}
 
 
 @pytest.fixture
-def vault_repo(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+def fake_executable(tmp_path: Path) -> FakeExecutableFactory:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+
+    def install(
+        name: str, env: dict[str, str], **knobs: str | int | bool | Path | None
+    ) -> Path:
+        executable = bin_dir / name
+        shutil.copy2(FAKE_FIXTURES / name, executable)
+        executable.chmod(0o755)
+        for knob, value in knobs.items():
+            variable = FAKE_KNOB_ENV[name][knob]
+            if value is None or value is False:
+                env.pop(variable, None)
+            else:
+                env[variable] = "1" if value is True else str(value)
+        if name == "editor":
+            env["EDITOR"] = str(executable)
+        return executable
+
+    return install
+
+
+@pytest.fixture
+def vault_repo(
+    tmp_path: Path, fake_executable: FakeExecutableFactory
+) -> tuple[Path, dict[str, str]]:
     repo = tmp_path / "repo"
     vault_dir = repo / "inventory/group_vars/all"
     bin_dir = tmp_path / "bin"
     home = tmp_path / "home"
     vault_dir.mkdir(parents=True)
-    bin_dir.mkdir()
+    bin_dir.mkdir(exist_ok=True)
     (home / ".ansible").mkdir(parents=True)
     shutil.copy2(RUNNER, repo / "vault.sh")
-
-    for name in ("uv", "mv", "rm"):
-        install_fake_executable(bin_dir, name)
 
     env = os.environ.copy()
     env.update(
@@ -65,6 +110,8 @@ def vault_repo(tmp_path: Path) -> tuple[Path, dict[str, str]]:
             "VAULT_TEST_BOUNDARY_CAPTURE": str(tmp_path / "boundaries.jsonl"),
         }
     )
+    for name in ("uv", "mv", "rm"):
+        fake_executable(name, env)
     return repo, env
 
 
@@ -101,7 +148,10 @@ def run_real_ansible_vault(
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
-            str(REPO_ROOT / ".venv/bin/ansible-vault"),
+            "uv",
+            "run",
+            "--locked",
+            "ansible-vault",
             operation,
             str(repo / "inventory/group_vars/all/vault.yml"),
         ],
@@ -150,11 +200,13 @@ def test_vault_requires_an_operation_and_advertises_its_complete_interface() -> 
 
 
 def test_vault_fakes_are_named_executable_fixtures(
-    vault_repo: tuple[Path, dict[str, str]], tmp_path: Path
+    vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
+    tmp_path: Path,
 ) -> None:
     _, env = vault_repo
     installed_bin = Path(env["PATH"].split(":", 1)[0])
-    install_editor(tmp_path, env)
+    fake_executable("editor", env, capture=tmp_path / "editor-capture")
 
     for name in ("uv", "mv", "rm", "editor"):
         fixture = FAKE_FIXTURES / name
@@ -162,8 +214,21 @@ def test_vault_fakes_are_named_executable_fixtures(
         assert installed_bin.joinpath(name).read_bytes() == fixture.read_bytes()
 
 
+def test_fake_executable_factory_installs_a_named_fake_and_encodes_its_knobs(
+    fake_executable: FakeExecutableFactory,
+) -> None:
+    env: dict[str, str] = {}
+
+    installed = fake_executable("uv", env, decrypt_fail=True)
+
+    assert installed.read_bytes() == (FAKE_FIXTURES / "uv").read_bytes()
+    assert env == {"VAULT_TEST_DECRYPT_FAIL": "1"}
+
+
 def test_vault_uses_its_project_when_invoked_from_an_unrelated_directory(
-    vault_repo: tuple[Path, dict[str, str]], tmp_path: Path
+    vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
+    tmp_path: Path,
 ) -> None:
     repo, env = vault_repo
     (repo / "inventory/group_vars/all/vault.yml").write_text(
@@ -174,7 +239,7 @@ def test_vault_uses_its_project_when_invoked_from_an_unrelated_directory(
     pass_file.chmod(0o600)
     unrelated_directory = tmp_path / "unrelated"
     unrelated_directory.mkdir()
-    env["VAULT_TEST_REQUIRE_PROJECT_CWD"] = "1"
+    fake_executable("uv", env, require_project_cwd=True)
 
     result = subprocess.run(
         [str(repo / "vault.sh"), "check"],
@@ -205,6 +270,24 @@ def test_real_ansible_vault_encrypt_decrypt_round_trip(
     assert ciphertext.startswith(HEADER)
     assert decrypted.returncode == 0, decrypted.stderr
     assert vault.read_text(encoding="utf-8") == VALID_YAML
+
+
+def test_real_ansible_vault_runs_through_the_locked_project_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    observed_command: list[str] = []
+
+    def capture_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        observed_command.extend(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", capture_run)
+
+    run_real_ansible_vault(tmp_path, os.environ.copy(), "encrypt")
+
+    assert observed_command[:4] == ["uv", "run", "--locked", "ansible-vault"]
 
 
 def test_check_accepts_a_genuinely_encrypted_vault(
@@ -241,7 +324,10 @@ def test_check_accepts_a_genuinely_encrypted_vault(
     ],
 )
 def test_check_reports_each_contract_check_without_disclosing_values(
-    vault_repo: tuple[Path, dict[str, str]], state: str, expected_failure: str | None
+    vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
+    state: str,
+    expected_failure: str | None,
 ) -> None:
     repo, env = vault_repo
     vault = repo / "inventory/group_vars/all/vault.yml"
@@ -273,7 +359,7 @@ def test_check_reports_each_contract_check_without_disclosing_values(
     elif state == "world-open-pass":
         pass_file.chmod(0o604)
     elif state == "decrypt-failure":
-        env["VAULT_TEST_DECRYPT_FAIL"] = "1"
+        fake_executable("uv", env, decrypt_fail=True)
 
     result = run_vault(repo, env, "check")
 
@@ -309,6 +395,7 @@ def test_check_reports_each_contract_check_without_disclosing_values(
 
 def test_check_rejects_a_passphrase_file_not_owned_by_the_current_user(
     vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
 ) -> None:
     repo, env = vault_repo
     (repo / "inventory/group_vars/all/vault.yml").write_text(
@@ -319,9 +406,7 @@ def test_check_rejects_a_passphrase_file_not_owned_by_the_current_user(
     pass_file.chmod(0o600)
     stat_fixture = FAKE_FIXTURES / "stat"
     assert stat_fixture.is_file()
-    stat_stub = install_fake_executable(
-        Path(env["PATH"].split(":", 1)[0]), "stat"
-    )
+    stat_stub = fake_executable("stat", env)
     assert stat_stub.read_bytes() == stat_fixture.read_bytes()
 
     result = run_vault(repo, env, "check")
@@ -332,6 +417,7 @@ def test_check_rejects_a_passphrase_file_not_owned_by_the_current_user(
 
 def test_check_treats_yaml_validation_tool_failure_as_a_failed_check(
     vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
 ) -> None:
     repo, env = vault_repo
     (repo / "inventory/group_vars/all/vault.yml").write_text(
@@ -340,7 +426,7 @@ def test_check_treats_yaml_validation_tool_failure_as_a_failed_check(
     pass_file = Path(env["ANSIBLE_VAULT_PASSWORD_FILE"])
     pass_file.write_text("pass\n", encoding="utf-8")
     pass_file.chmod(0o600)
-    env["VAULT_TEST_PYTHON_FAIL"] = "1"
+    fake_executable("uv", env, python_fail=True)
 
     result = run_vault(repo, env, "check")
 
@@ -421,7 +507,9 @@ def test_check_accepts_ordinary_padded_values_without_changing_them(
 
 @pytest.mark.parametrize("signal_number", [signal.SIGINT, signal.SIGTERM])
 def test_interrupted_check_removes_its_exact_plaintext_workspace(
-    vault_repo: tuple[Path, dict[str, str]], signal_number: int
+    vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
+    signal_number: int,
 ) -> None:
     repo, env = vault_repo
     (repo / "inventory/group_vars/all/vault.yml").write_text(
@@ -430,7 +518,7 @@ def test_interrupted_check_removes_its_exact_plaintext_workspace(
     pass_file = Path(env["ANSIBLE_VAULT_PASSWORD_FILE"])
     pass_file.write_text("synthetic-passphrase-marker\n", encoding="utf-8")
     pass_file.chmod(0o600)
-    env["VAULT_TEST_VIEW_SIGNAL"] = str(signal_number)
+    fake_executable("uv", env, view_signal=signal_number)
     result = run_vault(repo, env, "check")
 
     plaintext_event = next(
@@ -665,20 +753,19 @@ def test_configure_preserves_ordinary_credential_whitespace_exactly(
 def install_editor(
     tmp_path: Path,
     env: dict[str, str],
+    fake_executable: FakeExecutableFactory,
     *,
     fail: bool = False,
     signal_number: int | None = None,
 ) -> Path:
     capture = tmp_path / "editor-capture"
-    editor = install_fake_executable(
-        Path(env["PATH"].split(":", 1)[0]), "editor"
+    fake_executable(
+        "editor",
+        env,
+        capture=capture,
+        fail=fail,
+        signal=signal_number,
     )
-    env["VAULT_TEST_EDITOR_CAPTURE"] = str(capture)
-    if fail:
-        env["VAULT_TEST_EDITOR_FAIL"] = "1"
-    if signal_number is not None:
-        env["VAULT_TEST_EDITOR_SIGNAL"] = str(int(signal_number))
-    env["EDITOR"] = str(editor)
     return capture
 
 
@@ -706,7 +793,9 @@ def test_configure_creates_only_required_fields_in_a_protected_tmpfs_transaction
 
 
 def test_edit_presents_and_publishes_the_complete_vault(
-    vault_repo: tuple[Path, dict[str, str]], tmp_path: Path
+    vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
+    tmp_path: Path,
 ) -> None:
     repo, env = vault_repo
     vault = repo / "inventory/group_vars/all/vault.yml"
@@ -714,7 +803,7 @@ def test_edit_presents_and_publishes_the_complete_vault(
     Path(env["ANSIBLE_VAULT_PASSWORD_FILE"]).write_text(
         "synthetic-passphrase-marker\n", encoding="utf-8"
     )
-    capture = install_editor(tmp_path, env)
+    capture = install_editor(tmp_path, env, fake_executable)
 
     returncode, output = run_vault_tty(repo, env, [], "edit")
 
@@ -746,6 +835,7 @@ def test_edit_presents_and_publishes_the_complete_vault(
 )
 def test_mutations_keep_the_tracked_path_safe_at_every_external_boundary(
     vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
     tmp_path: Path,
     operation: str,
     initial_state: str,
@@ -759,7 +849,7 @@ def test_mutations_keep_the_tracked_path_safe_at_every_external_boundary(
     elif initial_state == "plaintext":
         vault.write_bytes(original)
     if operation == "edit":
-        install_editor(tmp_path, env)
+        install_editor(tmp_path, env, fake_executable)
     interactions: list[tuple[str, str]] = []
     if initial_state == "plaintext":
         interactions.append(("Encrypt and replace it? [y/N] ", "y\n"))
@@ -809,16 +899,56 @@ def test_cleanup_ignores_an_unrelated_tmpfs_transaction(
         sentinel.rmdir()
 
 
+def test_cleanup_ignores_unrelated_tmpfs_state_created_after_the_run(
+    vault_repo: tuple[Path, dict[str, str]], tmp_path: Path
+) -> None:
+    repo, env = vault_repo
+    returncode, transcript = run_vault_tty(
+        repo, env, configure_interactions(), "configure"
+    )
+    sentinel = Path("/dev/shm") / f"homelab-vault.late-{tmp_path.name}"
+    sentinel.mkdir()
+    try:
+        assert returncode == 0, transcript
+        assert_no_transaction_artifacts(repo, env)
+        assert sentinel.is_dir()
+    finally:
+        sentinel.rmdir()
+
+
+def test_cleanup_rejects_a_run_workspace_until_it_is_removed(
+    vault_repo: tuple[Path, dict[str, str]], tmp_path: Path
+) -> None:
+    repo, env = vault_repo
+    workspace = Path("/dev/shm") / f"homelab-vault.owned-{tmp_path.name}"
+    workspace.mkdir()
+    capture = Path(env["VAULT_TEST_BOUNDARY_CAPTURE"])
+    capture.write_text(
+        json.dumps({"boundary": "cleanup", "workspace": str(workspace)}) + "\n",
+        encoding="utf-8",
+    )
+    try:
+        with pytest.raises(AssertionError):
+            assert_no_transaction_artifacts(repo, env)
+    finally:
+        workspace.rmdir()
+
+    assert_no_transaction_artifacts(repo, env)
+
+
 @pytest.mark.parametrize("operation", ["configure", "edit"])
 def test_unencrypted_vault_requires_confirmation_and_retains_no_plaintext_backup(
-    vault_repo: tuple[Path, dict[str, str]], tmp_path: Path, operation: str
+    vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
+    tmp_path: Path,
+    operation: str,
 ) -> None:
     repo, env = vault_repo
     vault = repo / "inventory/group_vars/all/vault.yml"
     original = VALID_YAML.encode()
     vault.write_bytes(original)
     if operation == "edit":
-        install_editor(tmp_path, env)
+        install_editor(tmp_path, env, fake_executable)
 
     declined, declined_output = run_vault_tty(
         repo,
@@ -863,6 +993,7 @@ def test_unencrypted_vault_requires_confirmation_and_retains_no_plaintext_backup
 )
 def test_failed_mutation_preserves_the_original_bytes(
     vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
     tmp_path: Path,
     operation: str,
     failure: str,
@@ -877,17 +1008,22 @@ def test_failed_mutation_preserves_the_original_bytes(
         passphrase + "\n", encoding="utf-8"
     )
     if failure == "decrypt":
-        env["VAULT_TEST_DECRYPT_FAIL"] = "1"
+        fake_executable("uv", env, decrypt_fail=True)
     elif failure == "decrypt-output":
-        env["VAULT_TEST_DECRYPT_WRITES_THEN_FAIL"] = "1"
+        fake_executable("uv", env, decrypt_writes_then_fail=True)
     elif failure == "encrypt":
-        env["VAULT_TEST_ENCRYPT_FAIL"] = "1"
+        fake_executable("uv", env, encrypt_fail=True)
     elif failure == "validation":
-        env["VAULT_TEST_VALIDATE_FAIL"] = "1"
+        fake_executable("uv", env, validate_fail=True)
     elif failure == "publication":
-        env["VAULT_TEST_MOVE_FAIL"] = "1"
+        fake_executable("mv", env, fail=True)
     if operation == "edit":
-        install_editor(tmp_path, env, fail=failure == "editor")
+        install_editor(
+            tmp_path,
+            env,
+            fake_executable,
+            fail=failure == "editor",
+        )
 
     interactions = configure_interactions() if operation == "configure" else []
     returncode, output = run_vault_tty(repo, env, interactions, operation)
@@ -923,6 +1059,7 @@ def test_failed_mutation_preserves_the_original_bytes(
 @pytest.mark.parametrize("signal_number", [signal.SIGINT, signal.SIGTERM])
 def test_interrupted_edit_cleans_its_exact_transaction_workspace(
     vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
     tmp_path: Path,
     signal_number: int,
 ) -> None:
@@ -930,7 +1067,12 @@ def test_interrupted_edit_cleans_its_exact_transaction_workspace(
     vault = repo / "inventory/group_vars/all/vault.yml"
     original = (HEADER + VALID_YAML).encode()
     vault.write_bytes(original)
-    install_editor(tmp_path, env, signal_number=signal_number)
+    install_editor(
+        tmp_path,
+        env,
+        fake_executable,
+        signal_number=signal_number,
+    )
     returncode, _ = run_vault_tty(repo, env, [], "edit")
     events = boundary_events(env)
     editor_event = next(event for event in events if event["boundary"] == "editor")
@@ -948,12 +1090,13 @@ def test_interrupted_edit_cleans_its_exact_transaction_workspace(
 
 def test_cleanup_status_failure_makes_a_successful_mutation_fail(
     vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
 ) -> None:
     repo, env = vault_repo
     vault = repo / "inventory/group_vars/all/vault.yml"
     original = (HEADER + VALID_YAML).encode()
     vault.write_bytes(original)
-    env["VAULT_TEST_CLEANUP_FAIL"] = "1"
+    fake_executable("rm", env, fail=True)
     returncode, output = run_vault_tty(
         repo, env, configure_interactions(), "configure"
     )
@@ -978,12 +1121,13 @@ def test_cleanup_status_failure_makes_a_successful_mutation_fail(
 
 def test_signal_between_cleanup_and_publication_preserves_the_original(
     vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
 ) -> None:
     repo, env = vault_repo
     vault = repo / "inventory/group_vars/all/vault.yml"
     original = (HEADER + VALID_YAML).encode()
     vault.write_bytes(original)
-    env["VAULT_TEST_CLEANUP_SIGNAL"] = "1"
+    fake_executable("rm", env, signal=True)
     returncode, output = run_vault_tty(
         repo, env, configure_interactions(), "configure"
     )
@@ -997,12 +1141,13 @@ def test_signal_between_cleanup_and_publication_preserves_the_original(
 
 def test_signal_after_atomic_rename_reports_the_committed_success(
     vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
 ) -> None:
     repo, env = vault_repo
     vault = repo / "inventory/group_vars/all/vault.yml"
     original = (HEADER + VALID_YAML).encode()
     vault.write_bytes(original)
-    env["VAULT_TEST_MOVE_SIGNAL_AFTER"] = "1"
+    fake_executable("mv", env, signal_after=True)
     returncode, output = run_vault_tty(
         repo, env, configure_interactions(), "configure"
     )
