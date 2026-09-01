@@ -33,7 +33,7 @@ VAULT_PASSWORD_FILE = REPO_ROOT / "tests" / "fixtures" / "ansible" / "vault-pass
 PLAYBOOK = REPO_ROOT / "playbooks" / "controller-prerequisites.yml"
 TARGET = "prerequisite_cache_target"
 POISONED_FACT = "discovered_interpreter_python"
-ANSIBLE_PLAYBOOK = ansible_playbook_command()
+ANSIBLE_PLAYBOOK = ansible_playbook_command(supplies_own_inventory=True)
 
 
 def run_prerequisites(cache_connection: Path) -> subprocess.CompletedProcess[str]:
