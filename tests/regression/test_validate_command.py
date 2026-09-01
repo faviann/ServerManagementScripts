@@ -18,7 +18,9 @@ FIXTURE_VAULT_PASSWORD_FILE = str(REPO_ROOT / "tests/fixtures/ansible/vault-pass
 OPERATOR_MARKER = "operator-secret-marker-4f2b"
 
 
-def validation_environment(tmp_path: Path, *, fail_at: int = 0) -> dict[str, str]:
+def validation_environment(
+    tmp_path: Path, *, fail_at: int = 0, sentinel_mode: int = 0o600
+) -> dict[str, str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     fake_uv = bin_dir / "uv"
@@ -52,8 +54,12 @@ if len(commands) == int(os.environ.get("VALIDATE_TEST_FAIL_AT", "0")):
     env.pop("HOMELAB_IAC_LIFECYCLE_WRAPPER", None)
     env.update(
         {
-            "ANSIBLE_INVENTORY": operator_sentinel(tmp_path, "inventory"),
-            "ANSIBLE_VAULT_PASSWORD_FILE": operator_sentinel(tmp_path, "vault-pass"),
+            "ANSIBLE_INVENTORY": operator_sentinel(
+                tmp_path, "inventory", sentinel_mode
+            ),
+            "ANSIBLE_VAULT_PASSWORD_FILE": operator_sentinel(
+                tmp_path, "vault-pass", sentinel_mode
+            ),
             "HOME": str(tmp_path / "home"),
             "PATH": f"{bin_dir}:{env['PATH']}",
             "VALIDATE_TEST_CAPTURE": str(tmp_path / "commands.json"),
@@ -63,16 +69,18 @@ if len(commands) == int(os.environ.get("VALIDATE_TEST_FAIL_AT", "0")):
     return env
 
 
-def operator_sentinel(tmp_path: Path, name: str) -> str:
-    """A readable operator input the command must neither read nor disclose.
+def operator_sentinel(tmp_path: Path, name: str, mode: int = 0o600) -> str:
+    """An operator input the command must neither read nor disclose.
 
-    Readable on purpose: a real operator's inventory and vault-password file
-    are readable, so any read by the wrapper surfaces the marker in its output
-    where the agent-safety assertions can observe it.
+    Two modes detect two different faults. At ``0o600`` the file reads like a
+    real operator's inventory or vault-password file, so a disclosing read
+    surfaces the marker in the command's own output. At ``0o000`` any
+    unguarded read fails instead, aborting the command and showing up as a
+    non-zero exit even when nothing is printed.
     """
     sentinel = tmp_path / f"operator-{name}"
     sentinel.write_text(f"{OPERATOR_MARKER}\n", encoding="utf-8")
-    sentinel.chmod(0o600)
+    sentinel.chmod(mode)
     return str(sentinel)
 
 
@@ -469,6 +477,11 @@ def test_stack_reports_a_valid_policy_as_schema_versioned_json() -> None:
     assert "stacks/workstation/mcp-auth-proxy" in result.stderr
 
 
+# The frozen validation surface for issue #213 names stacks/overmind/overmind
+# as the invalid-contract instance. stacks/README.md calls that stack legacy
+# and pending migration, so once it gains an `updates:` policy this case stops
+# being invalid: move it to another stack that fails validation rather than
+# weakening the assertions.
 @pytest.mark.parametrize(
     "path",
     [
@@ -488,8 +501,6 @@ def test_stack_reports_an_invalid_contract_on_stderr_and_exits_non_zero(
     assert document["errors"]
     diagnostic = document["errors"][0]["message"]
     assert diagnostic in result.stderr
-    # json.loads over the whole of stdout already rejects any diagnostic text
-    # accompanying the document, so stdout carries the JSON and nothing else.
 
 
 # --- AC7 / AC10: the fixture environment and agent safety ------------------
@@ -517,18 +528,20 @@ def test_every_operation_runs_under_the_fixture_environment(
 
 
 @pytest.mark.parametrize("arguments", OPERATION_ENTRY_POINTS)
+@pytest.mark.parametrize("sentinel_mode", [0o600, 0o000])
 def test_every_operation_is_agent_safe(
-    tmp_path: Path, arguments: tuple[str, ...]
+    tmp_path: Path, arguments: tuple[str, ...], sentinel_mode: int
 ) -> None:
-    env = validation_environment(tmp_path)
+    env = validation_environment(tmp_path, sentinel_mode=sentinel_mode)
 
     result = run_validation(env, REPO_ROOT, *arguments)
 
+    # A readable sentinel catches a disclosing read through the marker
+    # assertions; an unreadable one catches a silent read, which fails and
+    # aborts the command before it can exit 0.
     assert result.returncode == 0, result.stderr
     assert OPERATOR_MARKER not in result.stdout
     assert OPERATOR_MARKER not in result.stderr
-    for name in ("ANSIBLE_INVENTORY", "ANSIBLE_VAULT_PASSWORD_FILE"):
-        assert OPERATOR_MARKER in Path(env[name]).read_text(encoding="utf-8")
     for kind in child_kinds(captured_commands(tmp_path)):
         assert kind in {"lint", "lifecycle", "tests", "stack"}
 
