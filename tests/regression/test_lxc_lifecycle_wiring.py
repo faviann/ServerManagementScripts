@@ -9,13 +9,15 @@ import sys
 import tempfile
 from pathlib import Path
 
+from ansible_test_helper import ansible_playbook_command
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = REPO_ROOT / "tests" / "regression" / "fixtures"
 ASSETS = FIXTURES / "lxc_lifecycle_facade_assets"
 INVENTORY = FIXTURES / "lxc_lifecycle_wiring_inventory.yml"
 PLAYBOOK = FIXTURES / "lxc_lifecycle_wiring_test.yml"
-ANSIBLE_PLAYBOOK = "uv run --locked ansible-playbook".split()
+ANSIBLE_PLAYBOOK = ansible_playbook_command(supplies_own_inventory=True)
 
 
 def main() -> int:
