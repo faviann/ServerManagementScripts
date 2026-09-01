@@ -478,10 +478,10 @@ def test_stack_reports_a_valid_policy_as_schema_versioned_json() -> None:
 
 
 # The frozen validation surface for issue #213 names stacks/overmind/overmind
-# as the invalid-contract instance. stacks/README.md calls that stack legacy
-# and pending migration, so once it gains an `updates:` policy this case stops
-# being invalid: move it to another stack that fails validation rather than
-# weakening the assertions.
+# as the invalid-contract instance: its stack.yaml carries no `updates:`
+# section today, so validation reports it as invalid. If that stack ever gains
+# an update policy, move this case to another genuinely invalid stack rather
+# than weakening the assertions.
 @pytest.mark.parametrize(
     "path",
     [
@@ -532,6 +532,11 @@ def test_every_operation_runs_under_the_fixture_environment(
 def test_every_operation_is_agent_safe(
     tmp_path: Path, arguments: tuple[str, ...], sentinel_mode: int
 ) -> None:
+    if sentinel_mode == 0o000 and os.geteuid() == 0:
+        pytest.skip(
+            "root bypasses mode bits, so an unreadable sentinel cannot detect "
+            "a silent read"
+        )
     env = validation_environment(tmp_path, sentinel_mode=sentinel_mode)
 
     result = run_validation(env, REPO_ROOT, *arguments)
