@@ -1,0 +1,14 @@
+---
+# Mirrors the production shape that makes the prerequisite play risky: the
+# lifecycle target is a remote SSH host, so any fact the play records for it is
+# persisted under that identity and reused by the next play, which really does
+# connect over SSH.
+all:
+  children:
+    lxcs:
+      vars:
+        ansible_connection: ssh
+        ansible_user: root
+      hosts:
+        prerequisite_cache_target:
+          ansible_host: prerequisite-cache-target.invalid.
