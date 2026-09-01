@@ -139,7 +139,7 @@ ssh -o BatchMode=yes -l root -i ~/.ansible/ssh/proxmox_lxc servarr.faviann.vms \
 Local contract checks:
 
 ```bash
-uv run --locked python -m unittest tests.unit.test_servarr_beets_flask_contract
+./validate.sh tests tests/unit/test_servarr_beets_flask_contract.py
 uv run --locked python tests/regression/test_beets_flask_stack_contract.py
 ```
 

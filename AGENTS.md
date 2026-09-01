@@ -81,17 +81,19 @@ Stacks live in `stacks/<hostname>/<stack-name>/compose.yaml`. Auto-discovered an
 | `./run.sh --limit <host> -e stack_filter=<stack>` | Deploy one stack on a host (skips all others) |
 | `./run.sh --check` | Dry run |
 | `uv run --locked ansible-playbook bootstrap.yml` | Recreate bootstrap artifacts after clean install |
-| `uv run --locked python tests/regression/run_lxc_lifecycle_regressions.py` | Fast lifecycle feedback (~1.5 min) — semantic lifecycle facade matrix + targeted planning barrier, controlled observations only. Run while iterating on LXC lifecycle changes |
-| `uv run --locked python tests/regression/run_lxc_lifecycle_regressions.py --only <launcher.py>` | Target one registered lifecycle launcher in the same credential-free fixture environment. Repeat `--only` to run several launchers in the supplied order |
-| `uv run --locked python tests/regression/run_lxc_lifecycle_regressions.py --full --fail-fast` | Remediation pass — finish the concurrent fast launchers, then stop scheduling after the first observed failure |
-| `uv run --locked python tests/regression/run_lxc_lifecycle_regressions.py --full` | Full lifecycle regression set (~6 min) — fast path plus host-config idempotence, real role-composition wiring, fleet preflight, and contract seams. Prefer `./validate.sh` for handoff verification |
-| `uv run --locked ansible-lint` | Targeted repo-wide lint feedback (production profile). Prefer `./validate.sh` for handoff verification |
+| `./validate.sh lifecycle` | Fast lifecycle feedback (~1.5 min) — semantic lifecycle facade matrix + targeted planning barrier, controlled observations only. Run while iterating on LXC lifecycle changes |
+| `./validate.sh lifecycle --only <launcher.py>` | Target one registered lifecycle launcher in the same credential-free fixture environment. Repeat `--only` to run several launchers in the supplied order |
+| `./validate.sh lifecycle --full --fail-fast` | Remediation pass — finish the concurrent fast launchers, then stop scheduling after the first observed failure |
+| `./validate.sh lifecycle --full` | Full lifecycle regression set (~6 min) — fast path plus host-config idempotence, real role-composition wiring, fleet preflight, and contract seams. Prefer `./validate.sh` for handoff verification |
+| `./validate.sh lint` | Targeted repo-wide lint feedback (production profile). Prefer `./validate.sh` for handoff verification |
+| `./validate.sh tests [<target>...]` | Run the test suite, optionally restricted to targets inside `tests/` (a path, optionally with a `::` node-id suffix). Targets outside the test tree are invalid usage |
+| `./validate.sh stack <path>` | Validate one repo-managed stack's update policy — schema-versioned JSON on stdout, diagnostics on stderr. Not part of the no-argument handoff run |
 | `./setup.sh` | Fresh workstation setup — extend here for new workstation config (editor, tooling, env) |
 | `ssh -l root -i ~/.ansible/ssh/proxmox_lxc <host>` | Direct SSH into an LXC |
 
 **Timing**: `uv run --locked ansible-playbook` runs against live hosts typically take 5–10 minutes. Do not assume a hang — wait for completion before acting on the result.
 
-For lifecycle-regression remediation, use repeatable `--only <launcher.py>` for the shortest targeted loop and add `--fail-fast` when later selected launchers cannot provide useful evidence after a failure. `--only` accepts the registered filenames reported by the runner's actionable error. Before handoff, always run the unchanged aggregate completion command with `--full` and without `--fail-fast` so every launcher reports a result.
+For lifecycle-regression remediation, use repeatable `./validate.sh lifecycle --only <launcher.py>` for the shortest targeted loop and add `--fail-fast` when later selected launchers cannot provide useful evidence after a failure. `--only` accepts the registered filenames reported by the runner's actionable error, and cannot be combined with `--full`. A targeted operation never substitutes for the full handoff run: before handoff, always run `./validate.sh` with no arguments so every gate reports a result.
 
 Run `./validate.sh` for complete deterministic handoff verification. It does not load live inventory or acquire the lifecycle lock. Route every operation that contacts managed hosts, including `--check`, through `./run.sh`.
 
