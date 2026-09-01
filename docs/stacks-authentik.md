@@ -74,7 +74,16 @@ Repo-managed native OIDC app definitions live with the Authentik stack:
 - Manifest: `stacks/auth/auth/appdata/authentik/oidc-apps.yaml`
 - Generated blueprint template: `stacks/auth/auth/appdata/authentik/blueprints/80-oidc-apps.yaml.j2`
 
-Set `group:` in the manifest to the app's domain bundle. The generated
-blueprint replaces `always-allow` with domain-group and `admins` bindings.
+Set `group:` in the manifest to the app's domain bundle, or to `admins` for an
+intentionally admins-only application. The generated blueprint replaces
+`always-allow` with domain-group and `admins` bindings. An admins-only app
+therefore gets the same `admins` group at both orders; under
+`policy_engine_mode: any` that is one redundant but harmless binding.
+
+Set `grant_types:` on any app whose provider is created by this blueprint on
+Authentik 2026.5 or later. New providers default to an empty grant list, and
+both the authorize and token endpoints reject a grant that is not listed.
+Providers that predate 2026.5 were backfilled by migration and omit the key, so
+the manifest leaves their live grant sets untouched.
 
 RomM is the current concrete native OIDC example. Its app-specific notes live in [stacks/public/romm/README.md](../stacks/public/romm/README.md).

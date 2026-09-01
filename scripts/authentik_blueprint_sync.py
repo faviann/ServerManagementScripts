@@ -84,6 +84,24 @@ CUSTOM_BLUEPRINT_FILES = [
 ]
 
 
+# Authentik >= 2026.5 gates the authorize and token endpoints on the provider's
+# own `grant_types` list, and the model default for a newly created provider is
+# empty. Providers created before that release were backfilled by migration, so
+# only apps that declare `grant_types` here have it managed from the manifest.
+OIDC_GRANT_TYPES = frozenset(
+    {
+        "authorization_code",
+        "implicit",
+        "hybrid",
+        "refresh_token",
+        "client_credentials",
+        "password",
+        "urn:ietf:params:oauth:grant-type:device_code",
+        "urn:ietf:params:oauth:grant-type:token-exchange",
+    }
+)
+
+
 @dataclass(frozen=True)
 class FindRef:
     model: str
@@ -121,6 +139,17 @@ def validate_oidc_manifest(apps: list[dict[str, Any]]) -> None:
         if client_id in client_ids:
             raise ValueError(f"Duplicate client_id in OIDC manifest: {client_id!r}")
         client_ids.add(client_id)
+        grant_types = app.get("grant_types")
+        if grant_types is not None:
+            if not grant_types:
+                raise ValueError(
+                    f"App {slug!r} declares an empty grant_types list; omit the key instead"
+                )
+            for grant_type in grant_types:
+                if grant_type not in OIDC_GRANT_TYPES:
+                    raise ValueError(
+                        f"Unknown grant type in app {slug!r}: {grant_type!r}"
+                    )
         for uri in app["redirect_uris"]:
             if not uri.startswith("https://"):
                 raise ValueError(
@@ -216,8 +245,11 @@ def generate_oidc_blueprint_content(apps: list[dict[str, Any]]) -> str:
         for mapping in app.get("custom_scope_mappings", []):
             scope_id = scope_id_for_name[mapping["name"]]
             lines.append(f"    - !KeyOf {scope_id}")
+        lines.append("    client_type: confidential")
+        if app.get("grant_types"):
+            lines.append("    grant_types:")
+            lines += [f"    - {grant_type}" for grant_type in app["grant_types"]]
         lines += [
-            "    client_type: confidential",
             f"    client_id: {app['client_id']}",
             f"    client_secret: \"{{{{ {secret_var} }}}}\"",
             "    access_code_validity: minutes=1",

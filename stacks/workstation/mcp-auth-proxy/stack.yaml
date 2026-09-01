@@ -1,0 +1,21 @@
+---
+schema_version: 1
+kind: stack
+name: mcp-auth-proxy
+description: OAuth-protected public gateway for Moraine MCP
+portability:
+  tier: host-bound-app
+  owner: stack
+runtime:
+  template_inputs:
+    - stack_vars
+  host_requirements:
+    external_networks: []
+    host_directories: []
+    ownership_overrides: []
+exposure:
+  traefik: public
+  homepage_instances: []
+updates:
+  mode: images
+  track: "2.10"

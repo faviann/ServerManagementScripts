@@ -29,6 +29,12 @@ http:
       middlewares:
         - local-ip-restriction
 
+    mcp-auth-proxy:
+      rule: "Host(`mcp.faviann.com`) && (Path(`/mcp`) || PathPrefix(`/.well-known/`) || PathPrefix(`/.idp/`) || PathPrefix(`/.auth/`))"
+      entryPoints: websecure
+      service: mcp-auth-proxy-workstation
+      priority: 1000
+
     hermes:
       rule: "Host(`hermes.local.faviann.com`)"
       entryPoints: websecure
@@ -150,6 +156,10 @@ http:
       loadBalancer:
         servers:
           - url: "http://workstation.faviann.vms:4001"
+    mcp-auth-proxy-workstation:
+      loadBalancer:
+        servers:
+          - url: "http://workstation.faviann.vms:19081"
     hermes-dashboard:
       loadBalancer:
         servers:

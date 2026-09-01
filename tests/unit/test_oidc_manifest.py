@@ -102,6 +102,23 @@ class OidcManifestValidationTests(unittest.TestCase):
             self.mod.validate_oidc_manifest([app])
         self.assertIn("client_secret_var", str(cm.exception))
 
+    def test_unknown_grant_type_fails(self):
+        apps = [minimal_app(grant_types=["magic_beans"])]
+        with self.assertRaises(ValueError) as cm:
+            self.mod.validate_oidc_manifest(apps)
+        self.assertIn("magic_beans", str(cm.exception))
+
+    def test_empty_grant_types_list_fails(self):
+        apps = [minimal_app(grant_types=[])]
+        with self.assertRaises(ValueError) as cm:
+            self.mod.validate_oidc_manifest(apps)
+        self.assertIn("grant_types", str(cm.exception))
+
+    def test_known_grant_types_pass(self):
+        self.mod.validate_oidc_manifest(
+            [minimal_app(grant_types=["authorization_code", "refresh_token"])]
+        )
+
     def test_empty_apps_passes(self):
         self.mod.validate_oidc_manifest([])
 
@@ -190,6 +207,24 @@ class OidcBlueprintGenerationTests(unittest.TestCase):
         self.assertIn("https://app.example.com/mobile-redirect", content)
         self.assertEqual(content.count("matching_mode: strict"), 2)
 
+    def test_declared_grant_types_emitted_on_provider(self):
+        content = self.mod.generate_oidc_blueprint_content(
+            [minimal_app(grant_types=["authorization_code", "refresh_token"])]
+        )
+        self.assertIn(
+            "    client_type: confidential\n"
+            "    grant_types:\n"
+            "    - authorization_code\n"
+            "    - refresh_token\n",
+            content,
+        )
+
+    def test_grant_types_omitted_when_not_declared(self):
+        # Providers created before Authentik 2026.5 were backfilled by migration;
+        # omitting the key keeps the blueprint from narrowing their live grants.
+        content = self.mod.generate_oidc_blueprint_content([minimal_app()])
+        self.assertNotIn("grant_types", content)
+
     def test_always_allow_policy_emitted(self):
         content = self.mod.generate_oidc_blueprint_content([minimal_app(policy="always-allow")])
         self.assertIn("name, always-allow", content)
@@ -225,6 +260,37 @@ class OidcBlueprintGenerationTests(unittest.TestCase):
         content = self.mod.generate_oidc_blueprint_content(apps)
         self.assertNotIn("name, always-allow", content)
         self.assertIn("name, admins", content)
+
+    def test_real_manifest_defines_moraine_mcp_oidc_application(self):
+        apps = self.mod.load_oidc_manifest()
+        mcp_app = next(app for app in apps if app["slug"] == "moraine-mcp")
+
+        self.assertEqual(mcp_app["provider_name"], "moraine-mcp-oidc")
+        self.assertEqual(mcp_app["client_id"], "moraine-mcp")
+        self.assertEqual(
+            mcp_app["client_secret_var"], "stack_vars.moraine_mcp_oidc_client_secret"
+        )
+        self.assertEqual(
+            mcp_app["redirect_uris"], ["https://mcp.faviann.com/.auth/oidc/callback"]
+        )
+        self.assertEqual(mcp_app["issuer_mode"], "per_provider")
+        self.assertEqual(mcp_app["group"], "admins")
+        self.assertEqual(mcp_app["sub_mode"], "user_email")
+
+    def test_moraine_mcp_provider_allows_only_the_authorization_code_grant(self):
+        # Authentik >= 2026.5 rejects any grant absent from the provider's list,
+        # and sigbit only ever performs the upstream authorization-code exchange.
+        apps = self.mod.load_oidc_manifest()
+        mcp_app = next(app for app in apps if app["slug"] == "moraine-mcp")
+        self.assertEqual(mcp_app["grant_types"], ["authorization_code"])
+
+    def test_moraine_mcp_provider_supplies_an_email_claim(self):
+        # sigbit resolves the user via the userinfo `/email` pointer, and
+        # Authentik only emits claims from scope mappings bound to the provider.
+        apps = self.mod.load_oidc_manifest()
+        mcp_app = next(app for app in apps if app["slug"] == "moraine-mcp")
+        scope_names = {m["scope_name"] for m in mcp_app["custom_scope_mappings"]}
+        self.assertIn("email", scope_names)
 
     def test_committed_oidc_blueprint_matches_generator(self):
         apps = self.mod.load_oidc_manifest()

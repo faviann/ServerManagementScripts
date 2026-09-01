@@ -10,6 +10,7 @@ workstation_origin_firewall_protected_ports:
   - 9119 # Hermes dashboard
   - 18789 # OpenClaw gateway
   - 8788 # Reserved Collie origin
+  - 19081 # MCP auth proxy
 workstation_origin_firewall_allowed_hosts:
   - portal
 # Persist selected workstation home paths across intentional LXC rebuilds.
@@ -17,6 +18,13 @@ workstation_persistent_home_enabled: true
 
 docker_agents_enabled: false
 traefik_kop_enabled: false
+
+lxc_docker_env_stack_vars:
+  mcp-auth-proxy:
+    oidc_client_secret: "{{ vault_moraine_mcp_oidc_client_secret }}"
+    auth_hmac_secret: "{{ vault_workstation_mcp_auth_proxy_hmac_secret }}"
+    jwt_private_key: "{{ vault_workstation_mcp_auth_proxy_jwt_private_key }}"
+    trusted_proxies: "{{ hostvars['portal'].portal_traefik_source_cidr }}"
 
 # Container definition for proxmox_lxc_provision role
 proxmox_lxc_overrides:
