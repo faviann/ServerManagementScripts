@@ -24,6 +24,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
+from ansible_test_helper import ansible_playbook_command
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = REPO_ROOT / "tests" / "regression" / "fixtures"
@@ -36,7 +38,7 @@ ROLE_INTERFACE_INVENTORY = FIXTURES / "lxc_fleet_preflight_interface_inventory.y
 ROLE_INTERFACE_PLAYBOOK = FIXTURES / "lxc_fleet_preflight_interface_test.yml"
 STANDALONE_PLAYBOOK = FIXTURES / "lxc_standalone_validation_test.yml"
 MISSING_HOSTNAME_PLAYBOOK = FIXTURES / "lxc_fleet_missing_hostname_test.yml"
-ANSIBLE_PLAYBOOK = "uv run --locked ansible-playbook".split()
+ANSIBLE_PLAYBOOK = ansible_playbook_command(supplies_own_inventory=True)
 DUMMY_API_USER = "dummy@pam"
 DUMMY_API_TOKEN_ID = "dummy-token"
 DUMMY_API_TOKEN_SECRET = "<REPLACE_ME>"

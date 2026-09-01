@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from ansible_test_helper import ansible_playbook_command
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PLAYBOOK = (
@@ -17,7 +19,7 @@ PLAYBOOK = (
     / "fixtures"
     / "proxmox_lxc_lifecycle_configure_check_mode_absent_test.yml"
 )
-ANSIBLE_PLAYBOOK = "uv run --locked ansible-playbook".split()
+ANSIBLE_PLAYBOOK = ansible_playbook_command()
 
 
 def main() -> int:
