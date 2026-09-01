@@ -85,6 +85,7 @@ FULL_ONLY_SCRIPTS = (
     "test_proxmox_lxc_host_config_result.py",
     "test_hawser_standard_remote_default.py",
     "test_fixture_fact_cache_isolation.py",
+    "test_controller_prerequisite_fact_cache.py",
 )
 REGISTERED_SCRIPTS = FAST_SCRIPTS + FULL_ONLY_SCRIPTS
 

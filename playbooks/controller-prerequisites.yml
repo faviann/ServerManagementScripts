@@ -9,6 +9,10 @@
     # play-level `connection: local` keyword. These checks always inspect the
     # control node, so pin the connection at play-vars precedence.
     ansible_connection: local
+    # Discovery would otherwise record the control node's interpreter as a fact
+    # of the target host and cache it, so the next SSH play tries to run the
+    # controller's venv python inside the container. Pin it so no discovery runs.
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
     control_node_project_root: "{{ playbook_dir | dirname }}"
     control_node_uv_virtualenv: "{{ [playbook_dir | dirname, '.venv'] | path_join }}"
     control_node_collection_install_path: "{{ [playbook_dir | dirname, 'collections'] | path_join }}"
