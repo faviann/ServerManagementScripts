@@ -3,25 +3,27 @@
 
 from __future__ import annotations
 
-import subprocess
-import os
-import shutil
-import errno
-import fcntl
 import hashlib
 import json
-import pty
-import select
+import os
+import shutil
 import signal
-import termios
+import subprocess
+import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 import yaml
 
+sys.path.insert(0, str(Path(__file__).parent))
+import vault_test_harness
+from vault_test_harness import run_vault_tty
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNNER = REPO_ROOT / "vault.sh"
+FAKE_FIXTURES = Path(__file__).parent / "fixtures/vault"
 HEADER = "$ANSIBLE_VAULT;1.1;AES256\n"
 VALID_YAML = """---
 vault_proxmox_api_user: operator@pve
@@ -33,200 +35,70 @@ unrelated_mapping:
 """
 
 
+FakeExecutableFactory = Callable[..., Path]
+FAKE_KNOB_ENV: dict[str, dict[str, str]] = {
+    "uv": {
+        "decrypt_fail": "VAULT_TEST_DECRYPT_FAIL",
+        "decrypt_writes_then_fail": "VAULT_TEST_DECRYPT_WRITES_THEN_FAIL",
+        "encrypt_fail": "VAULT_TEST_ENCRYPT_FAIL",
+        "python_fail": "VAULT_TEST_PYTHON_FAIL",
+        "require_project_cwd": "VAULT_TEST_REQUIRE_PROJECT_CWD",
+        "validate_fail": "VAULT_TEST_VALIDATE_FAIL",
+        "view_signal": "VAULT_TEST_VIEW_SIGNAL",
+    },
+    "mv": {
+        "fail": "VAULT_TEST_MOVE_FAIL",
+        "signal_after": "VAULT_TEST_MOVE_SIGNAL_AFTER",
+    },
+    "rm": {
+        "fail": "VAULT_TEST_CLEANUP_FAIL",
+        "signal": "VAULT_TEST_CLEANUP_SIGNAL",
+    },
+    "editor": {
+        "capture": "VAULT_TEST_EDITOR_CAPTURE",
+        "fail": "VAULT_TEST_EDITOR_FAIL",
+        "signal": "VAULT_TEST_EDITOR_SIGNAL",
+    },
+    "stat": {},
+}
+
+
 @pytest.fixture
-def vault_repo(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+def fake_executable(tmp_path: Path) -> FakeExecutableFactory:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+
+    def install(
+        name: str, env: dict[str, str], **knobs: str | int | bool | Path | None
+    ) -> Path:
+        executable = bin_dir / name
+        shutil.copy2(FAKE_FIXTURES / name, executable)
+        executable.chmod(0o755)
+        for knob, value in knobs.items():
+            variable = FAKE_KNOB_ENV[name][knob]
+            if value is None or value is False:
+                env.pop(variable, None)
+            else:
+                env[variable] = "1" if value is True else str(value)
+        if name == "editor":
+            env["EDITOR"] = str(executable)
+        return executable
+
+    return install
+
+
+@pytest.fixture
+def vault_repo(
+    tmp_path: Path, fake_executable: FakeExecutableFactory
+) -> tuple[Path, dict[str, str]]:
     repo = tmp_path / "repo"
     vault_dir = repo / "inventory/group_vars/all"
     bin_dir = tmp_path / "bin"
     home = tmp_path / "home"
     vault_dir.mkdir(parents=True)
-    bin_dir.mkdir()
+    bin_dir.mkdir(exist_ok=True)
     (home / ".ansible").mkdir(parents=True)
     shutil.copy2(RUNNER, repo / "vault.sh")
-
-    fake_uv = bin_dir / "uv"
-    fake_uv.write_text(
-        """#!/usr/bin/env python3
-import os
-import subprocess
-import sys
-import hashlib
-import json
-from pathlib import Path
-
-args = sys.argv[1:]
-if args[:2] != ["run", "--locked"]:
-    raise SystemExit(90)
-if (
-    os.environ.get("VAULT_TEST_REQUIRE_PROJECT_CWD") == "1"
-    and Path.cwd() != Path(os.environ["VAULT_TEST_REPO"])
-):
-    raise SystemExit(89)
-command = args[2:]
-tracked = Path(os.environ["VAULT_TEST_REPO"]) / "inventory/group_vars/all/vault.yml"
-if not tracked.exists():
-    tracked_state = "absent"
-    tracked_digest = None
-else:
-    tracked_bytes = tracked.read_bytes()
-    tracked_state = (
-        "ciphertext" if tracked_bytes.startswith(b"$ANSIBLE_VAULT;") else "plaintext"
-    )
-    tracked_digest = hashlib.sha256(tracked_bytes).hexdigest()
-with Path(os.environ["VAULT_TEST_BOUNDARY_CAPTURE"]).open("a", encoding="utf-8") as stream:
-    stream.write(json.dumps({
-        "boundary": "uv",
-        "command": command[:2],
-        "tracked_state": tracked_state,
-        "tracked_digest": tracked_digest,
-    }) + "\\n")
-for raw_path in command:
-    path = Path(raw_path)
-    if not path.exists() or not path.is_absolute():
-        continue
-    if path == tracked:
-        continue
-    if not str(path).startswith("/dev/shm/homelab-vault."):
-        raise SystemExit(95)
-    workspace = next(parent for parent in path.parents if parent.parent == Path("/dev/shm"))
-    if workspace.stat().st_mode & 0o777 != 0o700:
-        raise SystemExit(96)
-if command[:1] == ["python"]:
-    if os.environ.get("VAULT_TEST_PYTHON_FAIL") == "1":
-        raise SystemExit(98)
-    raise SystemExit(subprocess.run([sys.executable, *command[1:]]).returncode)
-if command[:2] == ["ansible-vault", "view"]:
-    if os.environ.get("VAULT_TEST_DECRYPT_FAIL") == "1" or (
-        os.environ.get("VAULT_TEST_VALIDATE_FAIL") == "1"
-        and Path(command[-1]).name == "vault.encrypted"
-    ):
-        raise SystemExit(91)
-    data = Path(command[-1]).read_text(encoding="utf-8")
-    if not data.startswith("$ANSIBLE_VAULT;"):
-        raise SystemExit(92)
-    sys.stdout.write(data.split("\\n", 1)[1])
-    if os.environ.get("VAULT_TEST_VIEW_SIGNAL"):
-        sys.stdout.flush()
-        output_path = Path(os.readlink("/proc/self/fd/1"))
-        with Path(os.environ["VAULT_TEST_BOUNDARY_CAPTURE"]).open(
-            "a", encoding="utf-8"
-        ) as stream:
-            stream.write(json.dumps({
-                "boundary": "view-plaintext",
-                "workspace": str(output_path.parent),
-            }) + "\\n")
-        import signal
-        os.kill(os.getppid(), int(os.environ["VAULT_TEST_VIEW_SIGNAL"]))
-    raise SystemExit(0)
-if command[:2] == ["ansible-vault", "decrypt"]:
-    output = Path(command[command.index("--output") + 1])
-    source = Path(command[-1])
-    data = source.read_text(encoding="utf-8")
-    if os.environ.get("VAULT_TEST_DECRYPT_WRITES_THEN_FAIL") == "1":
-        output.write_text(data.split("\\n", 1)[1], encoding="utf-8")
-        raise SystemExit(97)
-    if os.environ.get("VAULT_TEST_DECRYPT_FAIL") == "1":
-        raise SystemExit(91)
-    if not data.startswith("$ANSIBLE_VAULT;"):
-        raise SystemExit(92)
-    output.write_text(data.split("\\n", 1)[1], encoding="utf-8")
-    raise SystemExit(0)
-if command[:2] == ["ansible-vault", "encrypt"]:
-    if os.environ.get("VAULT_TEST_ENCRYPT_FAIL") == "1":
-        raise SystemExit(93)
-    target = Path(command[-1])
-    target.write_text("$ANSIBLE_VAULT;1.1;AES256\\n" + target.read_text(encoding="utf-8"), encoding="utf-8")
-    raise SystemExit(0)
-raise SystemExit(94)
-""",
-        encoding="utf-8",
-    )
-    fake_uv.chmod(0o755)
-
-    fake_mv = bin_dir / "mv"
-    fake_mv.write_text(
-        """#!/usr/bin/env python3
-import json
-import os
-import subprocess
-import sys
-from pathlib import Path
-
-source = Path(sys.argv[-2])
-destination = Path(sys.argv[-1])
-tracked_state = "absent"
-tracked_digest = None
-if destination.exists():
-    data = destination.read_bytes()
-    tracked_state = "ciphertext" if data.startswith(b"$ANSIBLE_VAULT;") else "plaintext"
-    import hashlib
-    tracked_digest = hashlib.sha256(data).hexdigest()
-event = {
-    "boundary": "move",
-    "source": str(source),
-    "destination": str(destination),
-    "same_directory": source.parent == destination.parent,
-    "source_ciphertext": source.read_bytes().startswith(b"$ANSIBLE_VAULT;"),
-    "tracked_state": tracked_state,
-    "tracked_digest": tracked_digest,
-}
-with Path(os.environ["VAULT_TEST_BOUNDARY_CAPTURE"]).open("a", encoding="utf-8") as stream:
-    stream.write(json.dumps(event) + "\\n")
-if os.environ.get("VAULT_TEST_MOVE_FAIL") == "1":
-    raise SystemExit(99)
-move_status = subprocess.run(["/usr/bin/mv", *sys.argv[1:]]).returncode
-if move_status == 0 and os.environ.get("VAULT_TEST_MOVE_SIGNAL_AFTER") == "1":
-    import signal
-    os.kill(os.getppid(), signal.SIGTERM)
-raise SystemExit(move_status)
-""",
-        encoding="utf-8",
-    )
-    fake_mv.chmod(0o755)
-
-    fake_rm = bin_dir / "rm"
-    fake_rm.write_text(
-        """#!/usr/bin/env python3
-import json
-import os
-import subprocess
-import sys
-from pathlib import Path
-
-target = Path(sys.argv[-1])
-if str(target).startswith("/dev/shm/homelab-vault."):
-    tracked = Path(os.environ["VAULT_TEST_REPO"]) / "inventory/group_vars/all/vault.yml"
-    if tracked.exists():
-        tracked_bytes = tracked.read_bytes()
-        tracked_state = "ciphertext" if tracked_bytes.startswith(b"$ANSIBLE_VAULT;") else "plaintext"
-        import hashlib
-        tracked_digest = hashlib.sha256(tracked_bytes).hexdigest()
-    else:
-        tracked_state = "absent"
-        tracked_digest = None
-    with Path(os.environ["VAULT_TEST_BOUNDARY_CAPTURE"]).open("a", encoding="utf-8") as stream:
-        stream.write(json.dumps({
-            "boundary": "cleanup",
-            "workspace": str(target),
-            "tracked_state": tracked_state,
-            "tracked_digest": tracked_digest,
-        }) + "\\n")
-    if os.environ.get("VAULT_TEST_CLEANUP_FAIL") == "1":
-        subprocess.run(["/usr/bin/rm", *sys.argv[1:]], check=False)
-        raise SystemExit(99)
-    if os.environ.get("VAULT_TEST_CLEANUP_SIGNAL") == "1":
-        subprocess.run(["/usr/bin/rm", *sys.argv[1:]], check=False)
-        marker = Path(os.environ["VAULT_TEST_BOUNDARY_CAPTURE"] + ".cleanup-signal")
-        if not marker.exists():
-            marker.touch()
-            import signal
-            os.kill(os.getppid(), signal.SIGTERM)
-        raise SystemExit(0)
-raise SystemExit(subprocess.run(["/usr/bin/rm", *sys.argv[1:]]).returncode)
-""",
-        encoding="utf-8",
-    )
-    fake_rm.chmod(0o755)
 
     env = os.environ.copy()
     env.update(
@@ -238,6 +110,23 @@ raise SystemExit(subprocess.run(["/usr/bin/rm", *sys.argv[1:]]).returncode)
             "VAULT_TEST_BOUNDARY_CAPTURE": str(tmp_path / "boundaries.jsonl"),
         }
     )
+    for name in ("uv", "mv", "rm"):
+        fake_executable(name, env)
+    return repo, env
+
+
+@pytest.fixture
+def real_vault_repo(
+    vault_repo: tuple[Path, dict[str, str]],
+) -> tuple[Path, dict[str, str]]:
+    repo, env = vault_repo
+    shutil.copy2(REPO_ROOT / "pyproject.toml", repo / "pyproject.toml")
+    shutil.copy2(REPO_ROOT / "uv.lock", repo / "uv.lock")
+    (repo / ".venv").symlink_to(REPO_ROOT / ".venv", target_is_directory=True)
+    env["PATH"] = env["PATH"].split(":", 1)[1]
+    passphrase_file = Path(env["ANSIBLE_VAULT_PASSWORD_FILE"])
+    passphrase_file.write_text("real-smoke-passphrase\n", encoding="utf-8")
+    passphrase_file.chmod(0o600)
     return repo, env
 
 
@@ -254,19 +143,39 @@ def run_vault(
     )
 
 
+def run_real_ansible_vault(
+    repo: Path, env: dict[str, str], operation: str
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "uv",
+            "run",
+            "--locked",
+            "ansible-vault",
+            operation,
+            str(repo / "inventory/group_vars/all/vault.yml"),
+        ],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+
 def boundary_events(env: dict[str, str]) -> list[dict[str, object]]:
     capture = Path(env["VAULT_TEST_BOUNDARY_CAPTURE"])
     return [json.loads(line) for line in capture.read_text(encoding="utf-8").splitlines()]
 
 
-def transaction_workspaces() -> frozenset[Path]:
-    return frozenset(Path("/dev/shm").glob("homelab-vault.*"))
-
-
-def assert_no_transaction_artifacts(
-    repo: Path, env: dict[str, str], before_workspaces: frozenset[Path]
-) -> None:
-    assert transaction_workspaces() == before_workspaces
+def assert_no_transaction_artifacts(repo: Path, env: dict[str, str]) -> None:
+    workspaces = {
+        Path(str(event["workspace"]))
+        for event in boundary_events(env)
+        if "workspace" in event
+    }
+    assert workspaces
+    assert not [workspace for workspace in workspaces if workspace.exists()]
     for root in (repo, Path(env["HOME"])):
         assert not [
             path
@@ -275,65 +184,6 @@ def assert_no_transaction_artifacts(
             or ".tmp." in path.name
             or path.name.startswith("homelab-vault.")
         ]
-
-
-def run_vault_tty(
-    repo: Path,
-    env: dict[str, str],
-    interactions: list[tuple[str, str]],
-    *args: str,
-) -> tuple[int, str]:
-    master, slave = pty.openpty()
-
-    def make_controlling_terminal() -> None:
-        os.setsid()
-        fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
-
-    process = subprocess.Popen(
-        [str(repo / "vault.sh"), *args],
-        cwd=repo,
-        env=env,
-        stdin=slave,
-        stdout=slave,
-        stderr=slave,
-        preexec_fn=make_controlling_terminal,
-        close_fds=True,
-    )
-    os.close(slave)
-    output = bytearray()
-    interaction_index = 0
-    while process.poll() is None:
-        ready, _, _ = select.select([master], [], [], 0.1)
-        if ready:
-            try:
-                output.extend(os.read(master, 4096))
-            except OSError as error:
-                if error.errno != errno.EIO:
-                    raise
-                break
-        if interaction_index < len(interactions):
-            prompt, response = interactions[interaction_index]
-            if prompt.encode() in output:
-                if "secret" in prompt.lower():
-                    for _ in range(100):
-                        if not termios.tcgetattr(master)[3] & termios.ECHO:
-                            break
-                        select.select([], [], [], 0.01)
-                os.write(master, response.encode())
-                interaction_index += 1
-    process.wait(timeout=10)
-    while True:
-        try:
-            chunk = os.read(master, 4096)
-        except OSError as error:
-            if error.errno == errno.EIO:
-                break
-            raise
-        if not chunk:
-            break
-        output.extend(chunk)
-    os.close(master)
-    return process.returncode, output.decode(errors="replace")
 
 
 def test_vault_requires_an_operation_and_advertises_its_complete_interface() -> None:
@@ -349,8 +199,36 @@ def test_vault_requires_an_operation_and_advertises_its_complete_interface() -> 
     assert {"configure", "edit", "check"} <= set(help_result.stdout.split())
 
 
+def test_vault_fakes_are_named_executable_fixtures(
+    vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
+    tmp_path: Path,
+) -> None:
+    _, env = vault_repo
+    installed_bin = Path(env["PATH"].split(":", 1)[0])
+    fake_executable("editor", env, capture=tmp_path / "editor-capture")
+
+    for name in ("uv", "mv", "rm", "editor"):
+        fixture = FAKE_FIXTURES / name
+        assert fixture.is_file()
+        assert installed_bin.joinpath(name).read_bytes() == fixture.read_bytes()
+
+
+def test_fake_executable_factory_installs_a_named_fake_and_encodes_its_knobs(
+    fake_executable: FakeExecutableFactory,
+) -> None:
+    env: dict[str, str] = {}
+
+    installed = fake_executable("uv", env, decrypt_fail=True)
+
+    assert installed.read_bytes() == (FAKE_FIXTURES / "uv").read_bytes()
+    assert env == {"VAULT_TEST_DECRYPT_FAIL": "1"}
+
+
 def test_vault_uses_its_project_when_invoked_from_an_unrelated_directory(
-    vault_repo: tuple[Path, dict[str, str]], tmp_path: Path
+    vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
+    tmp_path: Path,
 ) -> None:
     repo, env = vault_repo
     (repo / "inventory/group_vars/all/vault.yml").write_text(
@@ -361,7 +239,7 @@ def test_vault_uses_its_project_when_invoked_from_an_unrelated_directory(
     pass_file.chmod(0o600)
     unrelated_directory = tmp_path / "unrelated"
     unrelated_directory.mkdir()
-    env["VAULT_TEST_REQUIRE_PROJECT_CWD"] = "1"
+    fake_executable("uv", env, require_project_cwd=True)
 
     result = subprocess.run(
         [str(repo / "vault.sh"), "check"],
@@ -375,6 +253,56 @@ def test_vault_uses_its_project_when_invoked_from_an_unrelated_directory(
     assert result.returncode == 0
     assert "decryptability: PASS" in result.stdout
     assert "YAML mapping: PASS" in result.stdout
+
+
+def test_real_ansible_vault_encrypt_decrypt_round_trip(
+    real_vault_repo: tuple[Path, dict[str, str]],
+) -> None:
+    repo, env = real_vault_repo
+    vault = repo / "inventory/group_vars/all/vault.yml"
+    vault.write_text(VALID_YAML, encoding="utf-8")
+
+    encrypted = run_real_ansible_vault(repo, env, "encrypt")
+    ciphertext = vault.read_text(encoding="utf-8")
+    decrypted = run_real_ansible_vault(repo, env, "decrypt")
+
+    assert encrypted.returncode == 0, encrypted.stderr
+    assert ciphertext.startswith(HEADER)
+    assert decrypted.returncode == 0, decrypted.stderr
+    assert vault.read_text(encoding="utf-8") == VALID_YAML
+
+
+def test_real_ansible_vault_runs_through_the_locked_project_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    observed_command: list[str] = []
+
+    def capture_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        observed_command.extend(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", capture_run)
+
+    run_real_ansible_vault(tmp_path, os.environ.copy(), "encrypt")
+
+    assert observed_command[:4] == ["uv", "run", "--locked", "ansible-vault"]
+
+
+def test_check_accepts_a_genuinely_encrypted_vault(
+    real_vault_repo: tuple[Path, dict[str, str]],
+) -> None:
+    repo, env = real_vault_repo
+    vault = repo / "inventory/group_vars/all/vault.yml"
+    vault.write_text(VALID_YAML, encoding="utf-8")
+    encrypted = run_real_ansible_vault(repo, env, "encrypt")
+    assert encrypted.returncode == 0, encrypted.stderr
+
+    result = run_vault(repo, env, "check")
+
+    assert result.returncode == 0, result.stderr
+    assert all(line.endswith(": PASS") for line in result.stdout.splitlines())
 
 
 @pytest.mark.parametrize(
@@ -396,7 +324,10 @@ def test_vault_uses_its_project_when_invoked_from_an_unrelated_directory(
     ],
 )
 def test_check_reports_each_contract_check_without_disclosing_values(
-    vault_repo: tuple[Path, dict[str, str]], state: str, expected_failure: str | None
+    vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
+    state: str,
+    expected_failure: str | None,
 ) -> None:
     repo, env = vault_repo
     vault = repo / "inventory/group_vars/all/vault.yml"
@@ -428,7 +359,7 @@ def test_check_reports_each_contract_check_without_disclosing_values(
     elif state == "world-open-pass":
         pass_file.chmod(0o604)
     elif state == "decrypt-failure":
-        env["VAULT_TEST_DECRYPT_FAIL"] = "1"
+        fake_executable("uv", env, decrypt_fail=True)
 
     result = run_vault(repo, env, "check")
 
@@ -464,6 +395,7 @@ def test_check_reports_each_contract_check_without_disclosing_values(
 
 def test_check_rejects_a_passphrase_file_not_owned_by_the_current_user(
     vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
 ) -> None:
     repo, env = vault_repo
     (repo / "inventory/group_vars/all/vault.yml").write_text(
@@ -472,18 +404,10 @@ def test_check_rejects_a_passphrase_file_not_owned_by_the_current_user(
     pass_file = Path(env["ANSIBLE_VAULT_PASSWORD_FILE"])
     pass_file.write_text("pass\n", encoding="utf-8")
     pass_file.chmod(0o600)
-    stat_stub = Path(env["PATH"].split(":", 1)[0]) / "stat"
-    stat_stub.write_text(
-        """#!/bin/bash
-if [[ "$2" == %u ]]; then
-    printf '%s\n' 2147483647
-else
-    exec /usr/bin/stat "$@"
-fi
-""",
-        encoding="utf-8",
-    )
-    stat_stub.chmod(0o755)
+    stat_fixture = FAKE_FIXTURES / "stat"
+    assert stat_fixture.is_file()
+    stat_stub = fake_executable("stat", env)
+    assert stat_stub.read_bytes() == stat_fixture.read_bytes()
 
     result = run_vault(repo, env, "check")
 
@@ -493,6 +417,7 @@ fi
 
 def test_check_treats_yaml_validation_tool_failure_as_a_failed_check(
     vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
 ) -> None:
     repo, env = vault_repo
     (repo / "inventory/group_vars/all/vault.yml").write_text(
@@ -501,7 +426,7 @@ def test_check_treats_yaml_validation_tool_failure_as_a_failed_check(
     pass_file = Path(env["ANSIBLE_VAULT_PASSWORD_FILE"])
     pass_file.write_text("pass\n", encoding="utf-8")
     pass_file.chmod(0o600)
-    env["VAULT_TEST_PYTHON_FAIL"] = "1"
+    fake_executable("uv", env, python_fail=True)
 
     result = run_vault(repo, env, "check")
 
@@ -582,7 +507,9 @@ def test_check_accepts_ordinary_padded_values_without_changing_them(
 
 @pytest.mark.parametrize("signal_number", [signal.SIGINT, signal.SIGTERM])
 def test_interrupted_check_removes_its_exact_plaintext_workspace(
-    vault_repo: tuple[Path, dict[str, str]], signal_number: int
+    vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
+    signal_number: int,
 ) -> None:
     repo, env = vault_repo
     (repo / "inventory/group_vars/all/vault.yml").write_text(
@@ -591,9 +518,7 @@ def test_interrupted_check_removes_its_exact_plaintext_workspace(
     pass_file = Path(env["ANSIBLE_VAULT_PASSWORD_FILE"])
     pass_file.write_text("synthetic-passphrase-marker\n", encoding="utf-8")
     pass_file.chmod(0o600)
-    env["VAULT_TEST_VIEW_SIGNAL"] = str(signal_number)
-    before_workspaces = transaction_workspaces()
-
+    fake_executable("uv", env, view_signal=signal_number)
     result = run_vault(repo, env, "check")
 
     plaintext_event = next(
@@ -614,7 +539,7 @@ def test_interrupted_check_removes_its_exact_plaintext_workspace(
         if event["boundary"] == "cleanup"
     ]
     assert cleanup_targets == [workspace]
-    assert transaction_workspaces() == before_workspaces
+    assert_no_transaction_artifacts(repo, env)
     output = result.stdout + result.stderr
     for marker in (
         "synthetic-passphrase-marker",
@@ -672,6 +597,70 @@ def test_configure_replaces_only_credentials_through_a_tty_transaction(
     ):
         assert marker not in output
     assert list(repo.rglob("*backup*")) == []
+
+
+def test_tty_runner_does_not_capture_secret_responses(
+    vault_repo: tuple[Path, dict[str, str]],
+) -> None:
+    repo, env = vault_repo
+    secret = "transcript-secret-marker"
+
+    returncode, transcript = run_vault_tty(
+        repo,
+        env,
+        configure_interactions(token_secret=secret),
+        "configure",
+    )
+
+    assert returncode == 0, transcript
+    assert secret not in transcript
+
+
+def test_tty_runner_does_not_send_a_secret_when_echo_stays_enabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    secret = "unsent-secret-marker"
+    sent: list[str] = []
+
+    class EchoEnabledChild:
+        before = ""
+        exitstatus = 1
+        signalstatus = None
+
+        def expect_exact(self, patterns: object) -> int:
+            return 0
+
+        def waitnoecho(self) -> bool:
+            return False
+
+        def send(self, response: str) -> None:
+            sent.append(response)
+
+        def eof(self) -> bool:
+            return False
+
+        def expect(self, pattern: object) -> int:
+            return 0
+
+        def close(self, force: bool = False) -> None:
+            pass
+
+    monkeypatch.setattr(
+        vault_test_harness.pexpect,
+        "spawn",
+        lambda *args, **kwargs: EchoEnabledChild(),
+    )
+
+    returncode, transcript = vault_test_harness.run_vault_tty(
+        tmp_path,
+        {},
+        [("Token secret: ", secret + "\n")],
+        "configure",
+    )
+
+    assert returncode != 0
+    assert sent == []
+    assert secret not in transcript
 
 
 def test_configure_rejects_non_tty_and_all_extra_arguments(
@@ -764,57 +753,19 @@ def test_configure_preserves_ordinary_credential_whitespace_exactly(
 def install_editor(
     tmp_path: Path,
     env: dict[str, str],
+    fake_executable: FakeExecutableFactory,
     *,
     fail: bool = False,
     signal_number: int | None = None,
 ) -> Path:
     capture = tmp_path / "editor-capture"
-    signal_value = int(signal_number) if signal_number is not None else None
-    editor = Path(env["PATH"].split(":", 1)[0]) / "editor"
-    editor.write_text(
-        f"""#!/usr/bin/env python3
-import hashlib
-import json
-import os
-import sys
-from pathlib import Path
-
-plaintext = Path(sys.argv[1])
-workspace = plaintext.parent
-assert str(plaintext).startswith("/dev/shm/homelab-vault.")
-assert workspace.stat().st_mode & 0o777 == 0o700
-content = plaintext.read_text(encoding="utf-8")
-assert "vault_proxmox_api_token_secret" in content
-assert "unrelated_mapping" in content
-tracked = Path(os.environ["VAULT_TEST_REPO"]) / "inventory/group_vars/all/vault.yml"
-if tracked.exists():
-    tracked_bytes = tracked.read_bytes()
-    tracked_state = (
-        "ciphertext" if tracked_bytes.startswith(b"$ANSIBLE_VAULT;") else "plaintext"
+    fake_executable(
+        "editor",
+        env,
+        capture=capture,
+        fail=fail,
+        signal=signal_number,
     )
-    tracked_digest = hashlib.sha256(tracked_bytes).hexdigest()
-else:
-    tracked_state = "absent"
-    tracked_digest = None
-event = {{
-    "boundary": "editor",
-    "command": ["editor"],
-    "workspace": str(workspace),
-    "tracked_state": tracked_state,
-    "tracked_digest": tracked_digest,
-}}
-with Path(os.environ["VAULT_TEST_BOUNDARY_CAPTURE"]).open("a", encoding="utf-8") as stream:
-    stream.write(json.dumps(event) + "\\n")
-Path({str(capture)!r}).write_text("complete", encoding="utf-8")
-plaintext.write_text(content + "\\neditor_added: editor-secret-marker\\n", encoding="utf-8")
-if {signal_value!r} is not None:
-    os.kill(os.getppid(), {signal_value!r})
-raise SystemExit({97 if fail else 0})
-""",
-        encoding="utf-8",
-    )
-    editor.chmod(0o755)
-    env["EDITOR"] = str(editor)
     return capture
 
 
@@ -842,7 +793,9 @@ def test_configure_creates_only_required_fields_in_a_protected_tmpfs_transaction
 
 
 def test_edit_presents_and_publishes_the_complete_vault(
-    vault_repo: tuple[Path, dict[str, str]], tmp_path: Path
+    vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
+    tmp_path: Path,
 ) -> None:
     repo, env = vault_repo
     vault = repo / "inventory/group_vars/all/vault.yml"
@@ -850,7 +803,7 @@ def test_edit_presents_and_publishes_the_complete_vault(
     Path(env["ANSIBLE_VAULT_PASSWORD_FILE"]).write_text(
         "synthetic-passphrase-marker\n", encoding="utf-8"
     )
-    capture = install_editor(tmp_path, env)
+    capture = install_editor(tmp_path, env, fake_executable)
 
     returncode, output = run_vault_tty(repo, env, [], "edit")
 
@@ -882,6 +835,7 @@ def test_edit_presents_and_publishes_the_complete_vault(
 )
 def test_mutations_keep_the_tracked_path_safe_at_every_external_boundary(
     vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
     tmp_path: Path,
     operation: str,
     initial_state: str,
@@ -895,14 +849,12 @@ def test_mutations_keep_the_tracked_path_safe_at_every_external_boundary(
     elif initial_state == "plaintext":
         vault.write_bytes(original)
     if operation == "edit":
-        install_editor(tmp_path, env)
+        install_editor(tmp_path, env, fake_executable)
     interactions: list[tuple[str, str]] = []
     if initial_state == "plaintext":
         interactions.append(("Encrypt and replace it? [y/N] ", "y\n"))
     if operation == "configure":
         interactions.extend(configure_interactions())
-    before_workspaces = transaction_workspaces()
-
     returncode, output = run_vault_tty(repo, env, interactions, operation)
 
     assert returncode == 0, output
@@ -926,19 +878,77 @@ def test_mutations_keep_the_tracked_path_safe_at_every_external_boundary(
     assert len(cleanup_events) == 1
     assert cleanup_events[0]["tracked_state"] == expected_state
     assert vault.read_text(encoding="utf-8").startswith(HEADER)
-    assert_no_transaction_artifacts(repo, env, before_workspaces)
+    assert_no_transaction_artifacts(repo, env)
+
+
+def test_cleanup_ignores_an_unrelated_tmpfs_transaction(
+    vault_repo: tuple[Path, dict[str, str]], tmp_path: Path
+) -> None:
+    repo, env = vault_repo
+    sentinel = Path("/dev/shm") / f"homelab-vault.unrelated-{tmp_path.name}"
+    sentinel.mkdir()
+    try:
+        returncode, transcript = run_vault_tty(
+            repo, env, configure_interactions(), "configure"
+        )
+
+        assert returncode == 0, transcript
+        assert_no_transaction_artifacts(repo, env)
+        assert sentinel.is_dir()
+    finally:
+        sentinel.rmdir()
+
+
+def test_cleanup_ignores_unrelated_tmpfs_state_created_after_the_run(
+    vault_repo: tuple[Path, dict[str, str]], tmp_path: Path
+) -> None:
+    repo, env = vault_repo
+    returncode, transcript = run_vault_tty(
+        repo, env, configure_interactions(), "configure"
+    )
+    sentinel = Path("/dev/shm") / f"homelab-vault.late-{tmp_path.name}"
+    sentinel.mkdir()
+    try:
+        assert returncode == 0, transcript
+        assert_no_transaction_artifacts(repo, env)
+        assert sentinel.is_dir()
+    finally:
+        sentinel.rmdir()
+
+
+def test_cleanup_rejects_a_run_workspace_until_it_is_removed(
+    vault_repo: tuple[Path, dict[str, str]], tmp_path: Path
+) -> None:
+    repo, env = vault_repo
+    workspace = Path("/dev/shm") / f"homelab-vault.owned-{tmp_path.name}"
+    workspace.mkdir()
+    capture = Path(env["VAULT_TEST_BOUNDARY_CAPTURE"])
+    capture.write_text(
+        json.dumps({"boundary": "cleanup", "workspace": str(workspace)}) + "\n",
+        encoding="utf-8",
+    )
+    try:
+        with pytest.raises(AssertionError):
+            assert_no_transaction_artifacts(repo, env)
+    finally:
+        workspace.rmdir()
+
+    assert_no_transaction_artifacts(repo, env)
 
 
 @pytest.mark.parametrize("operation", ["configure", "edit"])
 def test_unencrypted_vault_requires_confirmation_and_retains_no_plaintext_backup(
-    vault_repo: tuple[Path, dict[str, str]], tmp_path: Path, operation: str
+    vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
+    tmp_path: Path,
+    operation: str,
 ) -> None:
     repo, env = vault_repo
     vault = repo / "inventory/group_vars/all/vault.yml"
     original = VALID_YAML.encode()
     vault.write_bytes(original)
     if operation == "edit":
-        install_editor(tmp_path, env)
+        install_editor(tmp_path, env, fake_executable)
 
     declined, declined_output = run_vault_tty(
         repo,
@@ -983,6 +993,7 @@ def test_unencrypted_vault_requires_confirmation_and_retains_no_plaintext_backup
 )
 def test_failed_mutation_preserves_the_original_bytes(
     vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
     tmp_path: Path,
     operation: str,
     failure: str,
@@ -997,20 +1008,24 @@ def test_failed_mutation_preserves_the_original_bytes(
         passphrase + "\n", encoding="utf-8"
     )
     if failure == "decrypt":
-        env["VAULT_TEST_DECRYPT_FAIL"] = "1"
+        fake_executable("uv", env, decrypt_fail=True)
     elif failure == "decrypt-output":
-        env["VAULT_TEST_DECRYPT_WRITES_THEN_FAIL"] = "1"
+        fake_executable("uv", env, decrypt_writes_then_fail=True)
     elif failure == "encrypt":
-        env["VAULT_TEST_ENCRYPT_FAIL"] = "1"
+        fake_executable("uv", env, encrypt_fail=True)
     elif failure == "validation":
-        env["VAULT_TEST_VALIDATE_FAIL"] = "1"
+        fake_executable("uv", env, validate_fail=True)
     elif failure == "publication":
-        env["VAULT_TEST_MOVE_FAIL"] = "1"
+        fake_executable("mv", env, fail=True)
     if operation == "edit":
-        install_editor(tmp_path, env, fail=failure == "editor")
+        install_editor(
+            tmp_path,
+            env,
+            fake_executable,
+            fail=failure == "editor",
+        )
 
     interactions = configure_interactions() if operation == "configure" else []
-    before_workspaces = transaction_workspaces()
     returncode, output = run_vault_tty(repo, env, interactions, operation)
 
     assert returncode == 1, output
@@ -1038,12 +1053,13 @@ def test_failed_mutation_preserves_the_original_bytes(
     elif failure in ("decrypt", "decrypt-output"):
         assert not [event for event in events if event["boundary"] == "move"]
     assert len([event for event in events if event["boundary"] == "cleanup"]) == 1
-    assert_no_transaction_artifacts(repo, env, before_workspaces)
+    assert_no_transaction_artifacts(repo, env)
 
 
 @pytest.mark.parametrize("signal_number", [signal.SIGINT, signal.SIGTERM])
 def test_interrupted_edit_cleans_its_exact_transaction_workspace(
     vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
     tmp_path: Path,
     signal_number: int,
 ) -> None:
@@ -1051,9 +1067,12 @@ def test_interrupted_edit_cleans_its_exact_transaction_workspace(
     vault = repo / "inventory/group_vars/all/vault.yml"
     original = (HEADER + VALID_YAML).encode()
     vault.write_bytes(original)
-    install_editor(tmp_path, env, signal_number=signal_number)
-    before_workspaces = transaction_workspaces()
-
+    install_editor(
+        tmp_path,
+        env,
+        fake_executable,
+        signal_number=signal_number,
+    )
     returncode, _ = run_vault_tty(repo, env, [], "edit")
     events = boundary_events(env)
     editor_event = next(event for event in events if event["boundary"] == "editor")
@@ -1066,19 +1085,18 @@ def test_interrupted_edit_cleans_its_exact_transaction_workspace(
     assert workspace_was_removed
     assert vault.read_bytes() == original
     assert len([event for event in events if event["boundary"] == "cleanup"]) == 1
-    assert transaction_workspaces() == before_workspaces
+    assert_no_transaction_artifacts(repo, env)
 
 
 def test_cleanup_status_failure_makes_a_successful_mutation_fail(
     vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
 ) -> None:
     repo, env = vault_repo
     vault = repo / "inventory/group_vars/all/vault.yml"
     original = (HEADER + VALID_YAML).encode()
     vault.write_bytes(original)
-    env["VAULT_TEST_CLEANUP_FAIL"] = "1"
-    before_workspaces = transaction_workspaces()
-
+    fake_executable("rm", env, fail=True)
     returncode, output = run_vault_tty(
         repo, env, configure_interactions(), "configure"
     )
@@ -1097,20 +1115,19 @@ def test_cleanup_status_failure_makes_a_successful_mutation_fail(
             if event["boundary"] == "cleanup"
         ]
     ) == 1
-    assert transaction_workspaces() == before_workspaces
+    assert_no_transaction_artifacts(repo, env)
     assert not list(repo.rglob("vault.yml.tmp.*"))
 
 
 def test_signal_between_cleanup_and_publication_preserves_the_original(
     vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
 ) -> None:
     repo, env = vault_repo
     vault = repo / "inventory/group_vars/all/vault.yml"
     original = (HEADER + VALID_YAML).encode()
     vault.write_bytes(original)
-    env["VAULT_TEST_CLEANUP_SIGNAL"] = "1"
-    before_workspaces = transaction_workspaces()
-
+    fake_executable("rm", env, signal=True)
     returncode, output = run_vault_tty(
         repo, env, configure_interactions(), "configure"
     )
@@ -1118,20 +1135,19 @@ def test_signal_between_cleanup_and_publication_preserves_the_original(
     assert returncode == 1
     assert "configure: PASS" not in output
     assert vault.read_bytes() == original
-    assert transaction_workspaces() == before_workspaces
+    assert_no_transaction_artifacts(repo, env)
     assert not list(repo.rglob("vault.yml.tmp.*"))
 
 
 def test_signal_after_atomic_rename_reports_the_committed_success(
     vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
 ) -> None:
     repo, env = vault_repo
     vault = repo / "inventory/group_vars/all/vault.yml"
     original = (HEADER + VALID_YAML).encode()
     vault.write_bytes(original)
-    env["VAULT_TEST_MOVE_SIGNAL_AFTER"] = "1"
-    before_workspaces = transaction_workspaces()
-
+    fake_executable("mv", env, signal_after=True)
     returncode, output = run_vault_tty(
         repo, env, configure_interactions(), "configure"
     )
@@ -1140,5 +1156,5 @@ def test_signal_after_atomic_rename_reports_the_committed_success(
     assert "configure: PASS" in output
     assert vault.read_bytes() != original
     assert vault.read_text(encoding="utf-8").startswith(HEADER)
-    assert transaction_workspaces() == before_workspaces
+    assert_no_transaction_artifacts(repo, env)
     assert not list(repo.rglob("vault.yml.tmp.*"))

@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[-2])
+destination = Path(sys.argv[-1])
+tracked_state = "absent"
+tracked_digest = None
+if destination.exists():
+    data = destination.read_bytes()
+    tracked_state = "ciphertext" if data.startswith(b"$ANSIBLE_VAULT;") else "plaintext"
+    tracked_digest = hashlib.sha256(data).hexdigest()
+event = {
+    "boundary": "move",
+    "source": str(source),
+    "destination": str(destination),
+    "same_directory": source.parent == destination.parent,
+    "source_ciphertext": source.read_bytes().startswith(b"$ANSIBLE_VAULT;"),
+    "tracked_state": tracked_state,
+    "tracked_digest": tracked_digest,
+}
+with Path(os.environ["VAULT_TEST_BOUNDARY_CAPTURE"]).open(
+    "a", encoding="utf-8"
+) as stream:
+    stream.write(json.dumps(event) + "\n")
+if os.environ.get("VAULT_TEST_MOVE_FAIL") == "1":
+    raise SystemExit(99)
+move_status = subprocess.run(["/usr/bin/mv", *sys.argv[1:]]).returncode
+if move_status == 0 and os.environ.get("VAULT_TEST_MOVE_SIGNAL_AFTER") == "1":
+    import signal
+
+    os.kill(os.getppid(), signal.SIGTERM)
+raise SystemExit(move_status)

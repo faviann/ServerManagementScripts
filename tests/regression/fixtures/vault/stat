@@ -1,0 +1,6 @@
+#!/bin/bash
+if [[ "$2" == %u ]]; then
+    printf '%s\n' 2147483647
+else
+    exec /usr/bin/stat "$@"
+fi
