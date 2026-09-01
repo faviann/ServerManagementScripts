@@ -64,10 +64,15 @@ if len(commands) == int(os.environ.get("VALIDATE_TEST_FAIL_AT", "0")):
 
 
 def operator_sentinel(tmp_path: Path, name: str) -> str:
-    """An operator input the command must neither read nor disclose."""
+    """A readable operator input the command must neither read nor disclose.
+
+    Readable on purpose: a real operator's inventory and vault-password file
+    are readable, so any read by the wrapper surfaces the marker in its output
+    where the agent-safety assertions can observe it.
+    """
     sentinel = tmp_path / f"operator-{name}"
     sentinel.write_text(f"{OPERATOR_MARKER}\n", encoding="utf-8")
-    sentinel.chmod(0o000)
+    sentinel.chmod(0o600)
     return str(sentinel)
 
 
@@ -464,18 +469,27 @@ def test_stack_reports_a_valid_policy_as_schema_versioned_json() -> None:
     assert "stacks/workstation/mcp-auth-proxy" in result.stderr
 
 
-def test_stack_reports_an_invalid_contract_on_stderr_and_exits_non_zero() -> None:
-    result = run_real_validation(
-        "stack", "stacks/workstation/no-such-stack-for-validation"
-    )
+@pytest.mark.parametrize(
+    "path",
+    [
+        "stacks/overmind/overmind",
+        "stacks/workstation/no-such-stack-for-validation",
+    ],
+)
+def test_stack_reports_an_invalid_contract_on_stderr_and_exits_non_zero(
+    path: str,
+) -> None:
+    result = run_real_validation("stack", path)
 
     assert result.returncode != 0
     document = json.loads(result.stdout)
     assert document["schema_version"] == 1
     assert document["valid"] is False
-    assert "missing-stack" in json.dumps(document)
-    assert "selected stack directory does not exist" in result.stderr
-    assert not result.stdout.startswith("identity:")
+    assert document["errors"]
+    diagnostic = document["errors"][0]["message"]
+    assert diagnostic in result.stderr
+    # json.loads over the whole of stdout already rejects any diagnostic text
+    # accompanying the document, so stdout carries the JSON and nothing else.
 
 
 # --- AC7 / AC10: the fixture environment and agent safety ------------------
@@ -514,8 +528,7 @@ def test_every_operation_is_agent_safe(
     assert OPERATOR_MARKER not in result.stdout
     assert OPERATOR_MARKER not in result.stderr
     for name in ("ANSIBLE_INVENTORY", "ANSIBLE_VAULT_PASSWORD_FILE"):
-        sentinel = Path(env[name])
-        assert sentinel.stat().st_mode & 0o777 == 0
+        assert OPERATOR_MARKER in Path(env[name]).read_text(encoding="utf-8")
     for kind in child_kinds(captured_commands(tmp_path)):
         assert kind in {"lint", "lifecycle", "tests", "stack"}
 

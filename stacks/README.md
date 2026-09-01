@@ -173,8 +173,7 @@ vendor contract.
 Validate exactly one repo-managed stack without changing repository or deployed state:
 
 ```bash
-uv run --locked python -B -m stack_update_policy validate \
-  --repository-root . stacks/<host>/<stack>
+./validate.sh stack stacks/<host>/<stack>
 ```
 
 The command writes schema-versioned JSON to standard output, diagnostics to standard error, and exits nonzero for an invalid contract. Its normalized result is the shared validation model for later planning and Create Stack integration. It exposes the effective image-bearing services and image tracks, vendor authority and resolved baseline when applicable, vendor track, assisted procedure, explicit low-confidence policy, and foundational controlled-migration status. Consumers should not reparse raw metadata or infer service risk from image names.
@@ -201,7 +200,7 @@ The result is immutable and exposes `as_dict()` for stable schema-versioned cons
 Run the credential-free snapshot contract tests with the locked environment:
 
 ```bash
-uv run --locked pytest -q tests/unit/test_stack_update_policy_snapshot.py
+./validate.sh tests tests/unit/test_stack_update_policy_snapshot.py
 ```
 
 ### Image Update Planning Selection
@@ -235,7 +234,7 @@ validation continues to reject the missing policy.
 Run the credential-free contract tests with the locked environment:
 
 ```bash
-uv run --locked pytest -q tests/unit/test_stack_update_policy_selection.py
+./validate.sh tests tests/unit/test_stack_update_policy_selection.py
 ```
 
 ## Build a Stack
