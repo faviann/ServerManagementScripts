@@ -143,6 +143,7 @@ def assert_validation_cache_was_shared_then_removed(
 def assert_fixture_environment(commands: list[dict[str, object]]) -> None:
     assert commands
     for entry in commands:
+        assert entry["argv"][:2] == ["run", "--locked"]
         assert entry["inventory"] == FIXTURE_INVENTORY
         assert entry["vault_password_file"] == FIXTURE_VAULT_PASSWORD_FILE
         assert entry["lifecycle_marker"] is None
@@ -390,7 +391,11 @@ def test_stack_validates_exactly_the_named_stack(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     commands = captured_commands(tmp_path)
     assert child_kinds(commands) == ["stack"]
-    assert commands[0]["argv"][-1] == "stacks/workstation/mcp-auth-proxy"
+    argv = commands[0]["argv"]
+    assert argv[argv.index("python") + 1] == "-B"
+    options = child_options(argv, "validate")
+    assert options[:2] == ["--repository-root", "."]
+    assert options[-1] == "stacks/workstation/mcp-auth-proxy"
 
 
 @pytest.mark.parametrize(

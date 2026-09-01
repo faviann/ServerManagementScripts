@@ -143,8 +143,6 @@ Local contract checks:
 uv run --locked python tests/regression/test_beets_flask_stack_contract.py
 ```
 
-The second command collects no pytest tests, so it stays a direct invocation and runs outside the validation boundary, under your ambient Ansible environment, unlike the first.
-
 Dry run one stack:
 
 ```bash

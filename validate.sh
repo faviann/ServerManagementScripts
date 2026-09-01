@@ -158,7 +158,7 @@ case "$operation" in
         uv run --locked pytest ${test_targets[@]+"${test_targets[@]}"}
         ;;
     stack)
-        uv run --locked python -m stack_update_policy validate \
-            --repository-root "$PROJECT_ROOT" "${stack_paths[0]}"
+        uv run --locked python -B -m stack_update_policy validate \
+            --repository-root . "${stack_paths[0]}"
         ;;
 esac
