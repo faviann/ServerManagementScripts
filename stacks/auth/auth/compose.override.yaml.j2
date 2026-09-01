@@ -15,6 +15,7 @@ services:
       - ./appdata/authentik/blueprints:/blueprints/custom
     environment:
       - AUTHENTIK_PROXY_HEADERS=true
+      - AUTHENTIK_WEB__BASE_URL=https://auth.faviann.com
       - AUTHENTIK_COOKIE_DOMAIN=.faviann.com
       - NAVIDROME_URL=http://public.faviann.vms:4533
       - NAVIDROME_ADMIN_USER=svc-automation
@@ -29,6 +30,7 @@ services:
   worker:
     environment:
       AUTHENTIK_EMAIL__FROM: ${AUTHENTIK_EMAIL__FROM}
+      AUTHENTIK_WEB__BASE_URL: https://auth.faviann.com
       AUTHENTIK_COOKIE_DOMAIN: .faviann.com
       NAVIDROME_URL: http://public.faviann.vms:4533
       NAVIDROME_ADMIN_USER: svc-automation

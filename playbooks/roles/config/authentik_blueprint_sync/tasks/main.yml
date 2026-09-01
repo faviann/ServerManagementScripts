@@ -31,6 +31,24 @@
       delay: 10
       until: _authentik_health is not failed
 
+    # /-/health/ready/ only covers the server. The blueprint endpoints dispatch a
+    # task to the worker and block on its result, so a server that is ready while
+    # the worker is still starting returns 500 (ResultTimeout). Gate on an endpoint
+    # that the worker must answer.
+    - name: Wait for the Authentik worker to answer blueprint queries
+      ansible.builtin.uri:
+        url: "{{ authentik_blueprint_sync_url }}/api/v3/managed/blueprints/available/"
+        headers:
+          Authorization: "Bearer {{ authentik_blueprint_api_token }}"
+        status_code: 200
+      register: _authentik_worker_ready
+      delegate_to: localhost
+      become: false
+      no_log: true
+      retries: 30
+      delay: 10
+      until: _authentik_worker_ready is not failed
+
     - name: Create temporary token file
       ansible.builtin.tempfile:
         state: file
