@@ -34,6 +34,13 @@ unrelated_mapping:
 """
 
 
+def install_fake_executable(bin_dir: Path, name: str) -> Path:
+    executable = bin_dir / name
+    shutil.copy2(FAKE_FIXTURES / name, executable)
+    executable.chmod(0o755)
+    return executable
+
+
 @pytest.fixture
 def vault_repo(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     repo = tmp_path / "repo"
@@ -46,9 +53,7 @@ def vault_repo(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     shutil.copy2(RUNNER, repo / "vault.sh")
 
     for name in ("uv", "mv", "rm"):
-        executable = bin_dir / name
-        shutil.copy2(FAKE_FIXTURES / name, executable)
-        executable.chmod(0o755)
+        install_fake_executable(bin_dir, name)
 
     env = os.environ.copy()
     env.update(
@@ -312,18 +317,12 @@ def test_check_rejects_a_passphrase_file_not_owned_by_the_current_user(
     pass_file = Path(env["ANSIBLE_VAULT_PASSWORD_FILE"])
     pass_file.write_text("pass\n", encoding="utf-8")
     pass_file.chmod(0o600)
-    stat_stub = Path(env["PATH"].split(":", 1)[0]) / "stat"
-    stat_stub.write_text(
-        """#!/bin/bash
-if [[ "$2" == %u ]]; then
-    printf '%s\n' 2147483647
-else
-    exec /usr/bin/stat "$@"
-fi
-""",
-        encoding="utf-8",
+    stat_fixture = FAKE_FIXTURES / "stat"
+    assert stat_fixture.is_file()
+    stat_stub = install_fake_executable(
+        Path(env["PATH"].split(":", 1)[0]), "stat"
     )
-    stat_stub.chmod(0o755)
+    assert stat_stub.read_bytes() == stat_fixture.read_bytes()
 
     result = run_vault(repo, env, "check")
 
@@ -671,9 +670,9 @@ def install_editor(
     signal_number: int | None = None,
 ) -> Path:
     capture = tmp_path / "editor-capture"
-    editor = Path(env["PATH"].split(":", 1)[0]) / "editor"
-    shutil.copy2(FAKE_FIXTURES / "editor", editor)
-    editor.chmod(0o755)
+    editor = install_fake_executable(
+        Path(env["PATH"].split(":", 1)[0]), "editor"
+    )
     env["VAULT_TEST_EDITOR_CAPTURE"] = str(capture)
     if fail:
         env["VAULT_TEST_EDITOR_FAIL"] = "1"
