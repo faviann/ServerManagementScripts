@@ -152,3 +152,29 @@ apps:
     group: admins
     sub_mode: user_email
     issuer_mode: global
+
+  - name: Moraine MCP
+    slug: moraine-mcp
+    provider_name: moraine-mcp-oidc
+    launch_url: https://mcp.faviann.com
+    client_id: moraine-mcp
+    client_secret_var: stack_vars.moraine_mcp_oidc_client_secret
+    signing_certificate_var: stack_vars.public_oidc_signing_certificate_name
+    redirect_uris:
+      - https://mcp.faviann.com/.auth/oidc/callback
+    custom_scope_mappings:
+      - name: Admin Apps Email Verification
+        scope_name: email
+        description: Ensures admin apps receive a verified email claim
+        expression: |-
+          return {
+              "email": user.email,
+              "email_verified": True,
+          }
+    # sigbit only performs the upstream authorization-code exchange and then
+    # discards the Authentik token, so no other grant is reachable.
+    grant_types:
+      - authorization_code
+    group: admins
+    sub_mode: user_email
+    issuer_mode: per_provider
