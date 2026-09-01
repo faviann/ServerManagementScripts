@@ -280,7 +280,10 @@ class WorkstationBaselineRoleTests(unittest.TestCase):
 
         self.assertTrue(workstation_vars["workstation_enabled"])
         self.assertTrue(workstation_vars["workstation_origin_firewall_enabled"])
-        self.assertEqual(workstation_vars["workstation_origin_firewall_protected_ports"], [4001, 9119, 18789, 8788])
+        self.assertEqual(
+            workstation_vars["workstation_origin_firewall_protected_ports"],
+            [4001, 9119, 18789, 8788, 19081],
+        )
         self.assertEqual(workstation_vars["workstation_origin_firewall_allowed_hosts"], ["portal"])
         self.assertTrue(workstation_vars["workstation_persistent_home_enabled"])
         self.assertNotIn("workstation_agent_state_enabled", workstation_vars)

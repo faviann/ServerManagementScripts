@@ -5,6 +5,7 @@
 portal_instance: true
 default_domain: faviann.com
 traefik_kop_enabled: false
+portal_traefik_source_cidr: "10.1.0.2/32"
 lxc_hwaddr: "BC:24:11:BA:09:16"
 
 lxc_docker_env_stack_vars:

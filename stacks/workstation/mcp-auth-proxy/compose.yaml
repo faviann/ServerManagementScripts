@@ -1,0 +1,15 @@
+---
+x-prereq-dirs:
+  - ./appdata/data
+
+services:
+  mcp-auth-proxy:
+    image: ghcr.io/sigbit/mcp-auth-proxy:v2.10.2
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env
+    command:
+      - http://127.0.0.1:8080
+    volumes:
+      - ./appdata/data:/data

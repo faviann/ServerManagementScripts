@@ -77,6 +77,11 @@ vault_public_audiobookshelf_oidc_client_secret: "REPLACE_WITH_RANDOM_CLIENT_SECR
 vault_public_komga_oidc_client_secret: "REPLACE_WITH_RANDOM_CLIENT_SECRET"
 vault_public_calibre_web_automated_oidc_client_secret: "REPLACE_WITH_RANDOM_CLIENT_SECRET"
 
+# Workstation MCP auth proxy
+vault_moraine_mcp_oidc_client_secret: "REPLACE_WITH_RANDOM_CLIENT_SECRET"
+vault_workstation_mcp_auth_proxy_hmac_secret: "REPLACE_WITH_BASE64_32_BYTE_KEY"
+vault_workstation_mcp_auth_proxy_jwt_private_key: "REPLACE_WITH_PEM_PKCS8_RSA_PRIVATE_KEY"
+
 # Portal Dockhand
 vault_portal_dockhand_encryption_key: "REPLACE_WITH_BASE64_32_BYTE_KEY"
 vault_dockhand_discord_webhook_url: "REPLACE_WITH_DISCORD_WEBHOOK_URL"
