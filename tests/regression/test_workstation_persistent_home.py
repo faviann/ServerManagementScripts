@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from ansible_test_helper import ansible_playbook_command
 from bitwarden_release_boundary import bitwarden_release_boundary
 
 
@@ -19,7 +20,7 @@ CONFLICT_PLAYBOOK = FIXTURE_ROOT / "workstation_persistent_home_conflict.yml"
 IDEMPOTENCY_PLAYBOOK = FIXTURE_ROOT / "workstation_persistent_home_idempotency.yml"
 SYMLINK_MIGRATION_PLAYBOOK = FIXTURE_ROOT / "workstation_persistent_home_symlink_migration.yml"
 DIRECTORY_MIGRATION_PLAYBOOK = FIXTURE_ROOT / "workstation_persistent_home_directory_migration.yml"
-ANSIBLE_PLAYBOOK = "uv run --locked ansible-playbook".split()
+ANSIBLE_PLAYBOOK = ansible_playbook_command()
 
 
 def run_playbook(

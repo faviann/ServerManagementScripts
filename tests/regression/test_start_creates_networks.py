@@ -9,9 +9,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+from ansible_test_helper import ansible_playbook_command
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PLAYBOOK = REPO_ROOT / "tests" / "regression" / "fixtures" / "stack_sync_start_test.yml"
-ANSIBLE_PLAYBOOK = "uv run --locked ansible-playbook".split()
+ANSIBLE_PLAYBOOK = ansible_playbook_command()
 
 
 def main() -> int:
@@ -33,6 +35,10 @@ def main() -> int:
 
     print("ok: start creates networks and runs compose up only for desired stacks")
     return 0
+
+
+def test_start_creates_networks() -> None:
+    assert main() == 0
 
 
 if __name__ == "__main__":

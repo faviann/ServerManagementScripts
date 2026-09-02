@@ -8,10 +8,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+from ansible_test_helper import ansible_playbook_command
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PLAYBOOK = REPO_ROOT / "tests" / "regression" / "fixtures" / "missing_cap_docker_test.yml"
-ANSIBLE_PLAYBOOK = "uv run --locked ansible-playbook".split()
+ANSIBLE_PLAYBOOK = ansible_playbook_command()
 
 
 def main() -> int:
@@ -38,6 +40,10 @@ def main() -> int:
 
     print("ok: missing cap_docker fails clearly")
     return 0
+
+
+def test_missing_cap_docker_fails_clearly() -> None:
+    assert main() == 0
 
 
 if __name__ == "__main__":

@@ -9,9 +9,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+from ansible_test_helper import ansible_playbook_command
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PLAYBOOK = REPO_ROOT / "tests" / "regression" / "fixtures" / "stack_sync_discover_stale.yml"
-ANSIBLE_PLAYBOOK = "uv run --locked ansible-playbook".split()
+ANSIBLE_PLAYBOOK = ansible_playbook_command()
 
 
 def main() -> int:
@@ -33,6 +35,10 @@ def main() -> int:
 
     print("ok: discover correctly identifies stale stacks")
     return 0
+
+
+def test_discover_stale_stacks() -> None:
+    assert main() == 0
 
 
 if __name__ == "__main__":

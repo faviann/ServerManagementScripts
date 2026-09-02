@@ -9,13 +9,15 @@ import sys
 import tempfile
 from pathlib import Path
 
+from ansible_test_helper import ansible_playbook_command
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SINGLE_USER_PLAYBOOK = REPO_ROOT / "tests" / "regression" / "fixtures" / "lxc_github_keys_single_user_test.yml"
 MULTI_USER_PLAYBOOK = REPO_ROOT / "tests" / "regression" / "fixtures" / "lxc_github_keys_multi_user_dedup_test.yml"
 EMPTY_USERS_PLAYBOOK = REPO_ROOT / "tests" / "regression" / "fixtures" / "lxc_github_keys_empty_users_test.yml"
 EMPTY_RESPONSE_PLAYBOOK = REPO_ROOT / "tests" / "regression" / "fixtures" / "lxc_github_keys_empty_response_test.yml"
-ANSIBLE_PLAYBOOK = "uv run --locked ansible-playbook".split()
+ANSIBLE_PLAYBOOK = ansible_playbook_command()
 
 
 def run_playbook(playbook: Path, temp_root: str) -> subprocess.CompletedProcess[str]:
@@ -79,6 +81,10 @@ def main() -> int:
 
     print("ok: lxc_github_keys writes keys correctly and fails clearly on empty users/results")
     return 0
+
+
+def test_lxc_github_keys() -> None:
+    assert main() == 0
 
 
 if __name__ == "__main__":

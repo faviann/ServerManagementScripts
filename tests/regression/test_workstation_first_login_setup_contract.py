@@ -8,10 +8,12 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from ansible_test_helper import ansible_playbook_command
 from bitwarden_release_boundary import bitwarden_release_boundary
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+ANSIBLE_PLAYBOOK = ansible_playbook_command()
 
 
 def _write_executable(path: Path, content: str) -> None:
@@ -244,10 +246,7 @@ def _assert_no_direct_home_manager_activation(commands: str) -> None:
 def _render_setup(temp_root: Path) -> subprocess.CompletedProcess[str]:
     with bitwarden_release_boundary() as bitwarden_args:
         command = [
-            "uv",
-            "run",
-            "--locked",
-            "ansible-playbook",
+            *ANSIBLE_PLAYBOOK,
             "tests/regression/fixtures/workstation_first_login_setup_contract.yml",
             "-e",
             f"temp_root={temp_root}",

@@ -8,12 +8,13 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from ansible_test_helper import ansible_playbook_command
 from bitwarden_release_boundary import bitwarden_release_boundary
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SUCCESS_PLAYBOOK = REPO_ROOT / "tests" / "regression" / "fixtures" / "workstation_baseline_github_keys_test.yml"
-ANSIBLE_PLAYBOOK = "uv run --locked ansible-playbook".split()
+ANSIBLE_PLAYBOOK = ansible_playbook_command()
 
 
 def run_playbook(

@@ -9,9 +9,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+from ansible_test_helper import ansible_playbook_command
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PLAYBOOK = REPO_ROOT / "tests" / "regression" / "fixtures" / "stack_sync_managed_files_test.yml"
-ANSIBLE_PLAYBOOK = "uv run --locked ansible-playbook".split()
+ANSIBLE_PLAYBOOK = ansible_playbook_command()
 
 
 def main() -> int:
@@ -33,6 +35,10 @@ def main() -> int:
 
     print("ok: x-managed-files created with correct permissions; existing files not overwritten")
     return 0
+
+
+def test_managed_files_created() -> None:
+    assert main() == 0
 
 
 if __name__ == "__main__":

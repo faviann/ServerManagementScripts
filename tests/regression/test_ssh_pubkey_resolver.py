@@ -9,10 +9,12 @@ import sys
 import tempfile
 from pathlib import Path
 
+from ansible_test_helper import ansible_playbook_command
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PLAYBOOK = REPO_ROOT / "tests" / "regression" / "fixtures" / "ssh_pubkey_resolver_test.yml"
-ANSIBLE_PLAYBOOK = "uv run --locked ansible-playbook".split()
+ANSIBLE_PLAYBOOK = ansible_playbook_command()
 
 
 def main() -> int:
@@ -34,6 +36,10 @@ def main() -> int:
 
     print("ok: shared SSH public key resolver respects explicit and fallback candidates")
     return 0
+
+
+def test_ssh_pubkey_resolver() -> None:
+    assert main() == 0
 
 
 if __name__ == "__main__":
