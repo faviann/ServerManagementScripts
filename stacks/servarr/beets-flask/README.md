@@ -140,7 +140,7 @@ Local contract checks:
 
 ```bash
 ./validate.sh tests tests/unit/test_servarr_beets_flask_contract.py
-uv run --locked python tests/regression/test_beets_flask_stack_contract.py
+./validate.sh tests tests/regression/test_beets_flask_stack_contract.py
 ```
 
 Dry run one stack:

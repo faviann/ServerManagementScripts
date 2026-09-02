@@ -9,6 +9,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from ansible_test_helper import ansible_playbook_command
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PLAYBOOKS = [
@@ -23,7 +25,7 @@ PLAYBOOKS = [
         ["stack_vars", "komga_user"],
     ),
 ]
-ANSIBLE_PLAYBOOK = "uv run --locked ansible-playbook".split()
+ANSIBLE_PLAYBOOK = ansible_playbook_command()
 
 
 def run_missing_stack_vars_case(name: str, playbook: Path, markers: list[str]) -> int:
@@ -73,6 +75,10 @@ def main() -> int:
 
     print("ok: missing required stack vars fail clearly")
     return 0
+
+
+def test_stack_sync_missing_required_stack_vars() -> None:
+    assert main() == 0
 
 
 if __name__ == "__main__":

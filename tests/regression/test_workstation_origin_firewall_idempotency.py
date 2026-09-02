@@ -8,13 +8,15 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from ansible_test_helper import ansible_playbook_command
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_ROOT = REPO_ROOT / "tests" / "regression" / "fixtures"
 PLAYBOOK = FIXTURE_ROOT / "workstation_origin_firewall_idempotency.yml"
 INVENTORY = FIXTURE_ROOT / "workstation_origin_firewall_inventory.yml"
 STUB_ROOT = FIXTURE_ROOT / "workstation_origin_firewall_assets"
-ANSIBLE_PLAYBOOK = "uv run --locked ansible-playbook".split()
+ANSIBLE_PLAYBOOK = ansible_playbook_command(supplies_own_inventory=True)
 
 
 def run_playbook(temp_root: str, stub_state: str) -> subprocess.CompletedProcess[str]:

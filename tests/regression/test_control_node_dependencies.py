@@ -10,8 +10,11 @@ import tomllib
 import pytest
 import yaml
 
+from ansible_test_helper import ansible_playbook_command
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+ANSIBLE_PLAYBOOK = ansible_playbook_command(supplies_own_inventory=True)
 
 
 def run_playbook(
@@ -22,10 +25,7 @@ def run_playbook(
     tags: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = [
-        "uv",
-        "run",
-        "--locked",
-        "ansible-playbook",
+        *ANSIBLE_PLAYBOOK,
         "-i",
         "localhost,",
         "-c",

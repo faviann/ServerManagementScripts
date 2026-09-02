@@ -9,10 +9,12 @@ import sys
 import tempfile
 from pathlib import Path
 
+from ansible_test_helper import ansible_playbook_command
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PLAYBOOK = REPO_ROOT / "tests" / "regression" / "fixtures" / "stack_sync_reconciliation_missing_source_boundary.yml"
-ANSIBLE_PLAYBOOK = "uv run --locked ansible-playbook".split()
+ANSIBLE_PLAYBOOK = ansible_playbook_command()
 
 
 def main() -> int:
@@ -46,6 +48,10 @@ def main() -> int:
 
     print("ok: stack sync role boundary missing-source guardrail triggered as expected")
     return 0
+
+
+def test_stack_sync_reconciliation_missing_source_boundary() -> None:
+    assert main() == 0
 
 
 if __name__ == "__main__":
