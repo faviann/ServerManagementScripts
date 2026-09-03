@@ -75,10 +75,24 @@
           - _compose_up_calls | int == 1
         fail_msg: "Expected 1 compose up call (myapp only), got {{ _compose_up_calls }}. Log: {{ _docker_log.content | b64decode }}"
 
-    - name: Assert start results were registered
+    - name: Assert registered start results match desired stack identities
       ansible.builtin.assert:
         that:
           - _stack_sync_network_create.results | length == 1
           - (_stack_sync_stack_up_results.results | rejectattr('skipped', 'defined') | list | length) == 1
           - (_stack_sync_stack_up_results.results | selectattr('skipped', 'defined') | list | length) == 1
-        fail_msg: "Start results were not registered"
+          - >-
+            (_stack_sync_stack_up_results.results
+            | rejectattr('skipped', 'defined')
+            | map(attribute='item.path')
+            | map('dirname')
+            | map('basename')
+            | list) == ['myapp']
+          - >-
+            (_stack_sync_stack_up_results.results
+            | selectattr('skipped', 'defined')
+            | map(attribute='item.path')
+            | map('dirname')
+            | map('basename')
+            | list) == ['not-desired']
+        fail_msg: "Registered start results did not match the expected stack identities"
