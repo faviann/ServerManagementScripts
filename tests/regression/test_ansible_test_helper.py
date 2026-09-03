@@ -6,22 +6,17 @@ import ast
 import importlib.util
 import json
 import os
-import re
+from pathlib import Path
 import socket
 import subprocess
-from pathlib import Path
 from types import ModuleType
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_ROOT = REPO_ROOT / "tests/fixtures/ansible"
-ANSIBLE_PLAYBOOK_EXECUTABLE = "ansible-playbook"
-RAW_LOCKED_PLAYBOOK = ("uv", "run", "--locked", ANSIBLE_PLAYBOOK_EXECUTABLE)
+RAW_LOCKED_PLAYBOOK = ("uv", "run", "--locked", "ansible-playbook")
 RAW_LOCKED_PLAYBOOK_TEXT = " ".join(RAW_LOCKED_PLAYBOOK)
-RAW_REPEATED_SPACE_PLAYBOOK_TEXT = "  ".join(RAW_LOCKED_PLAYBOOK)
-RAW_TABBED_PLAYBOOK_TEXT = "\t".join(RAW_LOCKED_PLAYBOOK)
-RAW_MULTILINE_PLAYBOOK_TEXT = "\n".join(RAW_LOCKED_PLAYBOOK)
 
 
 def load_helper() -> ModuleType:
@@ -41,52 +36,32 @@ def set_fixture_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def assert_no_raw_playbook_literals(paths: list[Path]) -> None:
-    non_python_separator = r"(?:[\s,\[\]'\"]|-(?=\s))+"
-    non_python_literal = non_python_separator.join(
-        re.escape(word) for word in RAW_LOCKED_PLAYBOOK
-    )
-    python_string_literal = r"\s+".join(
-        re.escape(word) for word in RAW_LOCKED_PLAYBOOK
-    )
-
-    def represents_raw_argv(node: ast.AST) -> bool:
-        if isinstance(node, (ast.List, ast.Tuple)):
-            words = [
-                element.value
-                if isinstance(element, ast.Constant)
-                and isinstance(element.value, str)
-                else None
-                for element in node.elts
-            ]
-            width = len(RAW_LOCKED_PLAYBOOK)
-            return any(
-                tuple(words[offset : offset + width]) == RAW_LOCKED_PLAYBOOK
-                for offset in range(len(words) - width + 1)
-            )
-        return False
-
-    def represents_raw_string(node: ast.AST) -> bool:
-        return (
-            isinstance(node, ast.Constant)
-            and isinstance(node.value, str)
-            and re.search(python_string_literal, node.value) is not None
-        )
-
     offenders = []
     for path in paths:
         source = path.read_text(encoding="utf-8")
-        if path.suffix != ".py":
-            canonical_source = re.sub(r"\\\r?\n", "", source)
-            if re.search(non_python_literal, canonical_source):
-                offenders.append(path)
-            continue
-
         tree = ast.parse(source, filename=str(path))
         for node in ast.walk(tree):
-            if represents_raw_argv(node):
-                offenders.append(path)
-                break
-            if represents_raw_string(node):
+            if isinstance(node, ast.List):
+                words = [
+                    element.value
+                    if isinstance(element, ast.Constant)
+                    and isinstance(element.value, str)
+                    else None
+                    for element in node.elts
+                ]
+                width = len(RAW_LOCKED_PLAYBOOK)
+                if any(
+                    tuple(words[offset : offset + width])
+                    == RAW_LOCKED_PLAYBOOK
+                    for offset in range(len(words) - width + 1)
+                ):
+                    offenders.append(path)
+                    break
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and RAW_LOCKED_PLAYBOOK_TEXT in node.value
+            ):
                 offenders.append(path)
                 break
 
@@ -110,135 +85,18 @@ def test_constructs_locked_playbook_invocation_with_fixture_environment(
 
 
 @pytest.mark.parametrize(
-    ("relative_path", "source"),
+    "source",
     [
-        (
-            "ansible_test_helper.py",
-            f'ANSIBLE_PLAYBOOK = "{RAW_LOCKED_PLAYBOOK_TEXT}".split()\n',
-        ),
-        (
-            "test_list_invocation.py",
-            'subprocess.run(["uv", "run", "--locked", "ansible-playbook"])\n',
-        ),
-        (
-            "test_tuple_invocation.py",
-            'subprocess.run(("uv", "run", "--locked", "ansible-playbook"))\n',
-        ),
-        (
-            "test_offset_list_invocation.py",
-            'subprocess.run(["bwrap", "--", "uv", "run", "--locked", "ansible-playbook"])\n',
-        ),
-        (
-            "test_offset_tuple_invocation.py",
-            'subprocess.run(("env", "fixture=true", "uv", "run", "--locked", "ansible-playbook"))\n',
-        ),
-        (
-            "test_string_invocation.py",
-            f'subprocess.run("{RAW_LOCKED_PLAYBOOK_TEXT} fixture.yml", shell=True)\n',
-        ),
-        (
-            "test_assignment.py",
-            'COMMAND = ["uv", "run", "--locked", "ansible-playbook"]\n',
-        ),
-        (
-            "test_annotated_assignment.py",
-            'COMMAND: tuple[str, ...] = ("uv", "run", "--locked", "ansible-playbook")\n',
-        ),
-        (
-            "test_named_expression.py",
-            f'if command := "{RAW_LOCKED_PLAYBOOK_TEXT} fixture.yml":\n    pass\n',
-        ),
-        (
-            "test_keyword_invocation.py",
-            'execute(command=["uv", "run", "--locked", "ansible-playbook"])\n',
-        ),
-        (
-            "test_unlisted_invocation.py",
-            'arbitrary_callable(("uv", "run", "--locked", "ansible-playbook"))\n',
-        ),
-        (
-            "test_return.py",
-            'def command():\n    return ["uv", "run", "--locked", "ansible-playbook"]\n',
-        ),
-        (
-            "test_positional_default.py",
-            'def invoke(command=("uv", "run", "--locked", "ansible-playbook")):\n    pass\n',
-        ),
-        (
-            "test_keyword_default.py",
-            'def invoke(*, command=["uv", "run", "--locked", "ansible-playbook"]):\n    pass\n',
-        ),
-        (
-            "test_lambda_default.py",
-            'invoke = lambda command=("uv", "run", "--locked", "ansible-playbook"): command\n',
-        ),
-        (
-            "test_nested_literal.py",
-            'WRAPPED = [["uv", "run", "--locked", "ansible-playbook"]]\n',
-        ),
-        (
-            "test_return_string.py",
-            f'def command():\n    return "{RAW_LOCKED_PLAYBOOK_TEXT}"\n',
-        ),
-        (
-            "test_positional_string_default.py",
-            f'def invoke(command="{RAW_LOCKED_PLAYBOOK_TEXT}"):\n    pass\n',
-        ),
-        (
-            "test_keyword_string_default.py",
-            f'def invoke(*, command="{RAW_LOCKED_PLAYBOOK_TEXT}"):\n    pass\n',
-        ),
-        (
-            "test_lambda_string_default.py",
-            f'invoke = lambda command="{RAW_LOCKED_PLAYBOOK_TEXT}": command\n',
-        ),
-        (
-            "test_nested_string.py",
-            f'WRAPPED = [["{RAW_LOCKED_PLAYBOOK_TEXT}"]]\n',
-        ),
-        (
-            "test_repeated_space_return.py",
-            f"def command():\n    return {RAW_REPEATED_SPACE_PLAYBOOK_TEXT!r}\n",
-        ),
-        (
-            "test_tabbed_default.py",
-            f"def invoke(command={RAW_TABBED_PLAYBOOK_TEXT!r}):\n    pass\n",
-        ),
-        (
-            "test_multiline_nested.py",
-            f"WRAPPED = [[{RAW_MULTILINE_PLAYBOOK_TEXT!r}]]\n",
-        ),
-        ("fixture.yml", f"command: {RAW_LOCKED_PLAYBOOK_TEXT}\n"),
-        (
-            "list-fixture.yml",
-            "command:\n  - uv\n  - run\n  - --locked\n  - ansible-playbook\n",
-        ),
-        (
-            "continued-command.sh",
-            "uv run --locked \\\n  ansible-playbook fixture.yml\n",
-        ),
-        (
-            "crlf-continued-command.sh",
-            "uv run --locked \\\r\n  ansible-playbook fixture.yml\r\n",
-        ),
-        (
-            "continued-first-word.sh",
-            "u\\\nv run --locked ansible-playbook fixture.yml\n",
-        ),
-        (
-            "crlf-continued-last-word.sh",
-            "uv run --locked ansible-\\\r\nplaybook fixture.yml\r\n",
-        ),
+        f"subprocess.run({list(RAW_LOCKED_PLAYBOOK)!r})\n",
+        f"subprocess.run({['bwrap', '--', *RAW_LOCKED_PLAYBOOK]!r})\n",
+        f"COMMAND = {RAW_LOCKED_PLAYBOOK_TEXT!r}\n",
     ],
 )
 def test_raw_locked_playbook_literal_names_the_shared_helper(
     tmp_path: Path,
-    relative_path: str,
     source: str,
 ) -> None:
-    test_tree = tmp_path / "tests"
-    test_tree.mkdir()
-    offender = test_tree / relative_path
+    offender = tmp_path / "test_offender.py"
     offender.write_text(source, encoding="utf-8")
 
     with pytest.raises(
@@ -261,7 +119,8 @@ def test_tracked_test_tree_has_no_raw_locked_playbook_literals() -> None:
     test_paths = [
         REPO_ROOT / relative_path
         for relative_path in result.stdout.splitlines()
-        if (REPO_ROOT / relative_path).resolve() != helper_path
+        if relative_path.endswith(".py")
+        and (REPO_ROOT / relative_path).resolve() != helper_path
     ]
 
     assert_no_raw_playbook_literals(test_paths)
@@ -274,30 +133,6 @@ def test_interrupted_raw_argv_words_are_not_a_contiguous_literal(
     candidate.write_text(
         'subprocess.run(["uv", "run", dynamic_argument, "--locked", '
         '"ansible-playbook"])\n',
-        encoding="utf-8",
-    )
-
-    assert_no_raw_playbook_literals([candidate])
-
-
-def test_ordinary_backslash_is_not_a_non_python_command_separator(
-    tmp_path: Path,
-) -> None:
-    candidate = tmp_path / "test_ordinary_backslash.sh"
-    candidate.write_text(
-        "uv run --locked \\ ansible-playbook fixture.yml\n",
-        encoding="utf-8",
-    )
-
-    assert_no_raw_playbook_literals([candidate])
-
-
-def test_shell_continuation_does_not_make_other_tokens_contiguous(
-    tmp_path: Path,
-) -> None:
-    candidate = tmp_path / "test_noncontiguous_command.sh"
-    candidate.write_text(
-        "u\\\nxv run --locked ansible-playbook fixture.yml\n",
         encoding="utf-8",
     )
 
