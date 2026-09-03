@@ -26,10 +26,7 @@ RUNNER = REPO_ROOT / "run.sh"
 LOCK_RELATIVE_PATH = Path(".ansible/homelab-iac-lifecycle.lock")
 METADATA_LOCK_RELATIVE_PATH = Path(".ansible/homelab-iac-lifecycle.lock.metadata")
 ANSIBLE_PLAYBOOK = ansible_playbook_command(supplies_own_inventory=True)
-ANSIBLE_PLAYBOOK_EXECUTABLE = "ansible-playbook"
-RAW_LIVE_PLAYBOOK_COMMAND = " ".join(
-    ("uv", "run", "--locked", ANSIBLE_PLAYBOOK_EXECUTABLE)
-)
+RAW_LIVE_PLAYBOOK_COMMAND = " ".join(ANSIBLE_PLAYBOOK)
 LIVE_EXECUTION_LIBRARY = REPO_ROOT / "scripts/lib/live-execution.sh"
 
 
