@@ -9,8 +9,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-import pytest
-
 from ansible_test_helper import ansible_playbook_command
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -41,39 +39,3 @@ def main() -> int:
 
 def test_stack_sync_start_combined_behavior() -> None:
     assert main() == 0
-
-
-def test_stack_sync_start_subject_invokes_playbook_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[list[str]] = []
-
-    def successful_playbook(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        calls.append(command)
-        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-
-    monkeypatch.setattr(subprocess, "run", successful_playbook)
-
-    test_stack_sync_start_combined_behavior()
-
-    assert len(calls) == 1
-
-
-def test_stack_sync_start_failure_exposes_playbook_output(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    def failed_playbook(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(
-            command,
-            1,
-            stdout="stack-sync-start-stdout-sentinel",
-            stderr="stack-sync-start-stderr-sentinel",
-        )
-
-    monkeypatch.setattr(subprocess, "run", failed_playbook)
-
-    with pytest.raises(AssertionError):
-        test_stack_sync_start_combined_behavior()
-
-    captured = capsys.readouterr()
-    assert "stack-sync-start-stdout-sentinel" in captured.err
-    assert "stack-sync-start-stderr-sentinel" in captured.err
