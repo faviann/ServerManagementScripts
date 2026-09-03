@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -14,6 +15,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_ROOT = REPO_ROOT / "tests/fixtures/ansible"
+RAW_LOCKED_PLAYBOOK = ("uv", "run", "--locked", "ansible-playbook")
 
 
 def load_helper() -> ModuleType:
@@ -32,6 +34,36 @@ def set_fixture_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def assert_no_raw_playbook_literals(paths: list[Path]) -> None:
+    offenders = []
+    for path in paths:
+        source = path.read_text(encoding="utf-8")
+        if path.suffix != ".py":
+            if " ".join(RAW_LOCKED_PLAYBOOK) in source:
+                offenders.append(path)
+            continue
+
+        tree = ast.parse(source, filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "split"
+                and not node.args
+                and not node.keywords
+                and isinstance(node.func.value, ast.Constant)
+                and isinstance(node.func.value.value, str)
+                and tuple(node.func.value.value.split()) == RAW_LOCKED_PLAYBOOK
+            ):
+                offenders.append(path)
+                break
+
+    assert not offenders, (
+        "replace raw locked playbook literals with ansible_playbook_command: "
+        + ", ".join(str(path) for path in offenders)
+    )
+
+
 def test_constructs_locked_playbook_invocation_with_fixture_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -46,6 +78,52 @@ def test_constructs_locked_playbook_invocation_with_fixture_environment(
         "fixture.yml",
         "--check",
     ]
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "source"),
+    [
+        (
+            "ansible_test_helper.py",
+            'ANSIBLE_PLAYBOOK = "uv run --locked ansible-playbook".split()\n',
+        ),
+        ("fixture.yml", "command: uv run --locked ansible-playbook\n"),
+    ],
+)
+def test_raw_locked_playbook_literal_names_the_shared_helper(
+    tmp_path: Path,
+    relative_path: str,
+    source: str,
+) -> None:
+    test_tree = tmp_path / "tests"
+    test_tree.mkdir()
+    offender = test_tree / relative_path
+    offender.write_text(source, encoding="utf-8")
+
+    with pytest.raises(
+        AssertionError, match="ansible_playbook_command"
+    ) as failure:
+        assert_no_raw_playbook_literals([offender])
+    assert str(offender) in str(failure.value)
+
+
+def test_tracked_test_tree_has_no_raw_locked_playbook_literals() -> None:
+    helper = load_helper()
+    helper_path = Path(helper.__file__).resolve()
+    result = subprocess.run(
+        ["git", "ls-files", "tests"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    test_paths = [
+        REPO_ROOT / relative_path
+        for relative_path in result.stdout.splitlines()
+        if (REPO_ROOT / relative_path).resolve() != helper_path
+    ]
+
+    assert_no_raw_playbook_literals(test_paths)
 
 
 @pytest.mark.parametrize(
