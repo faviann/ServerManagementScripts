@@ -32,8 +32,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+from ansible_test_helper import ansible_playbook_command
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+ANSIBLE_PLAYBOOK = ansible_playbook_command(supplies_own_inventory=True)
 PLAYBOOK = (
     REPO_ROOT
     / "tests"
@@ -117,10 +120,7 @@ def run_isolated_playbook(
                 "/proc",
                 "--chdir",
                 str(REPO_ROOT),
-                "uv",
-                "run",
-                "--locked",
-                "ansible-playbook",
+                *ANSIBLE_PLAYBOOK,
                 str(playbook),
                 "-f",
                 "1",

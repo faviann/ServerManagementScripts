@@ -51,13 +51,18 @@ def assert_no_raw_playbook_literals(paths: list[Path]) -> None:
 
     def represents_raw_argv(node: ast.AST) -> bool:
         if isinstance(node, (ast.List, ast.Tuple)):
-            words = tuple(
+            words = [
                 element.value
-                for element in node.elts[: len(RAW_LOCKED_PLAYBOOK)]
                 if isinstance(element, ast.Constant)
                 and isinstance(element.value, str)
+                else None
+                for element in node.elts
+            ]
+            width = len(RAW_LOCKED_PLAYBOOK)
+            return any(
+                tuple(words[offset : offset + width]) == RAW_LOCKED_PLAYBOOK
+                for offset in range(len(words) - width + 1)
             )
-            return words == RAW_LOCKED_PLAYBOOK
         return False
 
     def represents_raw_string(node: ast.AST) -> bool:
@@ -117,6 +122,14 @@ def test_constructs_locked_playbook_invocation_with_fixture_environment(
         (
             "test_tuple_invocation.py",
             'subprocess.run(("uv", "run", "--locked", "ansible-playbook"))\n',
+        ),
+        (
+            "test_offset_list_invocation.py",
+            'subprocess.run(["bwrap", "--", "uv", "run", "--locked", "ansible-playbook"])\n',
+        ),
+        (
+            "test_offset_tuple_invocation.py",
+            'subprocess.run(("env", "fixture=true", "uv", "run", "--locked", "ansible-playbook"))\n',
         ),
         (
             "test_string_invocation.py",
@@ -235,6 +248,19 @@ def test_tracked_test_tree_has_no_raw_locked_playbook_literals() -> None:
     ]
 
     assert_no_raw_playbook_literals(test_paths)
+
+
+def test_interrupted_raw_argv_words_are_not_a_contiguous_literal(
+    tmp_path: Path,
+) -> None:
+    candidate = tmp_path / "test_interrupted_command.py"
+    candidate.write_text(
+        'subprocess.run(["uv", "run", dynamic_argument, "--locked", '
+        '"ansible-playbook"])\n',
+        encoding="utf-8",
+    )
+
+    assert_no_raw_playbook_literals([candidate])
 
 
 @pytest.mark.parametrize(
