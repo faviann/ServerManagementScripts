@@ -24,6 +24,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from ansible_test_helper import ansible_playbook_command
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PLAYBOOK = (
@@ -56,6 +58,7 @@ REQUIRED_OBSERVATIONS = (
     "Assert non-GPU hosts get daemon options with no runtimes key",
     "Assert GPU hosts get the NVIDIA runtime block in one pass",
 )
+ANSIBLE_PLAYBOOK = ansible_playbook_command(supplies_own_inventory=True)
 
 
 def run_isolated_playbook() -> subprocess.CompletedProcess[str]:
@@ -84,10 +87,7 @@ def run_isolated_playbook() -> subprocess.CompletedProcess[str]:
         env["TMPDIR"] = temp_root
         result = subprocess.run(
             [
-                "uv",
-                "run",
-                "--locked",
-                "ansible-playbook",
+                *ANSIBLE_PLAYBOOK,
                 str(PLAYBOOK),
                 "-f",
                 "1",

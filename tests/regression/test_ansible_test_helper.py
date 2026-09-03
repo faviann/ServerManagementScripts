@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -14,6 +15,8 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_ROOT = REPO_ROOT / "tests/fixtures/ansible"
+RAW_LOCKED_PLAYBOOK = ("uv", "run", "--locked", "ansible-playbook")
+RAW_LOCKED_PLAYBOOK_TEXT = " ".join(RAW_LOCKED_PLAYBOOK)
 
 
 def load_helper() -> ModuleType:
@@ -32,6 +35,42 @@ def set_fixture_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def assert_no_raw_playbook_literals(paths: list[Path]) -> None:
+    offenders = []
+    for path in paths:
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.List):
+                words = [
+                    element.value
+                    if isinstance(element, ast.Constant)
+                    and isinstance(element.value, str)
+                    else None
+                    for element in node.elts
+                ]
+                width = len(RAW_LOCKED_PLAYBOOK)
+                if any(
+                    tuple(words[offset : offset + width])
+                    == RAW_LOCKED_PLAYBOOK
+                    for offset in range(len(words) - width + 1)
+                ):
+                    offenders.append(path)
+                    break
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and RAW_LOCKED_PLAYBOOK_TEXT in node.value
+            ):
+                offenders.append(path)
+                break
+
+    assert not offenders, (
+        "replace raw locked playbook literals with ansible_playbook_command: "
+        + ", ".join(str(path) for path in offenders)
+    )
+
+
 def test_constructs_locked_playbook_invocation_with_fixture_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -39,13 +78,65 @@ def test_constructs_locked_playbook_invocation_with_fixture_environment(
     helper = load_helper()
 
     assert helper.ansible_playbook_command("fixture.yml", "--check") == [
-        "uv",
-        "run",
-        "--locked",
-        "ansible-playbook",
+        *RAW_LOCKED_PLAYBOOK,
         "fixture.yml",
         "--check",
     ]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        f"subprocess.run({list(RAW_LOCKED_PLAYBOOK)!r})\n",
+        f"subprocess.run({['bwrap', '--', *RAW_LOCKED_PLAYBOOK]!r})\n",
+        f"COMMAND = {RAW_LOCKED_PLAYBOOK_TEXT!r}\n",
+    ],
+)
+def test_raw_locked_playbook_literal_names_the_shared_helper(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    offender = tmp_path / "test_offender.py"
+    offender.write_text(source, encoding="utf-8")
+
+    with pytest.raises(
+        AssertionError, match="ansible_playbook_command"
+    ) as failure:
+        assert_no_raw_playbook_literals([offender])
+    assert str(offender) in str(failure.value)
+
+
+def test_tracked_test_tree_has_no_raw_locked_playbook_literals() -> None:
+    helper = load_helper()
+    helper_path = Path(helper.__file__).resolve()
+    result = subprocess.run(
+        ["git", "ls-files", "tests"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    test_paths = [
+        REPO_ROOT / relative_path
+        for relative_path in result.stdout.splitlines()
+        if relative_path.endswith(".py")
+        and (REPO_ROOT / relative_path).resolve() != helper_path
+    ]
+
+    assert_no_raw_playbook_literals(test_paths)
+
+
+def test_interrupted_raw_argv_words_are_not_a_contiguous_literal(
+    tmp_path: Path,
+) -> None:
+    candidate = tmp_path / "test_interrupted_command.py"
+    candidate.write_text(
+        'subprocess.run(["uv", "run", dynamic_argument, "--locked", '
+        '"ansible-playbook"])\n',
+        encoding="utf-8",
+    )
+
+    assert_no_raw_playbook_literals([candidate])
 
 
 @pytest.mark.parametrize(
@@ -86,10 +177,7 @@ def test_explicit_own_inventory_mode_retains_the_vault_fixture_guard(
         "test-inventory.yml",
         supplies_own_inventory=True,
     ) == [
-        "uv",
-        "run",
-        "--locked",
-        "ansible-playbook",
+        *RAW_LOCKED_PLAYBOOK,
         "fixture.yml",
         "--inventory",
         "test-inventory.yml",
