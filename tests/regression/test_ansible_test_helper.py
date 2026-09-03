@@ -42,7 +42,7 @@ def assert_no_raw_playbook_literals(paths: list[Path]) -> None:
         re.escape(word) for word in RAW_LOCKED_PLAYBOOK
     )
 
-    def represents_raw_command(node: ast.AST) -> bool:
+    def represents_raw_argv(node: ast.AST) -> bool:
         if isinstance(node, (ast.List, ast.Tuple)):
             words = tuple(
                 element.value
@@ -51,6 +51,9 @@ def assert_no_raw_playbook_literals(paths: list[Path]) -> None:
                 and isinstance(element.value, str)
             )
             return words == RAW_LOCKED_PLAYBOOK
+        return False
+
+    def represents_raw_string(node: ast.AST) -> bool:
         return (
             isinstance(node, ast.Constant)
             and isinstance(node.value, str)
@@ -80,14 +83,17 @@ def assert_no_raw_playbook_literals(paths: list[Path]) -> None:
             ):
                 offenders.append(path)
                 break
+            if represents_raw_argv(node):
+                offenders.append(path)
+                break
             if (
                 isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr))
-                and represents_raw_command(node.value)
+                and represents_raw_string(node.value)
             ):
                 offenders.append(path)
                 break
             if isinstance(node, ast.Call) and any(
-                represents_raw_command(argument)
+                represents_raw_string(argument)
                 for argument in (
                     *node.args,
                     *(keyword.value for keyword in node.keywords),
@@ -109,10 +115,7 @@ def test_constructs_locked_playbook_invocation_with_fixture_environment(
     helper = load_helper()
 
     assert helper.ansible_playbook_command("fixture.yml", "--check") == [
-        "uv",
-        "run",
-        "--locked",
-        "ansible-playbook",
+        *RAW_LOCKED_PLAYBOOK,
         "fixture.yml",
         "--check",
     ]
@@ -156,6 +159,26 @@ def test_constructs_locked_playbook_invocation_with_fixture_environment(
         (
             "test_unlisted_invocation.py",
             'arbitrary_callable(("uv", "run", "--locked", "ansible-playbook"))\n',
+        ),
+        (
+            "test_return.py",
+            'def command():\n    return ["uv", "run", "--locked", "ansible-playbook"]\n',
+        ),
+        (
+            "test_positional_default.py",
+            'def invoke(command=("uv", "run", "--locked", "ansible-playbook")):\n    pass\n',
+        ),
+        (
+            "test_keyword_default.py",
+            'def invoke(*, command=["uv", "run", "--locked", "ansible-playbook"]):\n    pass\n',
+        ),
+        (
+            "test_lambda_default.py",
+            'invoke = lambda command=("uv", "run", "--locked", "ansible-playbook"): command\n',
+        ),
+        (
+            "test_nested_literal.py",
+            'WRAPPED = [["uv", "run", "--locked", "ansible-playbook"]]\n',
         ),
         ("fixture.yml", "command: uv run --locked ansible-playbook\n"),
         (
@@ -238,10 +261,7 @@ def test_explicit_own_inventory_mode_retains_the_vault_fixture_guard(
         "test-inventory.yml",
         supplies_own_inventory=True,
     ) == [
-        "uv",
-        "run",
-        "--locked",
-        "ansible-playbook",
+        *RAW_LOCKED_PLAYBOOK,
         "fixture.yml",
         "--inventory",
         "test-inventory.yml",
