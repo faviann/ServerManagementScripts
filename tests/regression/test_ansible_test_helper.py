@@ -6,16 +6,18 @@ import ast
 import importlib.util
 import json
 import os
-from pathlib import Path
+import re
 import socket
 import subprocess
+from pathlib import Path
 from types import ModuleType
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_ROOT = REPO_ROOT / "tests/fixtures/ansible"
-RAW_LOCKED_PLAYBOOK = ("uv", "run", "--locked", "ansible-playbook")
+ANSIBLE_PLAYBOOK_EXECUTABLE = "ansible-playbook"
+RAW_LOCKED_PLAYBOOK = ("uv", "run", "--locked", ANSIBLE_PLAYBOOK_EXECUTABLE)
 
 
 def load_helper() -> ModuleType:
@@ -35,11 +37,32 @@ def set_fixture_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def assert_no_raw_playbook_literals(paths: list[Path]) -> None:
+    non_python_separator = r"(?:[\s,\[\]'\"]|-(?=\s))+"
+    non_python_literal = non_python_separator.join(
+        re.escape(word) for word in RAW_LOCKED_PLAYBOOK
+    )
+
+    def represents_raw_command(node: ast.AST) -> bool:
+        if isinstance(node, (ast.List, ast.Tuple)):
+            words = tuple(
+                element.value
+                for element in node.elts[: len(RAW_LOCKED_PLAYBOOK)]
+                if isinstance(element, ast.Constant)
+                and isinstance(element.value, str)
+            )
+            return words == RAW_LOCKED_PLAYBOOK
+        return (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and tuple(node.value.split()[: len(RAW_LOCKED_PLAYBOOK)])
+            == RAW_LOCKED_PLAYBOOK
+        )
+
     offenders = []
     for path in paths:
         source = path.read_text(encoding="utf-8")
         if path.suffix != ".py":
-            if " ".join(RAW_LOCKED_PLAYBOOK) in source:
+            if re.search(non_python_literal, source):
                 offenders.append(path)
             continue
 
@@ -54,6 +77,21 @@ def assert_no_raw_playbook_literals(paths: list[Path]) -> None:
                 and isinstance(node.func.value, ast.Constant)
                 and isinstance(node.func.value.value, str)
                 and tuple(node.func.value.value.split()) == RAW_LOCKED_PLAYBOOK
+            ):
+                offenders.append(path)
+                break
+            if (
+                isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr))
+                and represents_raw_command(node.value)
+            ):
+                offenders.append(path)
+                break
+            if isinstance(node, ast.Call) and any(
+                represents_raw_command(argument)
+                for argument in (
+                    *node.args,
+                    *(keyword.value for keyword in node.keywords),
+                )
             ):
                 offenders.append(path)
                 break
@@ -87,7 +125,43 @@ def test_constructs_locked_playbook_invocation_with_fixture_environment(
             "ansible_test_helper.py",
             'ANSIBLE_PLAYBOOK = "uv run --locked ansible-playbook".split()\n',
         ),
+        (
+            "test_list_invocation.py",
+            'subprocess.run(["uv", "run", "--locked", "ansible-playbook"])\n',
+        ),
+        (
+            "test_tuple_invocation.py",
+            'subprocess.run(("uv", "run", "--locked", "ansible-playbook"))\n',
+        ),
+        (
+            "test_string_invocation.py",
+            'subprocess.run("uv run --locked ansible-playbook fixture.yml", shell=True)\n',
+        ),
+        (
+            "test_assignment.py",
+            'COMMAND = ["uv", "run", "--locked", "ansible-playbook"]\n',
+        ),
+        (
+            "test_annotated_assignment.py",
+            'COMMAND: tuple[str, ...] = ("uv", "run", "--locked", "ansible-playbook")\n',
+        ),
+        (
+            "test_named_expression.py",
+            'if command := "uv run --locked ansible-playbook fixture.yml":\n    pass\n',
+        ),
+        (
+            "test_keyword_invocation.py",
+            'execute(command=["uv", "run", "--locked", "ansible-playbook"])\n',
+        ),
+        (
+            "test_unlisted_invocation.py",
+            'arbitrary_callable(("uv", "run", "--locked", "ansible-playbook"))\n',
+        ),
         ("fixture.yml", "command: uv run --locked ansible-playbook\n"),
+        (
+            "list-fixture.yml",
+            "command:\n  - uv\n  - run\n  - --locked\n  - ansible-playbook\n",
+        ),
     ],
 )
 def test_raw_locked_playbook_literal_names_the_shared_helper(
