@@ -77,7 +77,3 @@ def test_stack_sync_start_failure_exposes_playbook_output(
     captured = capsys.readouterr()
     assert "stack-sync-start-stdout-sentinel" in captured.err
     assert "stack-sync-start-stderr-sentinel" in captured.err
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
