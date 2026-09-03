@@ -26,6 +26,10 @@ RUNNER = REPO_ROOT / "run.sh"
 LOCK_RELATIVE_PATH = Path(".ansible/homelab-iac-lifecycle.lock")
 METADATA_LOCK_RELATIVE_PATH = Path(".ansible/homelab-iac-lifecycle.lock.metadata")
 ANSIBLE_PLAYBOOK = ansible_playbook_command(supplies_own_inventory=True)
+ANSIBLE_PLAYBOOK_EXECUTABLE = "ansible-playbook"
+RAW_LIVE_PLAYBOOK_COMMAND = " ".join(
+    ("uv", "run", "--locked", ANSIBLE_PLAYBOOK_EXECUTABLE)
+)
 LIVE_EXECUTION_LIBRARY = REPO_ROOT / "scripts/lib/live-execution.sh"
 
 
@@ -969,7 +973,7 @@ def assert_live_execution_responsibilities_are_sourced() -> None:
     forbidden_runner_fragments = (
         "flock ",
         "HOMELAB_IAC_LIFECYCLE_WRAPPER",
-        "uv run --locked ansible-playbook",
+        RAW_LIVE_PLAYBOOK_COMMAND,
         "homelab-iac-lifecycle.lock",
     )
     present = [fragment for fragment in forbidden_runner_fragments if fragment in runner_source]
@@ -984,7 +988,7 @@ def assert_live_execution_responsibilities_are_sourced() -> None:
         "flock --exclusive --nonblock",
         "HOMELAB_IAC_LIFECYCLE_WRAPPER",
         "control-node,proxmox-host",
-        "uv run --locked ansible-playbook",
+        RAW_LIVE_PLAYBOOK_COMMAND,
     )
     missing = [fragment for fragment in required_library_fragments if fragment not in library_source]
     if missing:
