@@ -41,7 +41,7 @@ def set_fixture_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def assert_no_raw_playbook_literals(paths: list[Path]) -> None:
-    non_python_separator = r"(?:\\\r?\n|[\s,\[\]'\"]|-(?=\s))+"
+    non_python_separator = r"(?:[\s,\[\]'\"]|-(?=\s))+"
     non_python_literal = non_python_separator.join(
         re.escape(word) for word in RAW_LOCKED_PLAYBOOK
     )
@@ -76,7 +76,8 @@ def assert_no_raw_playbook_literals(paths: list[Path]) -> None:
     for path in paths:
         source = path.read_text(encoding="utf-8")
         if path.suffix != ".py":
-            if re.search(non_python_literal, source):
+            canonical_source = re.sub(r"\\\r?\n", "", source)
+            if re.search(non_python_literal, canonical_source):
                 offenders.append(path)
             continue
 
@@ -220,6 +221,14 @@ def test_constructs_locked_playbook_invocation_with_fixture_environment(
             "crlf-continued-command.sh",
             "uv run --locked \\\r\n  ansible-playbook fixture.yml\r\n",
         ),
+        (
+            "continued-first-word.sh",
+            "u\\\nv run --locked ansible-playbook fixture.yml\n",
+        ),
+        (
+            "crlf-continued-last-word.sh",
+            "uv run --locked ansible-\\\r\nplaybook fixture.yml\r\n",
+        ),
     ],
 )
 def test_raw_locked_playbook_literal_names_the_shared_helper(
@@ -277,6 +286,18 @@ def test_ordinary_backslash_is_not_a_non_python_command_separator(
     candidate = tmp_path / "test_ordinary_backslash.sh"
     candidate.write_text(
         "uv run --locked \\ ansible-playbook fixture.yml\n",
+        encoding="utf-8",
+    )
+
+    assert_no_raw_playbook_literals([candidate])
+
+
+def test_shell_continuation_does_not_make_other_tokens_contiguous(
+    tmp_path: Path,
+) -> None:
+    candidate = tmp_path / "test_noncontiguous_command.sh"
+    candidate.write_text(
+        "u\\\nxv run --locked ansible-playbook fixture.yml\n",
         encoding="utf-8",
     )
 
