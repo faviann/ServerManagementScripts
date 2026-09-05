@@ -258,23 +258,15 @@ stage_ciphertext_for_publication() {
     fi
 }
 
-report_failure() {
-    printf '%s: FAIL\n' "$1" >&2
-}
-
 transfer_source_into_plaintext() {
     local workspace="$1"
     local plaintext="$2"
-    local source="$3"
-    local key="$4"
-    local mode="$5"
-    local strip="$6"
     local value_file="$workspace/value"
 
-    cp -- "$source" "$value_file" || return 1
+    cp -- "$SET_SOURCE" "$value_file" || return 1
     chmod 600 "$value_file"
     uv run --locked python - \
-        "$plaintext" "$value_file" "$key" "$mode" "$strip" \
+        "$plaintext" "$value_file" "$SET_KEY" "$SET_MODE" "$SET_STRIP" \
         >/dev/null 2>&1 <<'PY'
 import sys
 from pathlib import Path
@@ -307,8 +299,6 @@ PY
 
 run_mutation() {
     local operation="$1"
-    # An empty label leaves every outcome below silent for a caller that
-    # reports the operation itself.
     local label="${2-$1}"
     local workspace plaintext encrypted credentials editor_command
     workspace="$(mktemp -d /dev/shm/homelab-vault.XXXXXX)" || return 1
@@ -374,9 +364,9 @@ PY
             return 1
         fi
     elif [[ "$operation" == set ]]; then
-        if ! transfer_source_into_plaintext "$workspace" "$plaintext" \
-            "$SET_SOURCE" "$SET_KEY" "$SET_MODE" "$SET_STRIP"; then
+        if ! transfer_source_into_plaintext "$workspace" "$plaintext"; then
             cleanup_transaction || true
+            printf '%s: FAIL\n' "$label" >&2
             return 1
         fi
     else
@@ -398,7 +388,7 @@ PY
         if mv -f -- "$TRANSACTION_PUBLISH_TMP" "$VAULT_FILE"; then
             TRANSACTION_PUBLISH_TMP=""
             disarm_transaction_cleanup
-            [[ -z "$label" ]] || printf '%s: PASS\n' "$label"
+            printf '%s: PASS\n' "$label"
             return 0
         fi
         trap interrupt_transaction HUP INT TERM
@@ -409,17 +399,15 @@ PY
         discard_pending_ciphertext || true
         disarm_transaction_cleanup
     fi
-    [[ -z "$label" ]] || report_failure "$label"
+    printf '%s: FAIL\n' "$label" >&2
     return 1
 }
 
 source_file_authorized() {
     local path="$1"
-    local canonical owner mode
+    local owner mode
     [[ ! -L "$path" && -f "$path" ]] || return 1
     [[ ! "$path" -ef "$VAULT_FILE" ]] || return 1
-    canonical="$(realpath -- "$path" 2>/dev/null)" || return 1
-    [[ "$canonical" != /proc/*/environ && "$canonical" != /proc/*/cmdline ]] || return 1
     owner="$(stat -c %u -- "$path" 2>/dev/null || true)"
     [[ -n "$owner" && "$owner" == "$(id -u)" ]] || return 1
     mode="$(stat -c %a -- "$path" 2>/dev/null || true)"
@@ -437,13 +425,12 @@ parse_set_arguments() {
     while (( $# > 0 )); do
         case "$1" in
             --from-file)
-                (( $# >= 2 )) && [[ -n "$2" && -z "$SET_SOURCE" ]] || return 1
+                (( $# >= 2 )) && [[ -n "$2" ]] || return 1
                 SET_SOURCE="$2"
                 [[ "$SET_SOURCE" == /* ]] || SET_SOURCE="$INVOCATION_DIR/$SET_SOURCE"
                 shift 2
                 ;;
             --strip-final-newline)
-                (( SET_STRIP == 0 )) || return 1
                 SET_STRIP=1
                 shift
                 ;;
@@ -479,28 +466,24 @@ case "$1" in
     set)
         shift
         if ! parse_set_arguments "$@"; then
-            [[ -z "$SET_KEY" ]] || report_failure "set $SET_KEY"
             usage >&2
             exit 2
         fi
-        if source_file_authorized "$SET_SOURCE"; then
-            # fd 3 is the prompt channel the interactive operations open on the
-            # tty. A transfer is non-interactive, so it points at /dev/null:
-            # the only prompt it can reach is the unencrypted-vault
-            # confirmation, whose read then hits EOF and declines.
-            exec 3<>/dev/null
-            if run_mutation set ""; then
-                printf 'set %s: PASS\n' "$SET_KEY"
-                exit 0
-            fi
+        if ! source_file_authorized "$SET_SOURCE"; then
+            printf 'set %s: FAIL\n' "$SET_KEY" >&2
+            exit 1
         fi
-        report_failure "set $SET_KEY"
-        exit 1
+        # fd 3 is the prompt channel the interactive operations open on a tty.
+        # A transfer is non-interactive, so it reads EOF and declines instead
+        # of prompting to convert an unencrypted vault.
+        exec 3<>/dev/null
+        run_mutation set "set $SET_KEY"
+        exit $?
         ;;
     configure|edit)
         (( $# == 1 )) || exit 2
         open_tty || {
-            report_failure "$1"
+            printf '%s: FAIL\n' "$1" >&2
             exit 1
         }
         run_mutation "$1"
