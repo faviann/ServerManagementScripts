@@ -19,7 +19,7 @@ Operations:
   configure  Create or update Proxmox API credentials
   edit       Edit the complete encrypted vault
   check      Verify the vault without disclosing its contents
-  set        Transfer a file into a top-level vault variable:
+  set        Transfer a UTF-8 text file into a top-level vault variable:
                set <key> --from-file <path> --create|--replace
                    [--strip-final-newline]
 EOF
