@@ -88,7 +88,9 @@ Stacks live in `stacks/<hostname>/<stack-name>/compose.yaml`. Auto-discovered an
 | `./validate.sh lint` | Targeted repo-wide lint feedback (production profile). Prefer `./validate.sh` for handoff verification |
 | `./validate.sh tests [<target>...]` | Run the test suite, optionally restricted to targets inside `tests/` (a path, optionally with a `::` node-id suffix). Targets outside the test tree are invalid usage |
 | `./validate.sh stack <path>` | Validate one repo-managed stack's update policy — schema-versioned JSON on stdout, diagnostics on stderr. Not part of the no-argument handoff run |
-| `./setup.sh` | Fresh workstation setup — extend here for new workstation config (editor, tooling, env) |
+| `./setup.sh` | Guided fresh workstation setup — extend here for new workstation config (editor, tooling, env) |
+| `./setup.sh sync` | Synchronize the locked controller environment only (non-interactive; no OS packages, no managed host) |
+| `./setup.sh bootstrap` | Reconcile collections, external roles, and the controller SSH key (non-interactive; creates the key only when absent) |
 | `ssh -l root -i ~/.ansible/ssh/proxmox_lxc <host>` | Direct SSH into an LXC |
 
 **Timing**: `uv run --locked ansible-playbook` runs against live hosts typically take 5–10 minutes. Do not assume a hang — wait for completion before acting on the result.

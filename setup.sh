@@ -1,6 +1,5 @@
 #!/bin/bash
-# Automated workstation setup for homelab-iac
-# This script prepares a fresh workstation to run Ansible playbooks
+# Guided workstation setup, plus targeted controller reconciliation.
 
 set -e  # Exit on error
 
@@ -14,11 +13,6 @@ NC='\033[0m' # No Color
 # Determine project root
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
-
-echo -e "${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║  homelab-iac - Controller Setup                            ║${NC}"
-echo -e "${BLUE}╚════════════════════════════════════════════════════════════╝${NC}"
-echo
 
 # Function to print status
 print_status() {
@@ -36,6 +30,80 @@ print_error() {
 print_info() {
     echo -e "${BLUE}ℹ${NC} $1"
 }
+
+usage() {
+    cat <<'EOF'
+Usage: ./setup.sh [operation]
+
+With no operation, run guided workstation setup.
+
+Operations:
+  sync       Synchronize the locked controller environment only
+  bootstrap  Reconcile Ansible collections, external roles, and the
+             controller SSH key, creating the key only when absent
+EOF
+}
+
+usage_error() {
+    echo "setup.sh: $1" >&2
+    echo "Try './setup.sh --help' for usage." >&2
+    exit 2
+}
+
+# The locked environment is ready when uv has materialized the project venv --
+# the same signal playbooks/controller-prerequisites.yml asserts on.
+LOCKED_ENVIRONMENT="$PROJECT_ROOT/.venv"
+
+sync_locked_environment() {
+    print_info "Synchronizing the locked controller environment..."
+    uv sync --locked
+    print_status "Locked environment synchronized"
+}
+
+reconcile_controller_artifacts() {
+    if [ ! -d "$LOCKED_ENVIRONMENT" ]; then
+        print_error "Locked environment missing at $LOCKED_ENVIRONMENT"
+        print_info "Run ./setup.sh sync first."
+        return 1
+    fi
+    if [ ! -f "bootstrap.yml" ]; then
+        print_error "bootstrap.yml not found in $PROJECT_ROOT"
+        return 1
+    fi
+    print_info "Reconciling collections, external roles, and the controller SSH key..."
+    uv run --locked ansible-playbook bootstrap.yml
+    print_status "Controller artifacts reconciled"
+}
+
+case "${1:-}" in
+    --help)
+        (($# == 1)) || usage_error "unknown option"
+        usage
+        exit 0
+        ;;
+    "") ;;
+    sync)
+        (($# == 1)) || usage_error "unknown option"
+        sync_locked_environment
+        exit 0
+        ;;
+    bootstrap)
+        (($# == 1)) || usage_error "unknown option"
+        reconcile_controller_artifacts
+        exit 0
+        ;;
+    -*)
+        usage_error "unknown option"
+        ;;
+    *)
+        usage_error "unknown operation"
+        ;;
+esac
+
+echo -e "${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
+echo -e "${BLUE}║  homelab-iac - Controller Setup                            ║${NC}"
+echo -e "${BLUE}╚════════════════════════════════════════════════════════════╝${NC}"
+echo
 
 # Check if running as root
 if [ "$EUID" -eq 0 ]; then
@@ -126,123 +194,42 @@ else
 fi
 
 echo
-echo "Step 5: Proxmox API credentials..."
+echo "Step 5: Installing Python dependencies..."
 echo "─────────────────────────────────────────"
 
-# Prompt for Proxmox credentials
-echo
-print_info "Enter your Proxmox API credentials"
-echo "These will be stored in an encrypted vault file."
-echo
-
-# Proxmox API host
-read -p "Proxmox API host [proxmox.lan]: " PROXMOX_HOST
-PROXMOX_HOST=${PROXMOX_HOST:-proxmox.lan}
-
-# Proxmox API user
-echo
-print_info "API user format: username@realm (e.g., root@pam, ansible@pve)"
-read -p "Proxmox API user [root@pam]: " PROXMOX_USER
-PROXMOX_USER=${PROXMOX_USER:-root@pam}
-
-# Proxmox API token ID
-echo
-print_info "Token ID is the name you gave the token (e.g., ansible-automation)"
-read -p "Proxmox API token ID: " PROXMOX_TOKEN_ID
-
-while [ -z "$PROXMOX_TOKEN_ID" ]; do
-    print_warning "Token ID cannot be empty"
-    read -p "Proxmox API token ID: " PROXMOX_TOKEN_ID
-done
-
-# Proxmox API token secret
-echo
-print_info "Token secret is the UUID shown when creating the token"
-read -sp "Proxmox API token secret: " PROXMOX_TOKEN_SECRET
-echo
-
-while [ -z "$PROXMOX_TOKEN_SECRET" ]; do
-    print_warning "Token secret cannot be empty"
-    read -sp "Proxmox API token secret: " PROXMOX_TOKEN_SECRET
-    echo
-done
-
-print_status "Credentials captured"
+sync_locked_environment
 
 echo
-echo "Step 6: Installing Python dependencies..."
+echo "Step 6: Reconciling controller artifacts..."
 echo "─────────────────────────────────────────"
 
-print_info "Running uv sync --locked..."
-uv sync --locked
-print_status "Python dependencies installed"
+reconcile_controller_artifacts
 
 echo
-echo "Step 7: Running bootstrap playbook..."
-echo "─────────────────────────────────────────"
-
-if [ ! -f "bootstrap.yml" ]; then
-    print_error "bootstrap.yml not found in $PROJECT_ROOT"
-    exit 1
-fi
-
-uv run --locked ansible-playbook bootstrap.yml
-print_status "Bootstrap completed"
-
-echo
-echo "Step 8: Creating and encrypting vault..."
+echo "Step 7: Proxmox API credentials..."
 echo "─────────────────────────────────────────"
 
 VAULT_FILE="inventory/group_vars/all/vault.yml"
 
-if [ -f "$VAULT_FILE" ]; then
-    # Check if already encrypted
-    if head -n1 "$VAULT_FILE" | grep -q '$ANSIBLE_VAULT'; then
-        print_status "Vault file already exists and is encrypted"
-        print_info "To update credentials, run: ./configure-vault.sh"
-    else
-        print_warning "Vault file exists but is NOT encrypted"
-        read -p "Replace with new credentials and encrypt? (y/n): " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            rm "$VAULT_FILE"
-        else
-            print_info "Keeping existing unencrypted vault"
-            echo
-            read -p "Encrypt existing vault? (y/n): " -n 1 -r
-            echo
-            if [[ $REPLY =~ ^[Yy]$ ]]; then
-                uv run --locked ansible-vault encrypt "$VAULT_FILE"
-                print_status "Vault encrypted"
-            fi
+if [ -f "$VAULT_FILE" ] && head -n1 "$VAULT_FILE" | grep -q '$ANSIBLE_VAULT'; then
+    print_status "Encrypted vault already present — leaving it untouched"
+    print_info "To change credentials later, run: ./vault.sh configure"
+else
+    print_info "No encrypted vault found at $VAULT_FILE"
+    read -p "Set up Proxmox API credentials now with ./vault.sh configure? (y/n): " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        if ! ./vault.sh configure; then
+            print_warning "Vault configuration did not complete"
+            print_info "Run ./vault.sh configure when you are ready."
         fi
+    else
+        print_info "Run ./vault.sh configure when you are ready."
     fi
 fi
 
-if [ ! -f "$VAULT_FILE" ]; then
-    print_info "Creating vault.yml with your credentials..."
-    
-    # Create vault file with captured credentials
-    cat > "$VAULT_FILE" << EOF
----
-# Proxmox API authentication details
-# Generated by setup.sh on $(date)
-
-vault_proxmox_api_user: "$PROXMOX_USER"
-vault_proxmox_api_token_id: "$PROXMOX_TOKEN_ID"
-vault_proxmox_api_token_secret: "$PROXMOX_TOKEN_SECRET"
-EOF
-    
-    print_status "Created vault.yml"
-    
-    # Encrypt the vault file
-    print_info "Encrypting vault.yml..."
-    uv run --locked ansible-vault encrypt "$VAULT_FILE"
-    print_status "Vault encrypted and ready to use"
-fi
-
 echo
-echo "Step 9: Claude Code skills..."
+echo "Step 8: Claude Code skills..."
 echo "─────────────────────────────────────────"
 
 SKILLS_DIR="$HOME/.claude/skills"
@@ -259,7 +246,7 @@ for skill in "$PROJECT_ROOT/.agents/skills"/*/; do
 done
 
 echo
-echo "Step 10: VS Code configuration..."
+echo "Step 9: VS Code configuration..."
 echo "─────────────────────────────────────────"
 
 if command -v code &> /dev/null || [ -d "$HOME/.vscode" ]; then
@@ -284,12 +271,15 @@ echo -e "${GREEN}╚════════════════════
 echo
 echo "Project is ready to use. Quick reference:"
 echo
-echo "  • Sync environment:       ${BLUE}uv sync --locked${NC}"
-echo "  • Test connectivity:      ${BLUE}./run.sh --tags validation${NC}"
-echo "  • Update credentials:     ${BLUE}./configure-vault.sh${NC}"
-echo "  • Edit encrypted vault:   ${BLUE}uv run --locked ansible-vault edit inventory/group_vars/all/vault.yml${NC}"
+echo "  • Sync the locked environment:  ./setup.sh sync"
+echo "  • Reconcile controller state:   ./setup.sh bootstrap"
+echo "  • Verify the vault:             ./vault.sh check"
+echo "  • Update credentials:           ./vault.sh configure"
+echo "  • Edit the encrypted vault:     ./vault.sh edit"
+echo "  • Check fleet connectivity:     ./inspect.sh connectivity"
+echo "  • Deploy the fleet:             ./run.sh"
 echo
 echo "Documentation:"
-echo "  • Main README:             ${BLUE}README.md${NC}"
-echo "  • Agent instructions:      ${BLUE}AGENTS.md${NC}"
+echo "  • Main README:                  README.md"
+echo "  • Agent instructions:           AGENTS.md"
 echo
