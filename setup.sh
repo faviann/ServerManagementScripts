@@ -55,8 +55,13 @@ usage_error() {
 LOCKED_ENVIRONMENT="$PROJECT_ROOT/.venv"
 
 sync_locked_environment() {
+    if ! command -v uv &> /dev/null; then
+        print_error "uv not found on PATH"
+        print_info "Install uv from https://astral.sh/uv, or run ./setup.sh for the guided path."
+        return 1
+    fi
     print_info "Synchronizing the locked controller environment..."
-    uv sync --locked
+    uv sync --locked || return 1
     print_status "Locked environment synchronized"
 }
 
@@ -71,32 +76,37 @@ reconcile_controller_artifacts() {
         return 1
     fi
     print_info "Reconciling collections, external roles, and the controller SSH key..."
-    uv run --locked ansible-playbook bootstrap.yml
+    uv run --locked ansible-playbook bootstrap.yml || return 1
     print_status "Controller artifacts reconciled"
 }
 
-case "${1:-}" in
-    --help)
-        (($# == 1)) || usage_error "unknown option"
-        usage
-        exit 0
-        ;;
-    "") ;;
-    sync)
-        (($# == 1)) || usage_error "unknown option"
-        sync_locked_environment
-        exit 0
-        ;;
-    bootstrap)
-        (($# == 1)) || usage_error "unknown option"
-        reconcile_controller_artifacts
-        exit 0
-        ;;
+operation="${1-}"
+case "$operation" in
+    "" | --help | sync | bootstrap) ;;
     -*)
         usage_error "unknown option"
         ;;
     *)
         usage_error "unknown operation"
+        ;;
+esac
+
+# No form of this command takes an argument beyond its operation, and the
+# guided default takes none at all.
+(($# <= 1)) || usage_error "$operation takes no arguments"
+
+case "$operation" in
+    --help)
+        usage
+        exit 0
+        ;;
+    sync)
+        sync_locked_environment || exit 1
+        exit 0
+        ;;
+    bootstrap)
+        reconcile_controller_artifacts || exit 1
+        exit 0
         ;;
 esac
 
@@ -215,7 +225,12 @@ if [ -f "$VAULT_FILE" ] && head -n1 "$VAULT_FILE" | grep -q '$ANSIBLE_VAULT'; th
     print_status "Encrypted vault already present — leaving it untouched"
     print_info "To change credentials later, run: ./vault.sh configure"
 else
-    print_info "No encrypted vault found at $VAULT_FILE"
+    if [ -f "$VAULT_FILE" ]; then
+        print_warning "Vault file exists but is NOT encrypted: $VAULT_FILE"
+        print_info "./vault.sh configure offers to encrypt and replace it."
+    else
+        print_info "No vault file found at $VAULT_FILE"
+    fi
     read -p "Set up Proxmox API credentials now with ./vault.sh configure? (y/n): " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then

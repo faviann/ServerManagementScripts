@@ -365,12 +365,12 @@ Builds the effective LXC specs from tier and capability group variables, ensures
 ### Module not found
 
 - Verify collections installed: `ansible-galaxy collection list | grep proxmox`
-- Re-run `uv run --locked ansible-playbook bootstrap.yml` to reinstall collections after updating dependency files
+- Re-run `./setup.sh bootstrap` to reinstall collections after updating dependency files
 
 ### Python import errors
 
 - Verify Python packages: `uv run --locked python -c "import proxmoxer, requests"`
-- Re-run `uv sync --locked` to rebuild the controller Python environment if packages drift
+- Re-run `./setup.sh sync` to rebuild the controller Python environment if packages drift
 
 ## Migration from Legacy Implementation
 

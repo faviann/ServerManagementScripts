@@ -24,7 +24,7 @@ Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root (created lazily 
 
 ## Non-negotiables
 - Never request, paste, or print secrets (API token secret, vault passphrase, private keys). Use placeholders like `<REPLACE_ME>` in docs or examples.
-- Run Python and Ansible tools through `uv run --locked <tool>`. If `.venv/` does not exist, run `uv sync --locked`.
+- Run Python and Ansible tools through `uv run --locked <tool>`. If `.venv/` does not exist, run `./setup.sh sync`.
 - `ansible.cfg` expects the vault passphrase at `~/.ansible/vault-pass`.
 - Lifecycle playbooks skip any host whose `inventory_hostname` matches the controller's hostname (`proxmox_skip_self: true` by default). To manage the control node intentionally: `./run.sh -e proxmox_skip_self=false --limit workstation` (`--limit` targets the host, `-e` disables the guard).
 
@@ -80,7 +80,6 @@ Stacks live in `stacks/<hostname>/<stack-name>/compose.yaml`. Auto-discovered an
 | `./run.sh --limit <host>` | Target one host |
 | `./run.sh --limit <host> -e stack_filter=<stack>` | Deploy one stack on a host (skips all others) |
 | `./run.sh --check` | Dry run |
-| `uv run --locked ansible-playbook bootstrap.yml` | Recreate bootstrap artifacts after clean install |
 | `./validate.sh lifecycle` | Fast lifecycle feedback (~1.5 min) — semantic lifecycle facade matrix + targeted planning barrier, controlled observations only. Run while iterating on LXC lifecycle changes |
 | `./validate.sh lifecycle --only <launcher.py>` | Target one registered lifecycle launcher in the same credential-free fixture environment. Repeat `--only` to run several launchers in the supplied order |
 | `./validate.sh lifecycle --full --fail-fast` | Remediation pass — finish the concurrent fast launchers, then stop scheduling after the first observed failure |
@@ -90,7 +89,7 @@ Stacks live in `stacks/<hostname>/<stack-name>/compose.yaml`. Auto-discovered an
 | `./validate.sh stack <path>` | Validate one repo-managed stack's update policy — schema-versioned JSON on stdout, diagnostics on stderr. Not part of the no-argument handoff run |
 | `./setup.sh` | Guided fresh workstation setup — extend here for new workstation config (editor, tooling, env) |
 | `./setup.sh sync` | Synchronize the locked controller environment only (non-interactive; no OS packages, no managed host) |
-| `./setup.sh bootstrap` | Reconcile collections, external roles, and the controller SSH key (non-interactive; creates the key only when absent) |
+| `./setup.sh bootstrap` | Reconcile collections, external roles, and the controller SSH key — the way to restore collections and roles after a clean install (non-interactive; creates the key when absent, never replaces an existing one) |
 | `ssh -l root -i ~/.ansible/ssh/proxmox_lxc <host>` | Direct SSH into an LXC |
 
 **Timing**: `uv run --locked ansible-playbook` runs against live hosts typically take 5–10 minutes. Do not assume a hang — wait for completion before acting on the result.

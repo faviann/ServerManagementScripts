@@ -10,27 +10,44 @@ from pathlib import Path
 
 import pytest
 
-from ansible_test_helper import ansible_playbook_command
-
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# Every external program the command may reach for. A fake stands in for each
-# one so the recorded child-process boundary is the whole boundary: anything
-# the command invokes is either recorded here or absent from PATH.
+# Programs that would carry the command off the control node, plus the ones it
+# legitimately uses. A fake stands in for each, so reaching for any of them is
+# recorded rather than silent. PATH also carries /usr/bin and /bin, because the
+# command needs ordinary utilities; the guarantee is therefore that none of
+# these transports was used, not that no program at all could have been.
 RECORDED_EXECUTABLES = (
+    # The packaging tool, and the prerequisite programs guided setup uses.
     "uv",
     "curl",
     "dpkg",
+    # OS package installation.
     "sudo",
     "apt",
     "apt-get",
+    "aptitude",
+    # Ansible, which is how this repository reaches a managed host.
     "ansible",
     "ansible-playbook",
     "ansible-galaxy",
+    "ansible-connection",
+    "ansible-pull",
+    "ansible-console",
+    # Remote transports and network clients.
     "ssh",
+    "scp",
+    "sftp",
+    "rsync",
     "sshpass",
     "ssh-keygen",
+    "wget",
+    "nc",
+    "ncat",
+    "socat",
+    "telnet",
+    "git",
 )
 
 RECORDING_SHIM = """#!/usr/bin/env python3
@@ -132,11 +149,21 @@ def test_help_exits_zero_and_names_the_operations(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "arguments",
-    [("bogus",), ("--bogus",), ("sync", "--bogus"), ("bootstrap", "--bogus")],
+    ("arguments", "reported"),
+    [
+        (("bogus",), "unknown operation"),
+        (("--bogus",), "unknown option"),
+        # An operation that takes no arguments has no options to be unknown,
+        # so anything after it is reported as the surplus it is.
+        (("sync", "--bogus"), "sync takes no arguments"),
+        (("bootstrap", "--bogus"), "bootstrap takes no arguments"),
+        (("sync", "extra"), "sync takes no arguments"),
+        (("bootstrap", "extra"), "bootstrap takes no arguments"),
+        (("--help", "extra"), "--help takes no arguments"),
+    ],
 )
-def test_unknown_operation_or_option_is_invalid_usage(
-    tmp_path: Path, arguments: tuple[str, ...]
+def test_unknown_or_surplus_input_is_invalid_usage(
+    tmp_path: Path, arguments: tuple[str, ...], reported: str
 ) -> None:
     project = setup_project(tmp_path)
     env = setup_environment(tmp_path)
@@ -144,6 +171,7 @@ def test_unknown_operation_or_option_is_invalid_usage(
     result = run_setup(project, env, *arguments)
 
     assert result.returncode == 2, result.stdout
+    assert f"setup.sh: {reported}" in result.stderr
     assert captured_commands(env) == []
 
 
@@ -206,6 +234,38 @@ def test_bootstrap_without_a_locked_environment_directs_the_caller_to_sync(
     assert captured_commands(env) == []
 
 
+def test_sync_without_the_packaging_tool_fails_on_the_documented_status(
+    tmp_path: Path,
+) -> None:
+    project = setup_project(tmp_path)
+    env = setup_environment(tmp_path)
+    (tmp_path / "bin" / "uv").unlink()
+
+    result = run_setup(project, env, "sync")
+
+    # 127 from an unguarded `command not found` is outside the exit convention.
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "uv" in f"{result.stdout}\n{result.stderr}"
+    assert captured_commands(env) == []
+
+
+@pytest.mark.parametrize("operation", ["sync", "bootstrap"])
+def test_a_failing_operation_reports_failure_rather_than_success(
+    tmp_path: Path, operation: str
+) -> None:
+    project = setup_project(tmp_path)
+    env = setup_environment(tmp_path)
+    failing_uv = tmp_path / "bin" / "uv"
+    failing_uv.write_text("#!/bin/sh\nexit 9\n", encoding="utf-8")
+    failing_uv.chmod(0o755)
+
+    result = run_setup(project, env, operation)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "synchronized" not in result.stdout
+    assert "reconciled" not in result.stdout
+
+
 # --- AC4: bootstrap never replaces an existing controller SSH key ----------
 
 
@@ -243,74 +303,81 @@ def test_each_operation_runs_alone_and_repeats_identically(
     assert commands_after_second == commands_after_first * 2
 
 
-CONTROL_NODE_BOOTSTRAP_PLAY = (
-    REPO_ROOT / "tests" / "regression" / "fixtures" / "control_node_bootstrap_test.yml"
+# The real reconciliation the command delegates to, reached at the public
+# boundary. The throwaway project root borrows everything `uv run --locked`
+# and ansible.cfg need from the repository, and carries its own bootstrap.yml
+# applying the real role with test paths. Only ansible-galaxy is faked -- it is
+# the one step that would leave the machine.
+BORROWED_FROM_REPOSITORY = (
+    "setup.sh",
+    "vault.sh",
+    "pyproject.toml",
+    "uv.lock",
+    "ansible.cfg",
+    "playbooks",
+    "library",
+    ".venv",
 )
 
+RECONCILING_BOOTSTRAP_PLAY = """---
+- name: Bootstrap Ansible control node
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  become: false
+  vars:
+    control_node_project_root: "{{ playbook_dir }}"
+    control_node_collection_requirements: >-
+      {{ [playbook_dir, 'collections', 'requirements.yml'] | path_join }}
+    control_node_ansible_galaxy_executable: "{{ playbook_dir }}/fake-ansible-galaxy"
+  roles:
+    - base/control_node_bootstrap
+"""
 
-def run_control_node_bootstrap(
-    tmp_path: Path, home: Path
-) -> subprocess.CompletedProcess[str]:
-    """Run the reconciler `./setup.sh bootstrap` delegates to, offline.
 
-    Collection and role installation is the one part that would reach the
-    network, so a fake ansible-galaxy stands in for it. Nothing else in the
-    role leaves the control node.
-    """
-    fake_galaxy = tmp_path / "ansible-galaxy"
-    fake_galaxy.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    fake_galaxy.chmod(0o755)
-
-    project_root = tmp_path / "bootstrap-project"
-    (project_root / "collections").mkdir(parents=True, exist_ok=True)
-    (project_root / "collections" / "requirements.yml").write_text(
+def reconciling_project(tmp_path: Path) -> Path:
+    project = tmp_path / "reconciling-project"
+    project.mkdir()
+    for name in BORROWED_FROM_REPOSITORY:
+        (project / name).symlink_to(REPO_ROOT / name)
+    (project / "collections").mkdir()
+    (project / "collections" / "requirements.yml").write_text(
         "collections: []\n", encoding="utf-8"
     )
-
-    return subprocess.run(
-        [
-            *ansible_playbook_command(supplies_own_inventory=True),
-            "-i",
-            "localhost,",
-            "-c",
-            "local",
-            str(CONTROL_NODE_BOOTSTRAP_PLAY),
-            "-e",
-            json.dumps(
-                {
-                    "control_node_project_root": str(project_root),
-                    "control_node_home_dir": str(home),
-                    "control_node_vault_password_file": str(
-                        home / ".ansible" / "vault-pass"
-                    ),
-                    "control_node_skip_system_packages": True,
-                    "control_node_ansible_galaxy_executable": str(fake_galaxy),
-                }
-            ),
-        ],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        env=os.environ.copy(),
-        timeout=300,
-    )
+    (project / "inventory" / "group_vars" / "all").mkdir(parents=True)
+    (project / "bootstrap.yml").write_text(RECONCILING_BOOTSTRAP_PLAY, encoding="utf-8")
+    galaxy = project / "fake-ansible-galaxy"
+    galaxy.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    galaxy.chmod(0o755)
+    return project
 
 
-def test_reconciliation_creates_the_controller_key_only_when_absent(
+def reconciling_environment(tmp_path: Path) -> dict[str, str]:
+    """The real toolchain, but a private HOME the controller key lands in."""
+    home = tmp_path / "reconciling-home"
+    (home / ".ansible").mkdir(parents=True)
+    (home / ".ansible" / "vault-pass").write_text("passphrase\n", encoding="utf-8")
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    return env
+
+
+def test_bootstrap_creates_the_controller_key_only_when_absent(
     tmp_path: Path,
 ) -> None:
-    env = setup_environment(tmp_path)
-    home = Path(env["HOME"])
-    private_key = home / ".ansible" / "ssh" / "proxmox_lxc"
-    public_key = home / ".ansible" / "ssh" / "proxmox_lxc.pub"
+    project = reconciling_project(tmp_path)
+    env = reconciling_environment(tmp_path)
+    private_key = Path(env["HOME"]) / ".ansible" / "ssh" / "proxmox_lxc"
+    public_key = Path(env["HOME"]) / ".ansible" / "ssh" / "proxmox_lxc.pub"
+    assert not private_key.exists()
 
-    absent = run_control_node_bootstrap(tmp_path, home)
+    absent = run_setup(project, env, "bootstrap")
 
     assert absent.returncode == 0, absent.stdout + absent.stderr
     assert private_key.exists() and public_key.exists()
     existing = (private_key.read_bytes(), public_key.read_bytes())
 
-    present = run_control_node_bootstrap(tmp_path, home)
+    present = run_setup(project, env, "bootstrap")
 
     assert present.returncode == 0, present.stdout + present.stderr
     assert (private_key.read_bytes(), public_key.read_bytes()) == existing
@@ -349,9 +416,11 @@ def test_guided_setup_leaves_an_existing_encrypted_vault_untouched(
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert vault_file(project).read_text(encoding="utf-8") == ENCRYPTED_VAULT
-    # Nothing was offered and nothing ran: no prompt, and no ./vault.sh child.
+    # The vault step reported the encrypted file and stopped there: no offer
+    # was printed, so nothing could accept one. (An accepted offer is observed
+    # separately, in the missing-vault case below.)
+    assert "leaving it untouched" in result.stdout
     assert "Set up Proxmox API credentials now" not in result.stdout
-    assert "configure: FAIL" not in result.stderr
 
 
 def test_guided_setup_offers_the_vault_commands_guided_configuration(
@@ -372,6 +441,22 @@ def test_guided_setup_offers_the_vault_commands_guided_configuration(
     # ./vault.sh reports a refused non-interactive `configure` this way, so the
     # line is evidence that guided setup handed the vault step to that command.
     assert "configure: FAIL" in accepted.stderr
+
+
+def test_guided_setup_warns_about_an_unencrypted_vault(tmp_path: Path) -> None:
+    project = setup_project(tmp_path)
+    plaintext = "---\nvault_proxmox_api_user: root@pam\n"
+    vault_file(project).write_text(plaintext, encoding="utf-8")
+    env = setup_environment(tmp_path)
+
+    result = run_setup(project, env, stdin="n\n")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    output = f"{result.stdout}\n{result.stderr}"
+    assert "NOT encrypted" in output
+    assert "./vault.sh configure" in output
+    # setup.sh must not convert it itself; ./vault.sh owns that prompt.
+    assert vault_file(project).read_text(encoding="utf-8") == plaintext
 
 
 def test_guided_setup_names_only_supported_commands(tmp_path: Path) -> None:
