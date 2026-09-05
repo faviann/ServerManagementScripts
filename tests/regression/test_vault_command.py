@@ -131,12 +131,17 @@ def real_vault_repo(
 
 
 def run_vault(
-    repo: Path, env: dict[str, str], *args: str
+    repo: Path,
+    env: dict[str, str],
+    *args: str,
+    cwd: Path | None = None,
+    input: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [str(repo / "vault.sh"), *args],
-        cwd=repo,
+        cwd=repo if cwd is None else cwd,
         env=env,
+        input=input,
         capture_output=True,
         text=True,
         timeout=10,
@@ -196,7 +201,7 @@ def test_vault_requires_an_operation_and_advertises_its_complete_interface() -> 
 
     assert missing.returncode == 2
     assert help_result.returncode == 0
-    assert {"configure", "edit", "check"} <= set(help_result.stdout.split())
+    assert {"configure", "edit", "check", "set"} <= set(help_result.stdout.split())
 
 
 def test_vault_fakes_are_named_executable_fixtures(
@@ -1158,3 +1163,466 @@ def test_signal_after_atomic_rename_reports_the_committed_success(
     assert vault.read_text(encoding="utf-8").startswith(HEADER)
     assert_no_transaction_artifacts(repo, env)
     assert not list(repo.rglob("vault.yml.tmp.*"))
+
+
+SOURCE_SECRET = b"transferred-secret-marker\n"
+AWKWARD_SECRET = (
+    b"  leading-marker\tspaced  \n\ninterior\r\nline \n  trailing-marker  \n"
+)
+
+
+def write_source(path: Path, content: bytes = SOURCE_SECRET) -> Path:
+    path.write_bytes(content)
+    path.chmod(0o600)
+    return path
+
+
+def source_state(path: Path) -> tuple[bool, str | None, int | None, int | None]:
+    if not path.exists():
+        return False, None, None, None
+    info = path.stat()
+    return (
+        True,
+        hashlib.sha256(path.read_bytes()).hexdigest(),
+        info.st_mode,
+        info.st_mtime_ns,
+    )
+
+
+def published_mapping(repo: Path) -> dict[str, object]:
+    published = (
+        repo / "inventory/group_vars/all/vault.yml"
+    ).read_text(encoding="utf-8")
+    assert published.startswith(HEADER)
+    return yaml.safe_load(published.removeprefix(HEADER))
+
+
+def assert_vault_untouched(repo: Path, original: bytes) -> None:
+    vault = repo / "inventory/group_vars/all/vault.yml"
+    assert vault.read_bytes() == original
+    assert not list(repo.rglob("*.tmp.*"))
+    assert not list(repo.rglob("*backup*"))
+
+
+def test_set_transfers_a_file_into_a_named_top_level_key(
+    vault_repo: tuple[Path, dict[str, str]], tmp_path: Path
+) -> None:
+    repo, env = vault_repo
+    vault = repo / "inventory/group_vars/all/vault.yml"
+    vault.write_text(HEADER + VALID_YAML, encoding="utf-8")
+    source = write_source(tmp_path / "secret")
+
+    result = run_vault(
+        repo, env, "set", "vault_transferred", "--from-file", str(source), "--create"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "set vault_transferred: PASS\n"
+    mapping = published_mapping(repo)
+    assert mapping["vault_transferred"] == SOURCE_SECRET.decode()
+    assert mapping["unrelated_scalar"] == "keep-me"
+    assert mapping["unrelated_mapping"] == {"nested": True}
+    assert mapping["vault_proxmox_api_token_secret"] == "synthetic-token-marker"
+    assert_no_transaction_artifacts(repo, env)
+
+
+def test_set_replaces_an_existing_key_in_place(
+    vault_repo: tuple[Path, dict[str, str]], tmp_path: Path
+) -> None:
+    repo, env = vault_repo
+    (repo / "inventory/group_vars/all/vault.yml").write_text(
+        HEADER + VALID_YAML, encoding="utf-8"
+    )
+    source = write_source(tmp_path / "secret")
+
+    result = run_vault(
+        repo,
+        env,
+        "set",
+        "vault_proxmox_api_token_secret",
+        "--from-file",
+        str(source),
+        "--replace",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "set vault_proxmox_api_token_secret: PASS\n"
+    mapping = published_mapping(repo)
+    assert mapping["vault_proxmox_api_token_secret"] == SOURCE_SECRET.decode()
+    assert mapping["unrelated_scalar"] == "keep-me"
+
+
+@pytest.mark.parametrize(
+    "modes",
+    [
+        (),
+        ("--create", "--replace"),
+        ("--replace", "--create"),
+        ("--create", "--create"),
+    ],
+)
+def test_set_requires_exactly_one_explicit_create_or_replace(
+    vault_repo: tuple[Path, dict[str, str]], tmp_path: Path, modes: tuple[str, ...]
+) -> None:
+    repo, env = vault_repo
+    vault = repo / "inventory/group_vars/all/vault.yml"
+    original = (HEADER + VALID_YAML).encode()
+    vault.write_bytes(original)
+    source = write_source(tmp_path / "secret")
+
+    result = run_vault(
+        repo,
+        env,
+        "set",
+        "vault_transferred",
+        "--from-file",
+        str(source),
+        *modes,
+    )
+
+    assert result.returncode != 0
+    assert_vault_untouched(repo, original)
+
+
+@pytest.mark.parametrize(
+    ("key", "mode"),
+    [("unrelated_scalar", "--create"), ("vault_absent", "--replace")],
+)
+def test_set_refuses_to_silently_overwrite_or_silently_create(
+    vault_repo: tuple[Path, dict[str, str]],
+    tmp_path: Path,
+    key: str,
+    mode: str,
+) -> None:
+    repo, env = vault_repo
+    vault = repo / "inventory/group_vars/all/vault.yml"
+    original = (HEADER + VALID_YAML).encode()
+    vault.write_bytes(original)
+    source = write_source(tmp_path / "secret")
+
+    result = run_vault(repo, env, "set", key, "--from-file", str(source), mode)
+
+    assert result.returncode == 1
+    assert_vault_untouched(repo, original)
+    assert_no_transaction_artifacts(repo, env)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "symlink",
+        "directory",
+        "group-readable",
+        "world-readable",
+        "missing",
+        "foreign-owner",
+    ],
+)
+def test_set_rejects_a_source_that_is_not_a_private_regular_file(
+    vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
+    tmp_path: Path,
+    shape: str,
+) -> None:
+    repo, env = vault_repo
+    vault = repo / "inventory/group_vars/all/vault.yml"
+    original = (HEADER + VALID_YAML).encode()
+    vault.write_bytes(original)
+    source = write_source(tmp_path / "secret")
+    if shape == "symlink":
+        link = tmp_path / "link"
+        link.symlink_to(source)
+        source = link
+    elif shape == "directory":
+        source = tmp_path / "directory"
+        source.mkdir()
+    elif shape == "group-readable":
+        source.chmod(0o640)
+    elif shape == "world-readable":
+        source.chmod(0o604)
+    elif shape == "missing":
+        source.unlink()
+    elif shape == "foreign-owner":
+        fake_executable("stat", env)
+
+    result = run_vault(
+        repo, env, "set", "vault_transferred", "--from-file", str(source), "--create"
+    )
+
+    assert result.returncode != 0
+    assert SOURCE_SECRET.decode().strip() not in result.stdout + result.stderr
+    assert_vault_untouched(repo, original)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ("--create",),
+        ("--from-file", "-", "--create"),
+        ("--from-value", "transferred-secret-marker", "--create"),
+        ("--from-env", "VAULT_TEST_SECRET_SOURCE", "--create"),
+        ("transferred-secret-marker", "--create"),
+    ],
+)
+def test_set_accepts_no_source_channel_other_than_a_file(
+    vault_repo: tuple[Path, dict[str, str]],
+    arguments: tuple[str, ...],
+) -> None:
+    repo, env = vault_repo
+    vault = repo / "inventory/group_vars/all/vault.yml"
+    original = (HEADER + VALID_YAML).encode()
+    vault.write_bytes(original)
+    env["VAULT_TEST_SECRET_SOURCE"] = SOURCE_SECRET.decode()
+
+    result = run_vault(
+        repo,
+        env,
+        "set",
+        "vault_transferred",
+        *arguments,
+        input=SOURCE_SECRET.decode(),
+    )
+
+    assert result.returncode != 0
+    assert SOURCE_SECRET.decode().strip() not in result.stdout + result.stderr
+    assert_vault_untouched(repo, original)
+
+
+@pytest.mark.parametrize("strip", [False, True])
+def test_set_preserves_the_source_bytes_and_strips_only_on_request(
+    vault_repo: tuple[Path, dict[str, str]], tmp_path: Path, strip: bool
+) -> None:
+    repo, env = vault_repo
+    (repo / "inventory/group_vars/all/vault.yml").write_text(
+        HEADER + VALID_YAML, encoding="utf-8"
+    )
+    source = write_source(tmp_path / "secret", AWKWARD_SECRET)
+    arguments = ["--strip-final-newline"] if strip else []
+
+    result = run_vault(
+        repo,
+        env,
+        "set",
+        "vault_transferred",
+        "--from-file",
+        str(source),
+        "--create",
+        *arguments,
+    )
+
+    assert result.returncode == 0, result.stderr
+    expected = AWKWARD_SECRET[:-1] if strip else AWKWARD_SECRET
+    assert published_mapping(repo)["vault_transferred"] == expected.decode()
+
+
+def test_set_never_modifies_or_removes_the_source_file(
+    vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
+    tmp_path: Path,
+) -> None:
+    repo, env = vault_repo
+    (repo / "inventory/group_vars/all/vault.yml").write_text(
+        HEADER + VALID_YAML, encoding="utf-8"
+    )
+    source = write_source(tmp_path / "secret", AWKWARD_SECRET)
+    before = source_state(source)
+
+    succeeded = run_vault(
+        repo, env, "set", "vault_transferred", "--from-file", str(source), "--create"
+    )
+    after_success = source_state(source)
+    fake_executable("uv", env, encrypt_fail=True)
+    failed = run_vault(
+        repo, env, "set", "vault_other", "--from-file", str(source), "--create"
+    )
+
+    assert succeeded.returncode == 0, succeeded.stderr
+    assert failed.returncode == 1
+    assert after_success == before
+    assert source_state(source) == before
+
+
+@pytest.mark.parametrize(
+    ("key", "mode", "expected"),
+    [
+        ("vault_transferred", "--create", "set vault_transferred: PASS"),
+        ("unrelated_scalar", "--create", "set unrelated_scalar: FAIL"),
+        ("vault_absent", "--replace", "set vault_absent: FAIL"),
+    ],
+)
+def test_set_output_names_the_key_and_action_but_never_the_value(
+    vault_repo: tuple[Path, dict[str, str]],
+    tmp_path: Path,
+    key: str,
+    mode: str,
+    expected: str,
+) -> None:
+    repo, env = vault_repo
+    (repo / "inventory/group_vars/all/vault.yml").write_text(
+        HEADER + VALID_YAML, encoding="utf-8"
+    )
+    source = write_source(tmp_path / "secret", AWKWARD_SECRET)
+
+    result = run_vault(repo, env, "set", key, "--from-file", str(source), mode)
+
+    output = result.stdout + result.stderr
+    assert expected in output
+    for marker in ("leading-marker", "trailing-marker", "interior", "spaced"):
+        assert marker not in output
+
+
+def test_failed_set_leaves_the_vault_byte_identical(
+    vault_repo: tuple[Path, dict[str, str]],
+    fake_executable: FakeExecutableFactory,
+    tmp_path: Path,
+) -> None:
+    repo, env = vault_repo
+    vault = repo / "inventory/group_vars/all/vault.yml"
+    original = (HEADER + VALID_YAML).encode()
+    vault.write_bytes(original)
+    passphrase = "synthetic-passphrase-marker"
+    Path(env["ANSIBLE_VAULT_PASSWORD_FILE"]).write_text(
+        passphrase + "\n", encoding="utf-8"
+    )
+    source = write_source(tmp_path / "secret", AWKWARD_SECRET)
+    fake_executable("mv", env, fail=True)
+
+    result = run_vault(
+        repo, env, "set", "vault_transferred", "--from-file", str(source), "--create"
+    )
+
+    assert result.returncode == 1
+    assert vault.read_bytes() == original
+    output = result.stdout + result.stderr
+    assert "set vault_transferred: FAIL" in output
+    for marker in (
+        passphrase,
+        "synthetic-token-marker",
+        "keep-me",
+        "leading-marker",
+        "trailing-marker",
+    ):
+        assert marker not in output
+    events = boundary_events(env)
+    assert events
+    assert {event["tracked_state"] for event in events} == {"ciphertext"}
+    assert {event["tracked_digest"] for event in events} == {
+        hashlib.sha256(original).hexdigest()
+    }
+    assert_no_transaction_artifacts(repo, env)
+
+
+def test_set_fails_the_transaction_for_a_non_utf8_source(
+    vault_repo: tuple[Path, dict[str, str]], tmp_path: Path
+) -> None:
+    repo, env = vault_repo
+    vault = repo / "inventory/group_vars/all/vault.yml"
+    original = (HEADER + VALID_YAML).encode()
+    vault.write_bytes(original)
+    source = write_source(tmp_path / "secret", b"\xfe\xff binary-marker \x00\x80\n")
+    before = source_state(source)
+
+    result = run_vault(
+        repo, env, "set", "vault_transferred", "--from-file", str(source), "--create"
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == "set vault_transferred: FAIL\n"
+    assert_vault_untouched(repo, original)
+    assert source_state(source) == before
+
+
+def test_set_round_trips_through_real_ansible_vault(
+    real_vault_repo: tuple[Path, dict[str, str]], tmp_path: Path
+) -> None:
+    repo, env = real_vault_repo
+    vault = repo / "inventory/group_vars/all/vault.yml"
+    vault.write_text(VALID_YAML, encoding="utf-8")
+    assert run_real_ansible_vault(repo, env, "encrypt").returncode == 0
+    source = write_source(tmp_path / "secret", AWKWARD_SECRET)
+
+    result = run_vault(
+        repo, env, "set", "vault_transferred", "--from-file", str(source), "--create"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert vault.read_text(encoding="utf-8").startswith(HEADER)
+    assert run_real_ansible_vault(repo, env, "decrypt").returncode == 0
+    mapping = yaml.safe_load(vault.read_text(encoding="utf-8"))
+    assert mapping["vault_transferred"] == AWKWARD_SECRET.decode()
+    assert mapping["unrelated_scalar"] == "keep-me"
+
+
+def test_set_declines_an_unencrypted_vault_without_prompting(
+    vault_repo: tuple[Path, dict[str, str]], tmp_path: Path
+) -> None:
+    repo, env = vault_repo
+    vault = repo / "inventory/group_vars/all/vault.yml"
+    original = VALID_YAML.encode()
+    vault.write_bytes(original)
+    source = write_source(tmp_path / "secret", AWKWARD_SECRET)
+
+    result = run_vault(
+        repo, env, "set", "vault_transferred", "--from-file", str(source), "--create"
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert "Encrypt and replace" not in result.stderr
+    assert_vault_untouched(repo, original)
+
+
+def test_set_transfers_the_caller_relative_file_the_caller_named(
+    vault_repo: tuple[Path, dict[str, str]], tmp_path: Path
+) -> None:
+    repo, env = vault_repo
+    (repo / "inventory/group_vars/all/vault.yml").write_text(
+        HEADER + VALID_YAML, encoding="utf-8"
+    )
+    caller_directory = tmp_path / "caller"
+    caller_directory.mkdir()
+    write_source(caller_directory / "secret", b"caller-file-marker\n")
+    write_source(repo / "secret", b"repo-root-decoy-marker\n")
+
+    result = run_vault(
+        repo,
+        env,
+        "set",
+        "vault_transferred",
+        "--from-file",
+        "secret",
+        "--create",
+        cwd=caller_directory,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert published_mapping(repo)["vault_transferred"] == "caller-file-marker\n"
+
+
+def test_set_refuses_the_vault_file_as_its_own_source(
+    vault_repo: tuple[Path, dict[str, str]], tmp_path: Path
+) -> None:
+    repo, env = vault_repo
+    vault = repo / "inventory/group_vars/all/vault.yml"
+    original = (HEADER + VALID_YAML).encode()
+    vault.write_bytes(original)
+    vault.chmod(0o600)
+    hard_link = tmp_path / "vault-hard-link"
+    os.link(vault, hard_link)
+
+    for source in (vault, hard_link):
+        result = run_vault(
+            repo,
+            env,
+            "set",
+            "vault_transferred",
+            "--from-file",
+            str(source),
+            "--create",
+        )
+
+        assert result.returncode == 1
+        assert result.stderr == "set vault_transferred: FAIL\n"
+        assert_vault_untouched(repo, original)
+
