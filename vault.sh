@@ -265,12 +265,16 @@ report_failure() {
 transfer_source_into_plaintext() {
     local workspace="$1"
     local plaintext="$2"
+    local source="$3"
+    local key="$4"
+    local mode="$5"
+    local strip="$6"
     local value_file="$workspace/value"
 
-    cp -- "$SET_SOURCE" "$value_file" || return 1
+    cp -- "$source" "$value_file" || return 1
     chmod 600 "$value_file"
     uv run --locked python - \
-        "$plaintext" "$value_file" "$SET_KEY" "$SET_MODE" "$SET_STRIP" \
+        "$plaintext" "$value_file" "$key" "$mode" "$strip" \
         >/dev/null 2>&1 <<'PY'
 import sys
 from pathlib import Path
@@ -370,7 +374,8 @@ PY
             return 1
         fi
     elif [[ "$operation" == set ]]; then
-        if ! transfer_source_into_plaintext "$workspace" "$plaintext"; then
+        if ! transfer_source_into_plaintext "$workspace" "$plaintext" \
+            "$SET_SOURCE" "$SET_KEY" "$SET_MODE" "$SET_STRIP"; then
             cleanup_transaction || true
             return 1
         fi
@@ -479,6 +484,10 @@ case "$1" in
             exit 2
         fi
         if source_file_authorized "$SET_SOURCE"; then
+            # fd 3 is the prompt channel the interactive operations open on the
+            # tty. A transfer is non-interactive, so it points at /dev/null:
+            # the only prompt it can reach is the unencrypted-vault
+            # confirmation, whose read then hits EOF and declines.
             exec 3<>/dev/null
             if run_mutation set ""; then
                 printf 'set %s: PASS\n' "$SET_KEY"
@@ -491,7 +500,7 @@ case "$1" in
     configure|edit)
         (( $# == 1 )) || exit 2
         open_tty || {
-            printf '%s: FAIL\n' "$1" >&2
+            report_failure "$1"
             exit 1
         }
         run_mutation "$1"

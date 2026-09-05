@@ -132,12 +132,17 @@ def real_vault_repo(
 
 
 def run_vault(
-    repo: Path, env: dict[str, str], *args: str
+    repo: Path,
+    env: dict[str, str],
+    *args: str,
+    cwd: Path | None = None,
+    input: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [str(repo / "vault.sh"), *args],
-        cwd=repo,
+        cwd=repo if cwd is None else cwd,
         env=env,
+        input=input,
         capture_output=True,
         text=True,
         timeout=10,
@@ -208,8 +213,10 @@ def test_vault_fakes_are_named_executable_fixtures(
     _, env = vault_repo
     installed_bin = Path(env["PATH"].split(":", 1)[0])
     fake_executable("editor", env, capture=tmp_path / "editor-capture")
+    fake_executable("stat", env)
+    fake_executable("mktemp", env)
 
-    for name in ("uv", "mv", "rm", "editor"):
+    for name in ("uv", "mv", "rm", "editor", "stat", "mktemp"):
         fixture = FAKE_FIXTURES / name
         assert fixture.is_file()
         assert installed_bin.joinpath(name).read_bytes() == fixture.read_bytes()
@@ -1215,6 +1222,7 @@ def test_set_transfers_a_file_into_a_named_top_level_key(
     )
 
     assert result.returncode == 0, result.stderr
+    assert result.stdout == "set vault_transferred: PASS\n"
     mapping = published_mapping(repo)
     assert mapping["vault_transferred"] == SOURCE_SECRET.decode()
     assert mapping["unrelated_scalar"] == "keep-me"
@@ -1243,6 +1251,7 @@ def test_set_replaces_an_existing_key_in_place(
     )
 
     assert result.returncode == 0, result.stderr
+    assert result.stdout == "set vault_proxmox_api_token_secret: PASS\n"
     mapping = published_mapping(repo)
     assert mapping["vault_proxmox_api_token_secret"] == SOURCE_SECRET.decode()
     assert mapping["unrelated_scalar"] == "keep-me"
@@ -1380,14 +1389,13 @@ def test_set_accepts_no_source_channel_other_than_a_file(
     vault.write_bytes(original)
     env["VAULT_TEST_SECRET_SOURCE"] = SOURCE_SECRET.decode()
 
-    result = subprocess.run(
-        [str(repo / "vault.sh"), "set", "vault_transferred", *arguments],
-        cwd=repo,
-        env=env,
+    result = run_vault(
+        repo,
+        env,
+        "set",
+        "vault_transferred",
+        *arguments,
         input=SOURCE_SECRET.decode(),
-        capture_output=True,
-        text=True,
-        timeout=10,
     )
 
     assert result.returncode != 0
@@ -1542,6 +1550,27 @@ def test_failed_set_leaves_the_vault_byte_identical(
     assert_no_transaction_artifacts(repo, env)
 
 
+def test_set_fails_the_transaction_for_a_non_utf8_source(
+    vault_repo: tuple[Path, dict[str, str]], tmp_path: Path
+) -> None:
+    repo, env = vault_repo
+    vault = repo / "inventory/group_vars/all/vault.yml"
+    original = (HEADER + VALID_YAML).encode()
+    vault.write_bytes(original)
+    source = write_source(tmp_path / "secret", b"\xfe\xff binary-marker \x00\x80\n")
+    before = source_state(source)
+
+    result = run_vault(
+        repo, env, "set", "vault_transferred", "--from-file", str(source), "--create"
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == "set vault_transferred: FAIL\n"
+    assert_vault_untouched(repo, original)
+    assert source_state(source) == before
+
+
 def test_set_round_trips_through_real_ansible_vault(
     real_vault_repo: tuple[Path, dict[str, str]], tmp_path: Path
 ) -> None:
@@ -1594,20 +1623,15 @@ def test_set_transfers_the_caller_relative_file_the_caller_named(
     write_source(caller_directory / "secret", b"caller-file-marker\n")
     write_source(repo / "secret", b"repo-root-decoy-marker\n")
 
-    result = subprocess.run(
-        [
-            str(repo / "vault.sh"),
-            "set",
-            "vault_transferred",
-            "--from-file",
-            "secret",
-            "--create",
-        ],
+    result = run_vault(
+        repo,
+        env,
+        "set",
+        "vault_transferred",
+        "--from-file",
+        "secret",
+        "--create",
         cwd=caller_directory,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=10,
     )
 
     assert result.returncode == 0, result.stderr
