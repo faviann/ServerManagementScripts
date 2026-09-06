@@ -76,7 +76,10 @@ reconcile_controller_artifacts() {
         return 1
     fi
     print_info "Reconciling collections, external roles, and the controller SSH key..."
-    uv run --locked ansible-playbook bootstrap.yml || return 1
+    # --no-sync keeps this operation out of sync's territory: without it, uv
+    # materializes or repairs the locked environment here, so bootstrap would
+    # silently do the dependency synchronization it is supposed to require.
+    uv run --no-sync --locked ansible-playbook bootstrap.yml || return 1
     print_status "Controller artifacts reconciled"
 }
 

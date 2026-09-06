@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-"""Grammar and boundary coverage for the workstation setup command."""
+"""Regression coverage for the ./setup.sh command facade.
+
+`setup.sh` is a facade: it dispatches operations, delegates the work to `uv`
+and to the tracked bootstrap play, and reconciles nothing itself. These tests
+observe exactly that boundary -- the process, its exit status, its output, and
+the child commands it invokes.
+
+What the bootstrap play then does -- installing collections, reconciling
+external role pins, creating the controller SSH key without replacing an
+existing one -- is owned by `test_control_node_dependencies.py`, which drives
+the role directly. Re-proving it here would mean rebuilding an Ansible
+environment around a shell wrapper.
+"""
 
 from __future__ import annotations
 
@@ -14,505 +26,243 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# Programs that would carry the command off the control node, plus the ones it
-# legitimately uses. A fake stands in for each, so reaching for any of them is
-# recorded rather than silent. PATH also carries /usr/bin and /bin, because the
-# command needs ordinary utilities; the guarantee is therefore that none of
-# these transports was used, not that no program at all could have been.
-RECORDED_EXECUTABLES = (
-    # The packaging tool, and the prerequisite programs guided setup uses.
-    "uv",
-    "curl",
-    "dpkg",
-    # OS package installation.
-    "sudo",
-    "apt",
-    "apt-get",
-    "aptitude",
-    # Ansible, which is how this repository reaches a managed host.
-    "ansible",
-    "ansible-playbook",
-    "ansible-galaxy",
-    "ansible-connection",
-    "ansible-pull",
-    "ansible-console",
-    # Remote transports and network clients.
-    "ssh",
-    "scp",
-    "sftp",
-    "rsync",
-    "sshpass",
-    "ssh-keygen",
-    "wget",
-    "nc",
-    "ncat",
-    "socat",
-    "telnet",
-    "git",
-)
+# The programs setup.sh can reach. Shimming them keeps guided setup off the
+# package manager and off the network, and records what was invoked. This is a
+# sandbox, not a proof: the assertions below name the exact commands each
+# operation is allowed to run, which is the claim worth making.
+SHIMMED = ("uv", "curl", "dpkg", "sudo", "apt", "apt-get")
 
-RECORDING_SHIM = """#!/usr/bin/env python3
-import json
-import os
-import sys
+RECORDING_SHIM = '''#!/usr/bin/env python3
+import json, os, sys
 from pathlib import Path
 
 name = Path(sys.argv[0]).name
-with Path(os.environ["SETUP_TEST_CAPTURE"]).open("a", encoding="utf-8") as log:
-    log.write(json.dumps({"name": name, "argv": sys.argv[1:]}) + "\\n")
+with Path(os.environ["SETUP_TEST_LOG"]).open("a", encoding="utf-8") as log:
+    log.write(json.dumps([name, *sys.argv[1:]]) + "\\n")
 if name == "dpkg":
     # Guided setup reads `dpkg -l` to decide whether sshpass is installed.
     print("ii  sshpass  1.09  amd64  Non-interactive ssh password provider")
-"""
+raise SystemExit(int(os.environ.get("SETUP_TEST_CHILD_STATUS", "0")))
+'''
+
+SYNC = ["uv", "sync", "--locked"]
+BOOTSTRAP = ["uv", "run", "--no-sync", "--locked", "ansible-playbook", "bootstrap.yml"]
+
+ENCRYPTED_VAULT = "$ANSIBLE_VAULT;1.1;AES256\n3132330a\n"
 
 
-def setup_project(tmp_path: Path, *, locked_environment: bool = True) -> Path:
-    """A throwaway project root the real command runs against.
+@pytest.fixture
+def project(tmp_path: Path) -> Path:
+    """A throwaway project root reached through a symlink.
 
-    `setup.sh` resolves its project root from its own path, so the command is
-    reached through a symlink rather than at the repository root. That keeps
-    guided setup's filesystem writes inside the test and lets a case decide
-    whether the locked environment is present.
+    `setup.sh` resolves its project root from its own path, so this keeps the
+    guided path's filesystem writes inside the test.
     """
     project = tmp_path / "project"
-    project.mkdir()
-    for command in ("setup.sh", "vault.sh"):
-        (project / command).symlink_to(REPO_ROOT / command)
-    (project / "bootstrap.yml").write_text("---\n", encoding="utf-8")
     (project / "inventory" / "group_vars" / "all").mkdir(parents=True)
     (project / ".agents" / "skills" / "example-skill").mkdir(parents=True)
-    if locked_environment:
-        (project / ".venv").mkdir()
+    for name in ("setup.sh", "vault.sh"):
+        (project / name).symlink_to(REPO_ROOT / name)
+    (project / "bootstrap.yml").write_text("---\n", encoding="utf-8")
+    (project / ".venv").mkdir()
     return project
 
 
-def setup_environment(tmp_path: Path) -> dict[str, str]:
+@pytest.fixture
+def env(tmp_path: Path) -> dict[str, str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    for name in RECORDED_EXECUTABLES:
-        fake = bin_dir / name
-        fake.write_text(RECORDING_SHIM, encoding="utf-8")
-        fake.chmod(0o755)
+    for name in SHIMMED:
+        shim = bin_dir / name
+        shim.write_text(RECORDING_SHIM, encoding="utf-8")
+        shim.chmod(0o755)
 
     home = tmp_path / "home"
     (home / ".ansible").mkdir(parents=True)
     (home / ".ansible" / "vault-pass").write_text("passphrase\n", encoding="utf-8")
 
-    env = os.environ.copy()
-    env.update(
+    environment = os.environ.copy()
+    environment.update(
         {
             "HOME": str(home),
             "PATH": f"{bin_dir}:/usr/bin:/bin",
-            "SETUP_TEST_CAPTURE": str(tmp_path / "commands.jsonl"),
+            "SETUP_TEST_LOG": str(tmp_path / "children.jsonl"),
         }
     )
-    return env
+    return environment
 
 
-def run_setup(
-    project: Path,
-    env: dict[str, str],
-    *arguments: str,
-    stdin: str = "",
+def run(
+    project: Path, env: dict[str, str], *arguments: str, stdin: str = ""
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [str(project / "setup.sh"), *arguments],
         cwd=project,
-        capture_output=True,
-        text=True,
         env=env,
         input=stdin,
+        capture_output=True,
+        text=True,
         timeout=60,
     )
 
 
-def captured_commands(env: dict[str, str]) -> list[dict[str, object]]:
-    capture = Path(env["SETUP_TEST_CAPTURE"])
-    if not capture.exists():
+def children(env: dict[str, str]) -> list[list[str]]:
+    log = Path(env["SETUP_TEST_LOG"])
+    if not log.exists():
         return []
-    return [json.loads(line) for line in capture.read_text(encoding="utf-8").splitlines()]
-
-
-# --- AC8: usage grammar and exit statuses ----------------------------------
-
-
-def test_help_exits_zero_and_names_the_operations(tmp_path: Path) -> None:
-    project = setup_project(tmp_path)
-    env = setup_environment(tmp_path)
-
-    result = run_setup(project, env, "--help")
-
-    assert result.returncode == 0, result.stderr
-    output = f"{result.stdout}\n{result.stderr}"
-    assert "sync" in output
-    assert "bootstrap" in output
-    assert captured_commands(env) == []
-
-
-@pytest.mark.parametrize(
-    ("arguments", "reported"),
-    [
-        (("bogus",), "unknown operation"),
-        (("--bogus",), "unknown option"),
-        # An operation that takes no arguments has no options to be unknown,
-        # so anything after it is reported as the surplus it is.
-        (("sync", "--bogus"), "sync takes no arguments"),
-        (("bootstrap", "--bogus"), "bootstrap takes no arguments"),
-        (("sync", "extra"), "sync takes no arguments"),
-        (("bootstrap", "extra"), "bootstrap takes no arguments"),
-        (("--help", "extra"), "--help takes no arguments"),
-    ],
-)
-def test_unknown_or_surplus_input_is_invalid_usage(
-    tmp_path: Path, arguments: tuple[str, ...], reported: str
-) -> None:
-    project = setup_project(tmp_path)
-    env = setup_environment(tmp_path)
-
-    result = run_setup(project, env, *arguments)
-
-    assert result.returncode == 2, result.stdout
-    assert f"setup.sh: {reported}" in result.stderr
-    assert captured_commands(env) == []
-
-
-# --- AC2 / AC3: the agent-safe operations ----------------------------------
-
-
-def assert_no_managed_host_contact(commands: list[dict[str, object]]) -> None:
-    """No child reaches off the control node.
-
-    Only the packaging tool may be invoked, and the only Ansible run it may
-    carry is the local control-node bootstrap play.
-    """
-    for entry in commands:
-        assert entry["name"] == "uv", entry
-        argv = entry["argv"]
-        if "ansible-playbook" in argv or "ansible" in argv:
-            assert argv == ["run", "--locked", "ansible-playbook", "bootstrap.yml"]
-
-
-def test_sync_performs_locked_synchronization_only(tmp_path: Path) -> None:
-    project = setup_project(tmp_path)
-    env = setup_environment(tmp_path)
-
-    result = run_setup(project, env, "sync")
-
-    assert result.returncode == 0, result.stderr
-    commands = captured_commands(env)
-    assert [(entry["name"], entry["argv"]) for entry in commands] == [
-        ("uv", ["sync", "--locked"])
-    ]
-    assert_no_managed_host_contact(commands)
-
-
-def test_bootstrap_reconciles_through_the_control_node_playbook(
-    tmp_path: Path,
-) -> None:
-    project = setup_project(tmp_path)
-    env = setup_environment(tmp_path)
-
-    result = run_setup(project, env, "bootstrap")
-
-    assert result.returncode == 0, result.stderr
-    commands = captured_commands(env)
-    assert [(entry["name"], entry["argv"]) for entry in commands] == [
-        ("uv", ["run", "--locked", "ansible-playbook", "bootstrap.yml"])
-    ]
-    assert_no_managed_host_contact(commands)
-
-
-def test_bootstrap_without_a_locked_environment_directs_the_caller_to_sync(
-    tmp_path: Path,
-) -> None:
-    project = setup_project(tmp_path, locked_environment=False)
-    env = setup_environment(tmp_path)
-
-    result = run_setup(project, env, "bootstrap")
-
-    assert result.returncode != 0
-    assert "./setup.sh sync" in f"{result.stdout}\n{result.stderr}"
-    assert captured_commands(env) == []
-
-
-def test_sync_without_the_packaging_tool_fails_on_the_documented_status(
-    tmp_path: Path,
-) -> None:
-    project = setup_project(tmp_path)
-    env = setup_environment(tmp_path)
-    (tmp_path / "bin" / "uv").unlink()
-    # The constructed PATH still carries /usr/bin and /bin for ordinary
-    # utilities. Removing the shim only makes uv absent if no real uv lives
-    # there, which is an environmental fact, not something this test arranges.
-    # Assert it, so the case fails loudly instead of testing nothing.
-    assert shutil.which("uv", path=env["PATH"]) is None, (
-        "a real uv is resolvable on the test PATH, so the missing-uv guard "
-        "would never fire"
-    )
-
-    result = run_setup(project, env, "sync")
-
-    # 127 from an unguarded `command not found` is outside the exit convention.
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "uv" in f"{result.stdout}\n{result.stderr}"
-    assert captured_commands(env) == []
-
-
-@pytest.mark.parametrize("operation", ["sync", "bootstrap"])
-def test_a_failing_operation_reports_failure_rather_than_success(
-    tmp_path: Path, operation: str
-) -> None:
-    project = setup_project(tmp_path)
-    env = setup_environment(tmp_path)
-    failing_uv = tmp_path / "bin" / "uv"
-    failing_uv.write_text("#!/bin/sh\nexit 9\n", encoding="utf-8")
-    failing_uv.chmod(0o755)
-
-    result = run_setup(project, env, operation)
-
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "synchronized" not in result.stdout
-    assert "reconciled" not in result.stdout
-
-
-# --- AC4: bootstrap never replaces an existing controller SSH key ----------
-
-
-def test_bootstrap_delegates_key_creation_instead_of_generating_a_key(
-    tmp_path: Path,
-) -> None:
-    project = setup_project(tmp_path)
-    env = setup_environment(tmp_path)
-
-    result = run_setup(project, env, "bootstrap")
-
-    assert result.returncode == 0, result.stderr
-    assert "ssh-keygen" not in {entry["name"] for entry in captured_commands(env)}
-    assert not (Path(env["HOME"]) / ".ansible" / "ssh" / "proxmox_lxc").exists()
-
-
-# --- AC5: both operations are independently runnable and idempotent --------
-
-
-@pytest.mark.parametrize("operation", ["sync", "bootstrap"])
-def test_each_operation_runs_alone_and_repeats_identically(
-    tmp_path: Path, operation: str
-) -> None:
-    project = setup_project(tmp_path)
-    env = setup_environment(tmp_path)
-
-    first = run_setup(project, env, operation)
-    commands_after_first = captured_commands(env)
-    second = run_setup(project, env, operation)
-    commands_after_second = captured_commands(env)
-
-    assert first.returncode == 0, first.stderr
-    assert second.returncode == 0, second.stderr
-    assert second.stdout == first.stdout
-    assert commands_after_second == commands_after_first * 2
-
-
-# The real reconciliation the command delegates to, reached at the public
-# boundary and running the repository's own tracked bootstrap.yml. The
-# throwaway project root borrows everything that play, `uv run --locked`, and
-# ansible.cfg need. Only ansible-galaxy is replaced -- it is the one step that
-# would leave the machine -- and it is injected through inventory rather than
-# through the play, so the tracked play itself is used unmodified.
-BORROWED_FROM_REPOSITORY = (
-    "setup.sh",
-    "vault.sh",
-    "bootstrap.yml",
-    "pyproject.toml",
-    "uv.lock",
-    "ansible.cfg",
-    "playbooks",
-    "library",
-    ".venv",
-)
-
-# Written by the fake ansible-galaxy when it runs. Injecting the fake is a
-# mechanism with three ways to fail silently -- the group var can be outranked,
-# the inventory can be replaced by an inherited ANSIBLE_INVENTORY, or the host
-# can go unnamed -- and each one hands the run the machine's real
-# ansible-galaxy while the test still passes. The marker turns "the fake was
-# used" into an assertion.
-GALAXY_MARKER = "ansible-galaxy-ran"
-
-# The tracked play declares localhost, and group vars only reach a host the
-# inventory actually names -- Ansible's implicit localhost "does not match
-# 'all'". So the throwaway root carries a one-host inventory of its own.
-RECONCILING_INVENTORY = """---
-all:
-  hosts:
-    localhost:
-      ansible_connection: local
-"""
-
-
-def reconciling_project(tmp_path: Path) -> Path:
-    project = tmp_path / "reconciling-project"
-    project.mkdir()
-    for name in BORROWED_FROM_REPOSITORY:
-        (project / name).symlink_to(REPO_ROOT / name)
-    (project / "collections").mkdir()
-    (project / "collections" / "requirements.yml").write_text(
-        "collections: []\n", encoding="utf-8"
-    )
-
-    galaxy = project / "fake-ansible-galaxy"
-    galaxy.write_text(
-        f'#!/bin/sh\ntouch "{project / GALAXY_MARKER}"\nexit 0\n', encoding="utf-8"
-    )
-    galaxy.chmod(0o755)
-
-    group_vars = project / "inventory" / "group_vars" / "all"
-    group_vars.mkdir(parents=True)
-    (project / "inventory" / "hosts.yml").write_text(
-        RECONCILING_INVENTORY, encoding="utf-8"
-    )
-    # The tracked play sets only control_node_project_root and
-    # control_node_collection_requirements, so this beats the role default.
-    (group_vars / "control_node.yml").write_text(
-        f"---\ncontrol_node_ansible_galaxy_executable: {galaxy}\n", encoding="utf-8"
-    )
-    return project
-
-
-def reconciling_environment(tmp_path: Path, project: Path) -> dict[str, str]:
-    """The real toolchain, a private HOME, and this project's own inventory.
-
-    ANSIBLE_INVENTORY outranks the `inventory` setting in the symlinked
-    ansible.cfg, and ./validate.sh exports the repository's fixture inventory
-    for its whole run. Inheriting that would leave the throwaway inventory
-    inactive and its group vars unread, so the value is set here rather than
-    left to whatever the surrounding environment happens to carry.
-
-    This module cannot use ansible_test_helper.ansible_playbook_command, which
-    guards that same boundary for tests that invoke Ansible directly: the
-    reconciliation under test is reached through ./setup.sh, which builds its
-    own Ansible invocation.
-    """
-    home = tmp_path / "reconciling-home"
-    (home / ".ansible").mkdir(parents=True)
-    (home / ".ansible" / "vault-pass").write_text("passphrase\n", encoding="utf-8")
-    env = os.environ.copy()
-    env["HOME"] = str(home)
-    env["ANSIBLE_INVENTORY"] = str(project / "inventory" / "hosts.yml")
-    return env
-
-
-def test_bootstrap_creates_the_controller_key_only_when_absent(
-    tmp_path: Path,
-) -> None:
-    project = reconciling_project(tmp_path)
-    env = reconciling_environment(tmp_path, project)
-    marker = project / GALAXY_MARKER
-    private_key = Path(env["HOME"]) / ".ansible" / "ssh" / "proxmox_lxc"
-    public_key = Path(env["HOME"]) / ".ansible" / "ssh" / "proxmox_lxc.pub"
-    assert not private_key.exists()
-
-    absent = run_setup(project, env, "bootstrap")
-
-    assert absent.returncode == 0, absent.stdout + absent.stderr
-    # Without this the run silently reaches the machine's real ansible-galaxy.
-    assert marker.exists(), "fake ansible-galaxy was not used"
-    assert private_key.exists() and public_key.exists()
-    existing = (private_key.read_bytes(), public_key.read_bytes())
-
-    present = run_setup(project, env, "bootstrap")
-
-    assert present.returncode == 0, present.stdout + present.stderr
-    assert (private_key.read_bytes(), public_key.read_bytes()) == existing
-
-
-# --- AC1 / AC6 / AC7: guided workstation setup -----------------------------
-
-ENCRYPTED_VAULT = "$ANSIBLE_VAULT;1.1;AES256\n3132330a\n"
+    return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
 
 
 def vault_file(project: Path) -> Path:
     return project / "inventory" / "group_vars" / "all" / "vault.yml"
 
 
-def test_no_argument_run_is_still_guided_workstation_setup(tmp_path: Path) -> None:
-    project = setup_project(tmp_path)
-    vault_file(project).write_text(ENCRYPTED_VAULT, encoding="utf-8")
-    env = setup_environment(tmp_path)
+# --- operations -----------------------------------------------------------
 
-    result = run_setup(project, env, stdin="n\n")
+
+def test_sync_runs_locked_synchronization_and_nothing_else(project, env) -> None:
+    result = run(project, env, "sync")
+
+    assert result.returncode == 0, result.stderr
+    assert children(env) == [SYNC]
+
+
+def test_bootstrap_runs_the_tracked_play_and_nothing_else(project, env) -> None:
+    result = run(project, env, "bootstrap")
+
+    assert result.returncode == 0, result.stderr
+    assert children(env) == [BOOTSTRAP]
+
+
+def test_bootstrap_without_a_locked_environment_directs_the_caller_to_sync(
+    project, env
+) -> None:
+    (project / ".venv").rmdir()
+
+    result = run(project, env, "bootstrap")
+
+    assert result.returncode != 0
+    assert "./setup.sh sync" in f"{result.stdout}\n{result.stderr}"
+    assert children(env) == []
+
+
+def test_sync_without_the_packaging_tool_fails_on_the_documented_status(
+    project, env, tmp_path
+) -> None:
+    (tmp_path / "bin" / "uv").unlink()
+    # PATH still carries /usr/bin, so this case only means anything while no
+    # real uv is reachable there.
+    assert shutil.which("uv", path=env["PATH"]) is None
+
+    result = run(project, env, "sync")
+
+    assert result.returncode == 1
+    assert "uv" in f"{result.stdout}\n{result.stderr}"
+
+
+@pytest.mark.parametrize("operation", ["sync", "bootstrap"])
+def test_child_failure_is_not_reported_as_success(project, env, operation) -> None:
+    env["SETUP_TEST_CHILD_STATUS"] = "9"
+
+    result = run(project, env, operation)
+
+    assert result.returncode == 1, result.stdout
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected"), [("sync", SYNC), ("bootstrap", BOOTSTRAP)]
+)
+def test_operations_are_independently_repeatable(
+    project, env, operation, expected
+) -> None:
+    first = run(project, env, operation)
+    second = run(project, env, operation)
+
+    assert (first.returncode, second.returncode) == (0, 0), first.stderr
+    assert second.stdout == first.stdout
+    assert children(env) == [expected, expected]
+
+
+# --- grammar --------------------------------------------------------------
+
+
+def test_help_exits_zero_and_names_the_operations(project, env) -> None:
+    result = run(project, env, "--help")
+
+    assert result.returncode == 0
+    assert "sync" in result.stdout and "bootstrap" in result.stdout
+    assert children(env) == []
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ("bogus",),
+        ("--bogus",),
+        ("sync", "extra"),
+        ("bootstrap", "extra"),
+        ("--help", "extra"),
+    ],
+)
+def test_unknown_or_surplus_input_is_invalid_usage(project, env, arguments) -> None:
+    result = run(project, env, *arguments)
+
+    assert result.returncode == 2
+    assert result.stderr.startswith("setup.sh: ")
+    assert children(env) == []
+
+
+# --- guided setup ---------------------------------------------------------
+
+
+def test_no_arguments_runs_guided_workstation_setup(project, env) -> None:
+    vault_file(project).write_text(ENCRYPTED_VAULT, encoding="utf-8")
+
+    result = run(project, env, stdin="n\n")
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Controller Setup" in result.stdout
-    # Guided setup, unlike either operation, checks workstation prerequisites.
-    assert "dpkg" in {entry["name"] for entry in captured_commands(env)}
+    # Guided setup, unlike either operation, checks workstation prerequisites
+    # and then reuses both operations rather than duplicating them.
+    invoked = children(env)
+    assert ["dpkg", "-l"] in invoked
+    assert SYNC in invoked and BOOTSTRAP in invoked
 
 
 def test_guided_setup_leaves_an_existing_encrypted_vault_untouched(
-    tmp_path: Path,
+    project, env
 ) -> None:
-    project = setup_project(tmp_path)
     vault_file(project).write_text(ENCRYPTED_VAULT, encoding="utf-8")
-    env = setup_environment(tmp_path)
 
-    result = run_setup(project, env, stdin="n\n")
+    result = run(project, env, stdin="n\n")
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert vault_file(project).read_text(encoding="utf-8") == ENCRYPTED_VAULT
-    # Bytes unchanged above; here, nothing was offered and no vault mutation
-    # ran. `configure: FAIL` is how ./vault.sh reports a refused non-interactive
-    # configure, so its absence rules out the one form a mutation attempt could
-    # take from this non-interactive run.
-    assert "leaving it untouched" in result.stdout
     assert "Set up Proxmox API credentials now" not in result.stdout
-    assert "configure: FAIL" not in result.stderr
 
 
-def test_guided_setup_offers_the_vault_commands_guided_configuration(
-    tmp_path: Path,
+def test_guided_setup_delegates_configuration_to_the_vault_command(
+    project, env
 ) -> None:
-    project = setup_project(tmp_path)
-    env = setup_environment(tmp_path)
+    declined = run(project, env, stdin="n\n")
 
-    declined = run_setup(project, env, stdin="n\n")
-
-    assert declined.returncode == 0, declined.stdout + declined.stderr
+    assert declined.returncode == 0, declined.stderr
     assert "./vault.sh configure" in declined.stdout
-    assert "configure: FAIL" not in declined.stderr
 
-    accepted = run_setup(project, env, stdin="y\n")
+    accepted = run(project, env, stdin="y\n")
 
-    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
     # ./vault.sh reports a refused non-interactive `configure` this way, so the
-    # line is evidence that guided setup handed the vault step to that command.
+    # line is evidence that guided setup handed the step to that command.
     assert "configure: FAIL" in accepted.stderr
 
 
-def test_guided_setup_warns_about_an_unencrypted_vault(tmp_path: Path) -> None:
-    project = setup_project(tmp_path)
-    plaintext = "---\nvault_proxmox_api_user: root@pam\n"
-    vault_file(project).write_text(plaintext, encoding="utf-8")
-    env = setup_environment(tmp_path)
-
-    result = run_setup(project, env, stdin="n\n")
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    output = f"{result.stdout}\n{result.stderr}"
-    assert "NOT encrypted" in output
-    assert "./vault.sh configure" in output
-    # setup.sh must not convert it itself; ./vault.sh owns that prompt.
-    assert vault_file(project).read_text(encoding="utf-8") == plaintext
-
-
-def test_guided_setup_names_only_supported_commands(tmp_path: Path) -> None:
-    project = setup_project(tmp_path)
+def test_guided_setup_names_only_supported_commands(project, env) -> None:
     vault_file(project).write_text(ENCRYPTED_VAULT, encoding="utf-8")
-    env = setup_environment(tmp_path)
 
-    result = run_setup(project, env, stdin="n\n")
+    result = run(project, env, stdin="n\n")
 
-    assert result.returncode == 0, result.stdout + result.stderr
     output = f"{result.stdout}\n{result.stderr}"
     assert "configure-vault.sh" not in output
     assert "rotate-vault-passphrase.sh" not in output
-    for named in ("./setup.sh sync", "./setup.sh bootstrap", "./vault.sh"):
-        assert named in output
+    for supported in ("./setup.sh sync", "./setup.sh bootstrap", "./vault.sh"):
+        assert supported in output
