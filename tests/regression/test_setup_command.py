@@ -304,13 +304,15 @@ def test_each_operation_runs_alone_and_repeats_identically(
 
 
 # The real reconciliation the command delegates to, reached at the public
-# boundary. The throwaway project root borrows everything `uv run --locked`
-# and ansible.cfg need from the repository, and carries its own bootstrap.yml
-# applying the real role with test paths. Only ansible-galaxy is faked -- it is
-# the one step that would leave the machine.
+# boundary and running the repository's own tracked bootstrap.yml. The
+# throwaway project root borrows everything that play, `uv run --locked`, and
+# ansible.cfg need. Only ansible-galaxy is replaced -- it is the one step that
+# would leave the machine -- and it is injected through inventory rather than
+# through the play, so the tracked play itself is used unmodified.
 BORROWED_FROM_REPOSITORY = (
     "setup.sh",
     "vault.sh",
+    "bootstrap.yml",
     "pyproject.toml",
     "uv.lock",
     "ansible.cfg",
@@ -319,19 +321,14 @@ BORROWED_FROM_REPOSITORY = (
     ".venv",
 )
 
-RECONCILING_BOOTSTRAP_PLAY = """---
-- name: Bootstrap Ansible control node
-  hosts: localhost
-  connection: local
-  gather_facts: true
-  become: false
-  vars:
-    control_node_project_root: "{{ playbook_dir }}"
-    control_node_collection_requirements: >-
-      {{ [playbook_dir, 'collections', 'requirements.yml'] | path_join }}
-    control_node_ansible_galaxy_executable: "{{ playbook_dir }}/fake-ansible-galaxy"
-  roles:
-    - base/control_node_bootstrap
+# The tracked play declares localhost, and group vars only reach a host the
+# inventory actually names -- Ansible's implicit localhost "does not match
+# 'all'". So the throwaway root carries a one-host inventory of its own.
+RECONCILING_INVENTORY = """---
+all:
+  hosts:
+    localhost:
+      ansible_connection: local
 """
 
 
@@ -344,11 +341,21 @@ def reconciling_project(tmp_path: Path) -> Path:
     (project / "collections" / "requirements.yml").write_text(
         "collections: []\n", encoding="utf-8"
     )
-    (project / "inventory" / "group_vars" / "all").mkdir(parents=True)
-    (project / "bootstrap.yml").write_text(RECONCILING_BOOTSTRAP_PLAY, encoding="utf-8")
+
     galaxy = project / "fake-ansible-galaxy"
     galaxy.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     galaxy.chmod(0o755)
+
+    group_vars = project / "inventory" / "group_vars" / "all"
+    group_vars.mkdir(parents=True)
+    (project / "inventory" / "hosts.yml").write_text(
+        RECONCILING_INVENTORY, encoding="utf-8"
+    )
+    # The tracked play sets only control_node_project_root and
+    # control_node_collection_requirements, so this beats the role default.
+    (group_vars / "control_node.yml").write_text(
+        f"---\ncontrol_node_ansible_galaxy_executable: {galaxy}\n", encoding="utf-8"
+    )
     return project
 
 
@@ -416,11 +423,13 @@ def test_guided_setup_leaves_an_existing_encrypted_vault_untouched(
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert vault_file(project).read_text(encoding="utf-8") == ENCRYPTED_VAULT
-    # The vault step reported the encrypted file and stopped there: no offer
-    # was printed, so nothing could accept one. (An accepted offer is observed
-    # separately, in the missing-vault case below.)
+    # Bytes unchanged above; here, nothing was offered and no vault mutation
+    # ran. `configure: FAIL` is how ./vault.sh reports a refused non-interactive
+    # configure, so its absence rules out the one form a mutation attempt could
+    # take from this non-interactive run.
     assert "leaving it untouched" in result.stdout
     assert "Set up Proxmox API credentials now" not in result.stdout
+    assert "configure: FAIL" not in result.stderr
 
 
 def test_guided_setup_offers_the_vault_commands_guided_configuration(
