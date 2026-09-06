@@ -244,9 +244,14 @@ def test_guided_setup_leaves_an_existing_encrypted_vault_untouched(
 def test_guided_setup_delegates_configuration_to_the_vault_command(
     project, env
 ) -> None:
+    # An unencrypted vault takes the same offer, with a warning: setup.sh does
+    # not convert it, ./vault.sh configure owns that prompt.
+    vault_file(project).write_text("vault_proxmox_api_user: plain\n", encoding="utf-8")
+
     declined = run(project, env, stdin="n\n")
 
     assert declined.returncode == 0, declined.stderr
+    assert "NOT encrypted" in declined.stdout
     assert "./vault.sh configure" in declined.stdout
 
     accepted = run(project, env, stdin="y\n")

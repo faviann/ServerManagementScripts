@@ -289,10 +289,10 @@ def test_controller_prerequisites_name_supported_virtualenv_repair(
 
 def test_tracked_bootstrap_play_reconciles_locally_through_the_role() -> None:
     """`./setup.sh bootstrap` is only as good as the play it delegates to."""
-    play = yaml.safe_load(
-        (REPO_ROOT / "bootstrap.yml").read_text(encoding="utf-8")
-    )[0]
+    plays = yaml.safe_load((REPO_ROOT / "bootstrap.yml").read_text(encoding="utf-8"))
 
+    assert len(plays) == 1
+    play = plays[0]
     assert play["roles"] == ["base/control_node_bootstrap"]
     # The operation contacts no managed host because the play never leaves
     # localhost -- not because a test enumerates transports it might use.
