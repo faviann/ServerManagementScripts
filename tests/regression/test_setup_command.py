@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -240,6 +241,14 @@ def test_sync_without_the_packaging_tool_fails_on_the_documented_status(
     project = setup_project(tmp_path)
     env = setup_environment(tmp_path)
     (tmp_path / "bin" / "uv").unlink()
+    # The constructed PATH still carries /usr/bin and /bin for ordinary
+    # utilities. Removing the shim only makes uv absent if no real uv lives
+    # there, which is an environmental fact, not something this test arranges.
+    # Assert it, so the case fails loudly instead of testing nothing.
+    assert shutil.which("uv", path=env["PATH"]) is None, (
+        "a real uv is resolvable on the test PATH, so the missing-uv guard "
+        "would never fire"
+    )
 
     result = run_setup(project, env, "sync")
 
@@ -321,6 +330,14 @@ BORROWED_FROM_REPOSITORY = (
     ".venv",
 )
 
+# Written by the fake ansible-galaxy when it runs. Injecting the fake is a
+# mechanism with three ways to fail silently -- the group var can be outranked,
+# the inventory can be replaced by an inherited ANSIBLE_INVENTORY, or the host
+# can go unnamed -- and each one hands the run the machine's real
+# ansible-galaxy while the test still passes. The marker turns "the fake was
+# used" into an assertion.
+GALAXY_MARKER = "ansible-galaxy-ran"
+
 # The tracked play declares localhost, and group vars only reach a host the
 # inventory actually names -- Ansible's implicit localhost "does not match
 # 'all'". So the throwaway root carries a one-host inventory of its own.
@@ -343,7 +360,9 @@ def reconciling_project(tmp_path: Path) -> Path:
     )
 
     galaxy = project / "fake-ansible-galaxy"
-    galaxy.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    galaxy.write_text(
+        f'#!/bin/sh\ntouch "{project / GALAXY_MARKER}"\nexit 0\n', encoding="utf-8"
+    )
     galaxy.chmod(0o755)
 
     group_vars = project / "inventory" / "group_vars" / "all"
@@ -359,13 +378,26 @@ def reconciling_project(tmp_path: Path) -> Path:
     return project
 
 
-def reconciling_environment(tmp_path: Path) -> dict[str, str]:
-    """The real toolchain, but a private HOME the controller key lands in."""
+def reconciling_environment(tmp_path: Path, project: Path) -> dict[str, str]:
+    """The real toolchain, a private HOME, and this project's own inventory.
+
+    ANSIBLE_INVENTORY outranks the `inventory` setting in the symlinked
+    ansible.cfg, and ./validate.sh exports the repository's fixture inventory
+    for its whole run. Inheriting that would leave the throwaway inventory
+    inactive and its group vars unread, so the value is set here rather than
+    left to whatever the surrounding environment happens to carry.
+
+    This module cannot use ansible_test_helper.ansible_playbook_command, which
+    guards that same boundary for tests that invoke Ansible directly: the
+    reconciliation under test is reached through ./setup.sh, which builds its
+    own Ansible invocation.
+    """
     home = tmp_path / "reconciling-home"
     (home / ".ansible").mkdir(parents=True)
     (home / ".ansible" / "vault-pass").write_text("passphrase\n", encoding="utf-8")
     env = os.environ.copy()
     env["HOME"] = str(home)
+    env["ANSIBLE_INVENTORY"] = str(project / "inventory" / "hosts.yml")
     return env
 
 
@@ -373,7 +405,8 @@ def test_bootstrap_creates_the_controller_key_only_when_absent(
     tmp_path: Path,
 ) -> None:
     project = reconciling_project(tmp_path)
-    env = reconciling_environment(tmp_path)
+    env = reconciling_environment(tmp_path, project)
+    marker = project / GALAXY_MARKER
     private_key = Path(env["HOME"]) / ".ansible" / "ssh" / "proxmox_lxc"
     public_key = Path(env["HOME"]) / ".ansible" / "ssh" / "proxmox_lxc.pub"
     assert not private_key.exists()
@@ -381,6 +414,8 @@ def test_bootstrap_creates_the_controller_key_only_when_absent(
     absent = run_setup(project, env, "bootstrap")
 
     assert absent.returncode == 0, absent.stdout + absent.stderr
+    # Without this the run silently reaches the machine's real ansible-galaxy.
+    assert marker.exists(), "fake ansible-galaxy was not used"
     assert private_key.exists() and public_key.exists()
     existing = (private_key.read_bytes(), public_key.read_bytes())
 
