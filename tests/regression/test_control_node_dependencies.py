@@ -173,12 +173,16 @@ printf 'version: %s\\n' "$role_version" > "$install_path/$role_name/meta/.galaxy
     assert result.returncode == 0, result.stdout + result.stderr
     assert private_key.exists()
     assert public_key.exists()
+    existing_key = (private_key.read_bytes(), public_key.read_bytes())
     second_result = run_playbook(
         REPO_ROOT / "tests" / "regression" / "fixtures" / "control_node_bootstrap_test.yml",
         extra_vars=bootstrap_extra_vars,
         env=bootstrap_env,
     )
     assert second_result.returncode == 0, second_result.stdout + second_result.stderr
+    # The fleet already trusts this key, so reconciliation creates one when
+    # absent and must never replace it.
+    assert (private_key.read_bytes(), public_key.read_bytes()) == existing_key
     invocations = galaxy_log.read_text(encoding="utf-8").splitlines()
     role_installs = [line for line in invocations if line.startswith("role install ")]
     assert len(role_installs) == 1
@@ -281,3 +285,16 @@ def test_controller_prerequisites_name_supported_virtualenv_repair(
     assert result.returncode == 2
     assert "Run `./setup.sh sync`" in output
     assert "uv sync --locked" not in output
+
+
+def test_tracked_bootstrap_play_reconciles_locally_through_the_role() -> None:
+    """`./setup.sh bootstrap` is only as good as the play it delegates to."""
+    plays = yaml.safe_load((REPO_ROOT / "bootstrap.yml").read_text(encoding="utf-8"))
+
+    assert len(plays) == 1
+    play = plays[0]
+    assert play["roles"] == ["base/control_node_bootstrap"]
+    # The operation contacts no managed host because the play never leaves
+    # localhost -- not because a test enumerates transports it might use.
+    assert play["hosts"] == "localhost"
+    assert play["connection"] == "local"

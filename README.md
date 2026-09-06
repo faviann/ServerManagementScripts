@@ -21,11 +21,18 @@ bootstrap and installs `uv` itself when needed.
 
 The `setup.sh` script will:
 - ✅ Install system prerequisites (`python3`, `curl`, `sshpass`)
-- ✅ Generate or prompt for vault password
-- ✅ Prompt for Proxmox API credentials (user, token ID, token secret)
-- ✅ Install `uv` when needed and run `uv sync --locked`
-- ✅ Generate SSH keys
-- ✅ Create and encrypt vault.yml with your credentials
+- ✅ Verify the machine-local vault password file
+- ✅ Install `uv` when needed and synchronize the locked environment
+- ✅ Reconcile collections, external roles, and the controller SSH key
+- ✅ Offer `./vault.sh configure` when no encrypted vault exists
+
+On an already-configured machine — a second worktree, say — the two operations
+run on their own, non-interactively:
+
+```bash
+./setup.sh sync       # locked dependency synchronization only
+./setup.sh bootstrap  # collections, external roles, controller SSH key
+```
 
 **After setup, validate your credentials:**
 
@@ -77,8 +84,8 @@ sudo apt install -y python3 curl sshpass
 ### Ansible Dependencies
 
 Python dependencies are declared in `pyproject.toml` and locked in `uv.lock`.
-Run `./setup.sh` for the guided path, or `uv sync --locked` directly if `uv` is already installed.
-Collections and external roles are prepared by `uv run --locked ansible-playbook bootstrap.yml`.
+Run `./setup.sh` for the guided path, or `./setup.sh sync` if the workstation is already prepared.
+Collections and external roles are prepared by `./setup.sh bootstrap`.
 
 IMPORTANT: Some LXC operations (notably changing LXC "feature" flags such as `nesting=1` or `keyctl=1`) require privileged API access and are only permitted when performed by the local Proxmox root account (`root@pam`). If your automation will set or change LXC feature flags, create and use an API token for `root@pam` (see "Creating API Tokens in Proxmox" below). If you prefer not to use a `root@pam` token, avoid providing `features` in your LXC specs and configure those flags manually on the Proxmox host.
 
@@ -133,13 +140,13 @@ If you prefer manual setup or need to troubleshoot:
    ```bash
    curl -LsSf https://astral.sh/uv/install.sh | sh
    export PATH="$HOME/.local/bin:$PATH"
-   uv sync --locked
+   ./setup.sh sync
    ```
 
 4. **Run bootstrap:**
 
    ```bash
-   uv run --locked ansible-playbook bootstrap.yml
+   ./setup.sh bootstrap
    ```
 
    This creates SSH keys and installs collections and external roles.
@@ -153,18 +160,10 @@ If you prefer manual setup or need to troubleshoot:
 
 5. **Configure Proxmox API credentials:**
 
-   Run the interactive configuration script:
+   Run the guided vault configuration:
 
    ```bash
-   ./configure-vault.sh
-   ```
-
-   Or manually create and encrypt vault:
-
-   ```bash
-   cp inventory/group_vars/all/vault.yml.example inventory/group_vars/all/vault.yml
-   # Edit vault.yml with your actual credentials
-   uv run --locked ansible-vault encrypt inventory/group_vars/all/vault.yml
+   ./vault.sh configure
    ```
 
    **To generate a Proxmox API token:**
@@ -366,12 +365,12 @@ Builds the effective LXC specs from tier and capability group variables, ensures
 ### Module not found
 
 - Verify collections installed: `ansible-galaxy collection list | grep proxmox`
-- Re-run `uv run --locked ansible-playbook bootstrap.yml` to reinstall collections after updating dependency files
+- Re-run `./setup.sh bootstrap` to reinstall collections after updating dependency files
 
 ### Python import errors
 
 - Verify Python packages: `uv run --locked python -c "import proxmoxer, requests"`
-- Re-run `uv sync --locked` to rebuild the controller Python environment if packages drift
+- Re-run `./setup.sh sync` to rebuild the controller Python environment if packages drift
 
 ## Migration from Legacy Implementation
 
